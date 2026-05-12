@@ -1,12 +1,19 @@
 name: Release
 
-# Fires on any annotated tag matching `v*` (e.g. v0.1.2, v0.2.0-rc1).
-# Manual workflow_dispatch is intentionally NOT enabled — every release
-# must be tied to a tag for auditability and so Sparkle's appcast can
-# point at a stable artefact URL.
+# ┌──────────────────────────────────────────────────────────────────┐
+# │ DISABLED as of 2026-05-12 — GitHub-hosted `macos-latest` runners │
+# │ are still on macOS 15 / Xcode 16 and reject our 26.0 deployment  │
+# │ target with: "supported deployment target versions is 10.13 to   │
+# │ 15.5.99". Releases happen locally via:                            │
+# │   ./scripts/release.sh                                            │
+# │   ./scripts/publish_release.sh                                    │
+# │ (see docs/build.md "Cutting a release"). Re-enable the `push:    │
+# │ tags: ['v*']` trigger below once `macos-26` images are available.│
+# └──────────────────────────────────────────────────────────────────┘
 on:
-  push:
-    tags: ['v*']
+  # push:
+  #   tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write   # Commit docs/appcast.xml back to main + create GitHub Release.

@@ -72,96 +72,90 @@ On first launch you'll be prompted for Microphone and Accessibility — the onbo
 
 The project is signed with Apple Developer Team ID `49T6U8DQXZ` (see `project.yml` → `DEVELOPMENT_TEAM`) and uses a stable designated requirement (`signing/NoType.xcrequirements` — `designated => identifier "app.notype"`) so TCC grants and Keychain ACLs survive dev rebuilds.
 
-### Cutting a release — the happy path
+### Cutting a release — the happy path (local-only, until macos-26 lands on GitHub runners)
 
-Releases are driven by **git tags**. Pushing `vX.Y.Z` fires `.github/workflows/release.yml` which builds + notarizes on a GitHub-hosted macOS runner, signs the Sparkle artefact, publishes the GitHub Release, and commits the updated `docs/appcast.xml` back to `main`. End-users on an older version see the update via Sparkle within 24 h (or immediately if they re-open the main window after the next check fires).
+> ⚠️ **CI is currently disabled.** GitHub-hosted `macos-latest` runners are still on macOS 15 / Xcode 16 and reject our `MACOSX_DEPLOYMENT_TARGET = 26.0` with "supported range is 10.13 to 15.5.99". The CI workflow `.github/workflows/release.yml` is preserved but its tag trigger is commented out — releases happen locally on this Mac until GitHub ships `macos-26`. Re-enable the workflow trigger at that point; the steps inside are still correct.
 
-```bash
-# 1. Bump version on main (PR or direct commit).
-#    Edit NoType/Info.plist:
-#      CFBundleShortVersionString  →  X.Y.Z      (semantic)
-#      CFBundleVersion              →  N         (monotonic integer; > previous)
-#    Add an entry to CHANGELOG.md describing what changed.
-
-# 2. Tag the commit. Tag name MUST be `v` + CFBundleShortVersionString.
-git tag v0.1.2
-git push origin v0.1.2
-```
-
-That's it. Watch the workflow on GitHub Actions; ~10–15 minutes later the release is live, the appcast has the new `<item>`, and existing installs will pick it up on their next scheduled check.
-
-### What the workflow does
-
-1. Checkout at the tag (full history so the appcast push to `main` works).
-2. Install xcodegen + Sparkle CLI tools (downloaded as a tarball from Sparkle's release page; pinned via `SPARKLE_VERSION` env var in the workflow).
-3. Import the Developer ID Application certificate from GitHub Secrets.
-4. Create the `notype-notary` notarytool keychain profile from Apple secrets.
-5. Sanity-check that the tag version equals `CFBundleShortVersionString`.
-6. Run `scripts/release.sh` — archive + export + notarize + staple + DMG, plus the new `.zip` for Sparkle.
-7. Run `sign_update` against the `.zip` to produce the EdDSA signature.
-8. Switch to `main`, run `scripts/sparkle_appcast_item.sh` to insert a new `<item>` into `docs/appcast.xml`, commit, push.
-9. Create the GitHub Release with the `.dmg` and `.zip` attached, body from `CHANGELOG.md`.
-
-Tags with a hyphen (`v0.1.2-rc1`, `v0.2.0-beta`) are marked as **prerelease** on GitHub but **still appear in the appcast** — Sparkle has no separate prerelease channel yet. If you want to test a release without offering it to existing users, hold the push to `main` (i.e. tag a side branch and delete the appcast commit before merging).
-
-### Required GitHub Secrets
-
-The workflow needs six secrets in **Settings → Secrets and variables → Actions**:
-
-| Name                              | Value                                                                                    |
-|---|---|
-| `DEVELOPER_ID_CERT_P12`           | base64 of `Developer ID Application` certificate exported as `.p12`                       |
-| `DEVELOPER_ID_CERT_PASSWORD`      | password set when exporting the `.p12`                                                    |
-| `APPLE_ID`                        | Apple ID email used for notarization                                                       |
-| `APPLE_APP_PASSWORD`              | app-specific password generated at [appleid.apple.com](https://appleid.apple.com) → Sign-In and Security → App-Specific Passwords |
-| `TEAM_ID`                         | `49T6U8DQXZ`                                                                              |
-| `SPARKLE_ED_PRIVATE_KEY`          | base64 EdDSA private key exported via `generate_keys -x sparkle_private_key.txt`           |
-
-Exporting the certificate (one-time):
+Releases now go through two scripts:
 
 ```bash
-# Find it in the login Keychain
-security find-identity -p codesigning -v
-# Export to a .p12 (Keychain Access app: right-click → Export, or:)
-security export -k login.keychain -t identities -f pkcs12 \
-    -P "<choose a strong password>" \
-    -o ~/Desktop/NoType-DeveloperID.p12
+# 1. On main, bump version + add CHANGELOG entry. Commit & push.
+#    NoType/Info.plist:
+#      CFBundleShortVersionString  →  X.Y.Z      (semantic; tag will be vX.Y.Z)
+#      CFBundleVersion             →  N          (monotonic integer; > previous)
+#    CHANGELOG.md:
+#      ## [X.Y.Z] — YYYY-MM-DD
+#      ...what changed...
 
-# Convert to base64 for GitHub Secrets
-base64 -i ~/Desktop/NoType-DeveloperID.p12 | pbcopy
-# Paste into the DEVELOPER_ID_CERT_P12 secret.
+# 2. Build + notarize + DMG + .zip locally (~10 minutes; ~5 of that is Apple notary).
+./scripts/release.sh
+
+# 3. Sign the .zip, patch docs/appcast.xml, tag, push, create GitHub Release.
+./scripts/publish_release.sh
 ```
 
-The Sparkle ED key:
+That's the whole flow. `publish_release.sh` is idempotent — if a Release for the current version already exists on GitHub, it exits without doing anything.
+
+Installed copies of NoType see the new version through their next scheduled Sparkle check (≤ 24 h), or immediately if the user opens the main window after a launch with no recent check.
+
+### What each script does
+
+`scripts/release.sh`:
+1. `xcodegen generate` (regenerates `NoType.xcodeproj` from `project.yml`).
+2. `xcodebuild archive` (Release configuration) + export with Developer ID.
+3. `notarytool submit --wait` on the `.app` → staple ticket.
+4. Build the `.dmg`, sign it, notarize the `.dmg`, staple.
+5. `ditto -c -k --keepParent` the notarized `.app` into `build/NoType-<version>.zip` (Sparkle's artefact).
+
+`scripts/publish_release.sh`:
+1. Find `sign_update` (Sparkle CLI tool — checks PATH, `~/Downloads/Sparkle-*/bin/`, `/tmp/sparkle/bin/`, or `--sparkle-bin <path>` flag).
+2. Sign `build/NoType-<version>.zip` with the EdDSA private key (read from Keychain — placed there by `generate_keys` once at setup time).
+3. Extract the version's section from `CHANGELOG.md` for release notes.
+4. Patch `docs/appcast.xml` via `scripts/sparkle_appcast_item.sh`, commit & push to `main`.
+5. Create + push tag `vX.Y.Z`.
+6. `gh release create` with the `.dmg` and `.zip` attached, release notes from CHANGELOG.
+
+Hyphenated tags (`v0.1.2-rc1`, `v0.2.0-beta`) are uploaded as **prerelease** on GitHub — they still appear in the appcast, so installed copies will pick them up. To test a release before serving it to anyone, run `publish_release.sh --dry-run` first.
+
+### Required local tooling (one-time setup)
 
 ```bash
-# Sparkle tools live in the cask; the CLI is in /Applications/Sparkle.app/Contents/MacOS/
-brew install --cask sparkle
-# Or download the tarball — see .github/workflows/release.yml for the URL.
+brew install xcodegen
+brew install gh                            # GitHub CLI
+gh auth login                              # log into your GitHub account
 
-generate_keys                                        # Stores the private key in Keychain
-generate_keys -x sparkle_private_key.txt             # Exports a base64 copy for the secret
-generate_keys -p                                     # Prints the public key — paste into Info.plist
+# Sparkle CLI tools (sign_update). Download the tarball once — the
+# `--cask sparkle` only installs the Test App, not the CLI tools.
+SPARKLE_VERSION=2.6.4
+curl -fsSL -o /tmp/sparkle.tar.xz \
+  "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz"
+mkdir -p /tmp/sparkle && tar -xf /tmp/sparkle.tar.xz -C /tmp/sparkle
+# publish_release.sh will auto-find sign_update under /tmp/sparkle/bin/ or ~/Downloads/Sparkle-*/bin.
+
+# One-time: Apple Developer ID setup (already done on this Mac).
+#   1. "Developer ID Application" cert in login Keychain
+#      (verify with: security find-identity -p codesigning -v)
+#   2. notarytool keychain profile named `notype-notary`:
+#      xcrun notarytool store-credentials notype-notary \
+#          --apple-id "<id>" --team-id "49T6U8DQXZ"
+
+# One-time: Sparkle EdDSA keypair (already done — see git history for the
+# public key in Info.plist, private key is in Keychain + your password manager).
 ```
 
-Paste the contents of `sparkle_private_key.txt` into the `SPARKLE_ED_PRIVATE_KEY` GitHub Secret. Delete the local file once it's safely in the secret + your password manager (lose it = future updates rejected).
+**Do not run `scripts/release.sh` from an agent** — it talks to Apple's notary service and ships a real binary; let the human invoke it.
 
-### Running the script locally (without CI)
+### CI secrets — still configured, currently unused
 
-`scripts/release.sh` is fully usable on its own when you need to validate the release pipeline without triggering CI. It produces `build/NoType-<version>.dmg` AND `build/NoType-<version>.zip`, and prints the EdDSA signature for the zip (if Sparkle's `sign_update` is on PATH).
-
-**Do not run `scripts/release.sh` from an agent** — it talks to Apple's notary service and ships a real binary; let the user invoke it.
+The six GitHub Secrets set up for the CI path (`DEVELOPER_ID_CERT_P12`, `DEVELOPER_ID_CERT_PASSWORD`, `APPLE_ID`, `APPLE_APP_PASSWORD`, `TEAM_ID`, `SPARKLE_ED_PRIVATE_KEY`) stay in place. They'll start being read again the moment we re-enable the workflow trigger in `.github/workflows/release.yml` once GitHub adds `macos-26` runners. No action needed in the meantime.
 
 ### GitHub Pages — one-time setup
 
-The appcast is served from `https://weylandd.github.io/NoType/appcast.xml`. To enable:
+The appcast is served from `https://weylandd.github.io/NoType/appcast.xml`. Already enabled:
 
-1. Repo Settings → Pages.
-2. Source: `Deploy from a branch`.
-3. Branch: `main`, Folder: `/docs`.
-4. Save. ~30 s later the URL resolves to the live XML.
+- Settings → Pages → Source: `Deploy from a branch`, Branch: `main`, Folder: `/docs`.
 
-That's it; the release workflow pushes new items into `docs/appcast.xml` on `main`, and Pages re-deploys automatically.
+`publish_release.sh` commits new `<item>` entries to `docs/appcast.xml` on `main`; Pages re-deploys automatically (~30 s).
 
 ---
 
