@@ -93,4 +93,3 @@ struct ErrorPayload: Equatable {
     var retryKind: RetryKind = .neutral
     var secondaryLabel: String? = nil
 }
-
