@@ -21,5 +21,34 @@
     <link>https://weylandd.github.io/NoType/appcast.xml</link>
     <description>NoType release feed for Sparkle 2 auto-updates.</description>
     <language>en</language>
+    <item>
+      <title>Version 0.1.2-rc1</title>
+      <pubDate>Tue, 12 May 2026 20:16:47 +0000</pubDate>
+      <sparkle:version>3</sparkle:version>
+      <sparkle:shortVersionString>0.1.2-rc1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+First release through the new auto-update pipeline. Functionally
+equivalent to 0.1.1; the goal of this RC is to validate end-to-end
+that GitHub Actions builds + notarizes + Sparkle-signs the artefact
+and that an installed 0.1.1 picks up the new version via the in-app
+banner.
+
+### Added
+- Sparkle 2 auto-updates. A small "Update to X.Y.Z" banner appears
+  in the main window sidebar when a new version is published; click
+  to download, verify EdDSA signature, and relaunch on the new build.
+- Daily background check via the Sparkle scheduler (no UI to disable
+  in this release — auto-only by design for v1).
+- CI release pipeline (`.github/workflows/release.yml`): tag `v*`
+  triggers build → notarize → sign → publish GitHub Release + patch
+  `docs/appcast.xml` on `main`.
+
+---
+      ]]></description>
+      <enclosure url="https://github.com/weylandd/NoType/releases/download/v0.1.2-rc1/NoType-0.1.2-rc1.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="L025CNrHXaOgyj6WQV5CQ2SeU7KHoYrKUqG1gJzt25wpvYr5+axFz0R6OFs6jYkPsTiHrcszYWNQXvPTZs98Dw==" length="5940209" />
+    </item>
   </channel>
 </rss>
