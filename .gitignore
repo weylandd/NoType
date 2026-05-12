@@ -1,0 +1,49 @@
+# macOS
+.DS_Store
+**/.DS_Store
+._*
+
+# Xcode
+build/
+**/build/
+DerivedData/
+**/DerivedData/
+*.xcuserstate
+*.xcuserdatad
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+
+# Swift Package Manager
+.build/
+Packages/
+Package.resolved
+.swiftpm/
+
+# CocoaPods (not used, future-proofing)
+Pods/
+
+# Secrets
+*.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.p12
+*.cer
+*.mobileprovision
+secrets/
+.envrc
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude Code — personal harness overrides (settings.json itself is shared)
+.claude/settings.local.json
+
+# Editor / OS junk
+*~
+Thumbs.db

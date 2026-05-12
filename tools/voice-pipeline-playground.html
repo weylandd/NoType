@@ -1,0 +1,1893 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Aura — конвейер распознавания голоса</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --panel: #141414;
+    --panel-2: #1c1c1c;
+    --border: #2a2a2a;
+    --border-strong: #3a3a3a;
+    --text: #e5e5e5;
+    --muted: #8a8a8a;
+    --dim: #555;
+    --accent: #ff6b35;
+    --accent-soft: rgba(255, 107, 53, 0.12);
+    --cached: #4ade80;
+    --cached-soft: rgba(74, 222, 128, 0.10);
+    --variable: #fbbf24;
+    --variable-soft: rgba(251, 191, 36, 0.10);
+    --info: #60a5fa;
+    --info-soft: rgba(96, 165, 250, 0.10);
+    --error: #ef4444;
+    --new: #c084fc;
+    --new-soft: rgba(192, 132, 252, 0.10);
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection { background: var(--accent-soft); color: var(--text); }
+
+  .app {
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    grid-template-rows: 56px 1fr;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  header {
+    grid-column: 1 / 3;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    gap: 16px;
+  }
+
+  .logo {
+    font-weight: 600;
+    font-size: 14px;
+    letter-spacing: -0.01em;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .logo::before {
+    content: "";
+    width: 10px; height: 10px;
+    background: var(--accent);
+    border-radius: 50%;
+    box-shadow: 0 0 14px var(--accent);
+  }
+  .logo small {
+    color: var(--muted);
+    font-weight: 400;
+    margin-left: 4px;
+  }
+  .logo .v {
+    margin-left: 8px;
+    font-size: 10px;
+    color: var(--new);
+    background: var(--new-soft);
+    border: 1px solid rgba(192,132,252,0.25);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+  }
+
+  .controls {
+    margin-left: auto;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .control-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 4px;
+  }
+  .control-group label {
+    color: var(--muted);
+    font-size: 12px;
+    padding: 0 8px;
+  }
+  .control-group button {
+    background: transparent;
+    color: var(--muted);
+    border: none;
+    padding: 4px 10px;
+    font: inherit;
+    font-size: 12px;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: all 120ms;
+  }
+  .control-group button:hover { color: var(--text); }
+  .control-group button.active {
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+
+  /* sidebar */
+  aside {
+    border-right: 1px solid var(--border);
+    background: var(--panel);
+    overflow-y: auto;
+    padding: 12px 0;
+  }
+
+  .step-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .step {
+    position: relative;
+    padding: 10px 18px 10px 44px;
+    cursor: pointer;
+    color: var(--muted);
+    border-left: 2px solid transparent;
+    transition: all 120ms;
+    user-select: none;
+  }
+  .step:hover { color: var(--text); background: rgba(255,255,255,0.02); }
+  .step.active {
+    color: var(--text);
+    background: var(--accent-soft);
+    border-left-color: var(--accent);
+  }
+  .step .num {
+    position: absolute;
+    left: 14px;
+    top: 12px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: 1px solid var(--border-strong);
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 10px;
+    display: grid;
+    place-items: center;
+    background: var(--panel);
+  }
+  .step.active .num {
+    background: var(--accent);
+    color: #000;
+    border-color: var(--accent);
+  }
+  .step.passed .num {
+    background: rgba(74, 222, 128, 0.15);
+    border-color: var(--cached);
+    color: var(--cached);
+  }
+  .step .label {
+    font-size: 13px;
+    line-height: 1.3;
+  }
+  .step .sub {
+    display: block;
+    font-size: 11px;
+    color: var(--dim);
+    margin-top: 2px;
+    font-family: var(--mono);
+  }
+  .step .changed {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--new);
+    margin-left: 6px;
+    vertical-align: 2px;
+  }
+
+  /* main */
+  main {
+    overflow: hidden;
+    display: grid;
+    grid-template-rows: 1fr auto;
+    height: calc(100vh - 56px);
+  }
+
+  .stage {
+    overflow-y: auto;
+    padding: 28px 36px 24px;
+  }
+
+  .stage h1 {
+    margin: 0 0 4px;
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+  }
+  .stage .stage-tag {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid var(--accent-soft);
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-bottom: 12px;
+  }
+  .stage .stage-tag.changed {
+    color: var(--new);
+    background: var(--new-soft);
+    border-color: rgba(192,132,252,0.3);
+  }
+  .stage h2 {
+    margin: 24px 0 10px;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    font-weight: 500;
+  }
+  .stage p { margin: 0 0 12px; color: #cfcfcf; }
+  .stage p strong { color: var(--text); font-weight: 600; }
+
+  code, kbd {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    padding: 1px 5px;
+    border-radius: 4px;
+    color: #eaeaea;
+  }
+  kbd {
+    background: linear-gradient(180deg, #2a2a2a, #1a1a1a);
+    box-shadow: inset 0 -2px 0 rgba(0,0,0,0.4);
+    color: var(--text);
+  }
+
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .card.flat { background: var(--panel-2); }
+  .card .k {
+    display: block;
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 4px;
+  }
+  .card .v {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text);
+  }
+
+  pre.code {
+    background: #0d0d0d;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.6;
+    margin: 8px 0 16px;
+    color: #d4d4d4;
+  }
+  pre.code .com { color: #6b7280; font-style: italic; }
+  pre.code .kw  { color: #c084fc; }
+  pre.code .str { color: #86efac; }
+  pre.code .num { color: #fbbf24; }
+  pre.code .fn  { color: #60a5fa; }
+  pre.code .key { color: #f97316; }
+
+  .seg {
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin: 4px 0;
+    font-family: var(--mono);
+    font-size: 12px;
+    border: 1px solid;
+  }
+  .seg.cached  { background: var(--cached-soft);   border-color: rgba(74,222,128,0.3);  color: #a7f3c5; }
+  .seg.variable{ background: var(--variable-soft); border-color: rgba(251,191,36,0.3);  color: #fde68a; }
+  .seg.new     { background: var(--new-soft);      border-color: rgba(192,132,252,0.35); color: #e9d5ff; }
+  .seg .lbl {
+    display: inline-block;
+    font-family: var(--sans);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 1px 6px;
+    border-radius: 3px;
+    margin-right: 8px;
+    vertical-align: 1px;
+  }
+  .seg.cached  .lbl { background: rgba(74,222,128,0.2); color: var(--cached); }
+  .seg.variable .lbl { background: rgba(251,191,36,0.2); color: var(--variable); }
+  .seg.new      .lbl { background: rgba(192,132,252,0.2); color: var(--new); }
+
+  /* state machine diagram */
+  .sm {
+    background: #0d0d0d;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 8px 0 16px;
+  }
+  .sm-node {
+    display: inline-block;
+    padding: 8px 14px;
+    border-radius: 999px;
+    background: var(--panel);
+    border: 1px solid var(--border-strong);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .sm-arrow {
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 11px;
+    text-align: center;
+    padding: 0 4px;
+  }
+  .sm-arrow small { display: block; font-size: 10px; color: var(--muted); }
+
+  /* prompt panel */
+  .prompt-panel {
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+    padding: 14px 36px 18px;
+    max-height: 38vh;
+    overflow-y: auto;
+  }
+  .prompt-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .prompt-head h3 {
+    margin: 0;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    font-weight: 500;
+  }
+  .prompt-head .badge {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 2px 7px;
+    border-radius: 4px;
+    background: var(--info-soft);
+    color: var(--info);
+    border: 1px solid rgba(96,165,250,0.25);
+  }
+  .copy-btn {
+    margin-left: auto;
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    padding: 5px 10px;
+    font: 500 12px var(--sans);
+    cursor: pointer;
+    transition: all 120ms;
+  }
+  .copy-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .copy-btn.copied { background: rgba(74,222,128,0.15); border-color: var(--cached); color: var(--cached); }
+
+  .prompt-body {
+    background: #0d0d0d;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: #d4d4d4;
+    max-height: 28vh;
+    overflow-y: auto;
+  }
+
+  .legend {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    margin: 6px 0 14px;
+    font-size: 12px;
+    color: var(--muted);
+    flex-wrap: wrap;
+  }
+  .legend .swatch {
+    display: inline-block;
+    width: 10px; height: 10px;
+    border-radius: 2px;
+    margin-right: 6px;
+    vertical-align: 1px;
+    border: 1px solid;
+  }
+  .legend .cached { background: var(--cached-soft); border-color: rgba(74,222,128,0.4); }
+  .legend .variable { background: var(--variable-soft); border-color: rgba(251,191,36,0.4); }
+  .legend .new { background: var(--new-soft); border-color: rgba(192,132,252,0.4); }
+
+  .callout {
+    background: var(--info-soft);
+    border-left: 3px solid var(--info);
+    padding: 10px 14px;
+    border-radius: 0 6px 6px 0;
+    margin: 10px 0;
+    color: #cfe2ff;
+    font-size: 13px;
+  }
+  .callout.warn { background: rgba(251,191,36,0.06); border-color: var(--variable); color: #fde68a; }
+  .callout.danger { background: rgba(239,68,68,0.08); border-color: var(--error); color: #fca5a5; }
+  .callout.new { background: var(--new-soft); border-color: var(--new); color: #e9d5ff; }
+  .callout strong { color: inherit; font-weight: 600; }
+
+  ul.tight { padding-left: 18px; margin: 6px 0 14px; }
+  ul.tight li { margin: 2px 0; color: #cfcfcf; }
+  ul.tight code { font-size: 12px; }
+
+  /* waveform mock */
+  .wave {
+    height: 60px;
+    background: #0d0d0d;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin: 8px 0 12px;
+    overflow: hidden;
+  }
+  .wave .bar {
+    flex: 1;
+    background: var(--dim);
+    border-radius: 1px;
+    min-height: 3px;
+    transition: background 200ms;
+  }
+  .wave .bar.voiced { background: var(--accent); }
+  .wave .bar.preroll { background: var(--variable); opacity: 0.6; }
+
+  /* insertion target visual */
+  .insertion-display {
+    background: #0d0d0d;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin: 8px 0 12px;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.6;
+    color: #d4d4d4;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .insertion-display .before {
+    color: #8e9aaf;
+    background: rgba(96,165,250,0.06);
+    padding: 1px 2px;
+    border-radius: 2px;
+  }
+  .insertion-display .after {
+    color: #8e9aaf;
+    background: rgba(96,165,250,0.06);
+    padding: 1px 2px;
+    border-radius: 2px;
+  }
+  .insertion-display .cursor {
+    display: inline-block;
+    width: 2px;
+    height: 16px;
+    background: var(--accent);
+    margin: 0 1px -3px;
+    animation: blink 1.05s steps(2, end) infinite;
+    box-shadow: 0 0 6px var(--accent);
+  }
+  @keyframes blink {
+    50% { opacity: 0.2; }
+  }
+  .insertion-display .insertion-zone {
+    color: var(--accent);
+    background: var(--accent-soft);
+    padding: 1px 4px;
+    border-radius: 3px;
+    border: 1px dashed rgba(255,107,53,0.4);
+    font-style: italic;
+  }
+  .insertion-display .label-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-family: var(--sans);
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .insertion-display .label-row span {
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: rgba(96,165,250,0.10);
+    color: var(--info);
+  }
+  .insertion-display .label-row span.zone {
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+
+  /* scrollbar */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #4a4a4a; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="logo">Aura <small>· конвейер распознавания голоса</small><span class="v">v2 — insertion target</span></div>
+    <div class="controls">
+      <div class="control-group" id="chunk-control">
+        <label>chunk</label>
+        <button data-chunk="1" class="active">1</button>
+        <button data-chunk="2">2</button>
+        <button data-chunk="3">3</button>
+        <button data-chunk="final">final</button>
+      </div>
+      <div class="control-group" id="app-control">
+        <label>app</label>
+        <button data-app="slack" class="active">Slack</button>
+        <button data-app="mail">Mail</button>
+        <button data-app="xcode">Xcode</button>
+        <button data-app="notes">Notes</button>
+      </div>
+    </div>
+  </header>
+
+  <aside>
+    <ul class="step-list" id="steps"></ul>
+  </aside>
+
+  <main>
+    <section class="stage" id="stage"></section>
+    <section class="prompt-panel">
+      <div class="prompt-head">
+        <h3 id="prompt-title">Что отправляется / что выполняется</h3>
+        <span class="badge" id="prompt-badge">шаг</span>
+        <button class="copy-btn" id="copy">Копировать</button>
+      </div>
+      <pre class="prompt-body" id="prompt"></pre>
+    </section>
+  </main>
+</div>
+
+<script>
+/* ──────────────────────────────────────────────────────────────────
+   Конфигурация шагов конвейера
+   ────────────────────────────────────────────────────────────────── */
+
+const APPS = {
+  slack: {
+    name: "Slack",
+    bundle: "com.tinyspeck.slackmacgap",
+    style: "casualChat",
+    insertionBefore: "Hey John, thanks for the update — ",
+    insertionAfter: "",
+    axSample:
+`Window: "engineering — Acme Corp"
+  Channel list:
+    - #engineering
+    - #design
+    - #random
+  Conversation:
+    Alice [10:32 AM]: "did you see the spec?"
+    Me [10:35 AM]: "looking now"
+  Compose: <focused — see Insertion target>`
+  },
+  mail: {
+    name: "Mail",
+    bundle: "com.apple.mail",
+    style: "formalEmail",
+    insertionBefore: "Hi Sarah,\n\nThanks for the Q3 plan — I think the timeline ",
+    insertionAfter: " before lunch on Friday.",
+    axSample:
+`Window: "Inbox — me@example.com"
+  Toolbar: "New Message", "Reply", "Forward"
+  Mailbox list:
+    - Inbox (12)
+    - Sent
+    - Drafts
+  Composer (focused):
+    To: sarah@acme.com
+    Subject: "Re: Q3 plan"
+    Body: <see Insertion target>`
+  },
+  xcode: {
+    name: "Xcode",
+    bundle: "com.apple.dt.Xcode",
+    style: "codeComment",
+    insertionBefore: "// TODO: ",
+    insertionAfter: "",
+    axSample:
+`Window: "Aura — RecordingSession.swift"
+  Navigator:
+    - Aura/
+      - Recording/
+        - AudioRecorder.swift
+        - SileroVAD.swift  ← open
+        - PauseDetector.swift
+  Editor (Swift, focused, ~1400/2000 chars shown):
+    func consumeFrame(_ samples: [Float]) async {
+        let p = await vad.classify(samples)
+        events.send(p > threshold ? .voiced : .silent)
+    }
+    // [truncated at 2000 chars]`
+  },
+  notes: {
+    name: "Notes",
+    bundle: "com.apple.Notes",
+    style: "neutral",
+    insertionBefore: "• pre-roll 300ms\n• pause threshold 1.0s\n• ",
+    insertionAfter: "",
+    axSample:
+`Window: "Notes — Меморандум проекта"
+  Sidebar:
+    - All iCloud
+    - Quick Notes
+    - Aura design  ← active
+  Note (focused):
+    Title: "Aura design"
+    Body: <see Insertion target>`
+  }
+};
+
+/* ─────  v2: новый system instruction  ───── */
+const SYSTEM_INSTRUCTION =
+`You are the transcription engine for a macOS dictation app. Each request contains one audio chunk plus textual context assembled by the client. Your only output is the transcription of the current chunk's audio.
+
+# How a session works
+
+The user holds a hotkey while speaking. The client splits the audio at ≥1s pauses and sends each chunk as an independent generateContent request — this is NOT a chat. You never see your own past replies. The client stitches your text outputs together locally and inserts the result at the cursor inside the user's focused text field.
+
+Within one session the cached prefix is identical across chunks. Only the per-chunk instruction line and the audio bytes change.
+
+# Sections you will receive (in this order)
+
+1. \`App:\` and \`Style hint:\` — destination application and a soft register hint.
+2. \`Insertion target:\` — \`Text before cursor\` and \`Text after cursor\`. Your full session output will be inserted between these two strings, producing: \`<Text before cursor><session output><Text after cursor>\`.
+3. \`On-screen context:\` — a redacted accessibility tree of the user's screen. Use only for disambiguation.
+4. \`Prior chunks (this session):\` — text outputs you produced for earlier chunks of this same session. Treated by the client as immutable.
+5. The per-chunk instruction line and the audio.
+
+# Output contract
+
+- Output only the words spoken in the current chunk's audio. Nothing else: no prefixes, no quotation marks, no markdown, no language tags, no "[inaudible]" markers, no explanations.
+- Never re-emit, paraphrase, or "fix" prior chunks.
+- Never quote, describe, or echo any content from \`On-screen context\`, \`Insertion target\`, or \`App\`.
+- Transcribe in the language actually spoken. Detect from audio. If the speaker code-switches, follow them word for word at the same boundary.
+- If a stretch is genuinely unintelligible, drop it silently. Do not guess. Do not insert brackets or markers.
+
+# Cleanup level (light, Wispr Flow style)
+
+- Remove obvious filler words in any language: "um", "uh", filler "like", "э-э", "ну", "это самое", and equivalents.
+- Collapse self-corrections: when the speaker abandons a phrase and restarts, keep only the corrected version. Example: "let me, um, let me check on that" → "let me check on that".
+- Otherwise preserve the speaker's exact words, word order, register, and sentence shape. No paraphrasing, no synonym swaps, no reordering, no summarising.
+
+# Punctuation across chunk boundaries
+
+A spoken sentence is often cut by a chunk boundary. The client may discard or adjust trailing punctuation when stitching, so be conservative:
+
+- If the current chunk ends mid-thought — on a preposition, conjunction, dangling subject, or any place where a competent writer would not put a period — DO NOT emit terminal punctuation (\`.\`, \`!\`, \`?\`). End mid-phrase. Commas, dashes, colons, and quotation marks are allowed.
+- If the current chunk reads as a complete sentence in itself, terminal punctuation is allowed.
+- Chunks are concatenated by the client with no inserted whitespace. If the prior chunk ends with a non-whitespace character and your audio starts a new word, begin your output with a leading space. If a prior chunk ends mid-word (rare — VAD cut inside a word), continue spelling that word without restarting it.
+
+# Insertion target — your output goes between two fixed pieces of text
+
+After the session, the client will produce: \`<Text before cursor><full session output><Text after cursor>\`. Your text must make this concatenation read as one natural piece. Three rules:
+
+**1. Start capitalization.** If \`Text before cursor\` is empty, or its last non-whitespace character is \`.\`, \`!\`, or \`?\`, start your first chunk with a capital letter as a new sentence. Otherwise — including endings like \`,\`, \`:\`, \`—\`, \`;\`, or no terminal punctuation at all — start in lowercase and continue the existing sentence.
+
+**2. Whitespace boundaries.** Do not duplicate or eat whitespace.
+- If \`Text before cursor\` is empty or ends with whitespace, do NOT begin your output with a leading space.
+- If it ends with a non-whitespace character, DO begin your output with a leading space (unless audio clearly continues the same word mid-syllable).
+- If \`Text after cursor\` is non-empty and starts with a non-whitespace character, end your final chunk with a trailing space. Otherwise, do not.
+
+**3. End punctuation.** Match the register and continuation pattern of \`Text after cursor\`:
+- If \`Text after cursor\` is empty, OR its first non-whitespace character is a capital letter starting a new sentence — close with terminal punctuation as you naturally would.
+- If \`Text after cursor\` continues mid-sentence (starts with a lowercase word, a conjunction, a comma, or any continuation marker) — prefer ending the final chunk with a comma or no punctuation. The client may strip a trailing terminal mark if needed; do not panic if you emitted one.
+
+\`Text after cursor\` is FIXED. Never modify, paraphrase, summarize, repeat, or echo it. Do not include any of its words in your output.
+
+If \`Insertion target\` is empty or both \`Text before cursor\` and \`Text after cursor\` are empty, treat the session as opening a fresh sentence in an empty field.
+
+# Using on-screen context
+
+\`On-screen context\` is for disambiguation only. Use it to:
+
+- Resolve proper nouns the speaker mentions (people, products, project, channel, file names).
+- Spell jargon, code identifiers, library names, commands visible on screen.
+- Choose the correct spelling for code-switched terms whose orthography depends on surrounding language.
+
+The audio always wins over the on-screen context. Never insert any phrase from \`On-screen context\` that the speaker did not actually say.
+
+# Style hint
+
+Values like \`casualChat\`, \`formalEmail\`, \`codeComment\`, \`neutral\` are a soft hint about the destination. Adjust punctuation density and capitalization habits slightly to fit. Do not change the speaker's words. Hint, not command.`;
+
+const PRIOR_CHUNKS = {
+  1: [],
+  2: ["the timeline looks tight but doable"],
+  3: ["the timeline looks tight but doable", " could you double-check the QA window"],
+  final: ["the timeline looks tight but doable", " could you double-check the QA window", " and ping me on Slack"]
+};
+
+const STEPS = [
+  { id: "idle",     label: "Покой",                       sub: "menu bar idle" },
+  { id: "press",    label: "Нажатие Right Option",         sub: "CGEventTap → flagsChanged" },
+  { id: "session",  label: "Запуск сессии",                sub: "первый чанк ждёт AX",  changed: true },
+  { id: "context",  label: "Снимок контекста",             sub: "AX tree + insertion target", changed: true },
+  { id: "audio",    label: "Захват аудио",                 sub: "AVAudioEngine, 16 kHz" },
+  { id: "vad",      label: "Silero VAD",                   sub: "CoreML, 32 ms окна" },
+  { id: "pause",    label: "Детектор пауз",                sub: "PauseDetector FSM" },
+  { id: "chunk",    label: "Сборка чанка",                 sub: "preroll 300 ms → m4a" },
+  { id: "gemini1",  label: "Gemini · chunk 1",             sub: "новая структура parts", changed: true },
+  { id: "geminiN",  label: "Gemini · chunk N",             sub: "≈90% cache hit",        changed: true },
+  { id: "final",    label: "Финальный чанк",               sub: "is_final=true + queue", changed: true },
+  { id: "concat",   label: "Конкатенация + cleanup",       sub: "client-side punct fix", changed: true },
+  { id: "inject",   label: "Вставка ⌘V",                   sub: "clipboard save → ⌘V → restore" },
+  { id: "history",  label: "История",                      sub: "JSON, FIFO 10" }
+];
+
+/* ──────────────────────────────────────────────────────────────────
+   Состояние
+   ────────────────────────────────────────────────────────────────── */
+
+const state = {
+  step: STEPS[0].id,
+  chunk: "1",
+  app: "slack"
+};
+
+/* ──────────────────────────────────────────────────────────────────
+   Подсветка кода
+   ────────────────────────────────────────────────────────────────── */
+
+function highlightSwift(src) {
+  return src
+    .replace(/(\/\/[^\n]*)/g, '<span class="com">$1</span>')
+    .replace(/\b(let|var|func|guard|return|if|else|while|for|in|await|async|throws|try|actor|struct|enum|class|case|self|true|false|nil|where)\b/g, '<span class="kw">$1</span>')
+    .replace(/("[^"]*")/g, '<span class="str">$1</span>')
+    .replace(/\b(\d+(\.\d+)?(_\d+)*)\b/g, '<span class="num">$1</span>');
+}
+
+function highlightJSON(src) {
+  return src
+    .replace(/("[^"]*"\s*:)/g, '<span class="key">$1</span>')
+    .replace(/(:\s*)("[^"]*")/g, '$1<span class="str">$2</span>')
+    .replace(/\b(true|false|null)\b/g, '<span class="kw">$1</span>')
+    .replace(/(\b\d+(\.\d+)?\b)/g, '<span class="num">$1</span>');
+}
+
+function escapeHTML(s) {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function escapeForJSON(s) {
+  return s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t");
+}
+
+/* ──────────────────────────────────────────────────────────────────
+   Содержимое каждого шага (HTML)
+   ────────────────────────────────────────────────────────────────── */
+
+function insertionPreview() {
+  const app = APPS[state.app];
+  const before = escapeHTML(app.insertionBefore);
+  const after = escapeHTML(app.insertionAfter);
+
+  return `
+    <div class="insertion-display">
+      <div class="label-row">
+        <span>Text before cursor</span>
+        <span class="zone">↳ session output goes here</span>
+        <span>Text after cursor</span>
+      </div>
+      <span class="before">${before || '<em style="opacity:0.5">(empty)</em>'}</span><span class="cursor"></span><span class="insertion-zone">…dictation…</span><span class="after">${after || '<em style="opacity:0.5">(empty)</em>'}</span>
+    </div>
+  `;
+}
+
+function stepContent(id) {
+  const app = APPS[state.app];
+
+  switch (id) {
+
+  case "idle": return `
+    <span class="stage-tag">шаг 1 / 14</span>
+    <h1>Покой</h1>
+    <p>Aura живёт в меню-баре как accessory app (<code>LSUIElement = true</code>): ни иконки в Dock, ни главного меню. Видна только маленькая иконка микрофона.</p>
+
+    <h2>Что крутится в фоне</h2>
+    <ul class="tight">
+      <li><code>HotkeyMonitor</code> работает на отдельном <code>Thread</code> со своим <code>RunLoop</code> — намеренно не на главном, иначе любое UI-зависание (модалка, открытие файла) роняет горячую клавишу.</li>
+      <li><code>CGEventTap</code> установлен с маской <code>1 &lt;&lt; CGEventType.flagsChanged.rawValue</code>.</li>
+      <li>Режим <code>.listenOnly</code> — мы только смотрим, но не глотаем событие. Right Option продолжает работать для системы (например, для ввода <code>™</code>).</li>
+    </ul>
+
+    <h2>Состояние меню-бара</h2>
+    <div class="grid-3">
+      <div class="card"><span class="k">icon</span><span class="v">mic (template)</span></div>
+      <div class="card"><span class="k">label</span><span class="v">—</span></div>
+      <div class="card"><span class="k">tint</span><span class="v">monochrome</span></div>
+    </div>
+
+    <div class="callout warn">Если <code>AXIsProcessTrusted()</code> вернул <code>false</code> — тап не ставится, иконка показывает жёлтую точку. <code>PermissionsViewModel</code> опрашивает раз в 2 секунды, и как только пользователь выдал доступ в Системных Настройках — тап встаёт автоматически без перезапуска.</div>
+  `;
+
+  case "press": return `
+    <span class="stage-tag">шаг 2 / 14</span>
+    <h1>Нажатие Right Option</h1>
+    <p>В <code>NSEvent.addGlobalMonitorForEvents</code> модификаторы-без-других-клавиш приходят ненадёжно. Поэтому здесь только <strong>CGEventTap</strong>. Это причина, по которой Aura просит Accessibility ещё до старта (см. ADR-005).</p>
+
+    <h2>Различение левого и правого Option</h2>
+    <p>В <code>flagsChanged</code> приходят <em>обе</em> стороны. Различаем по битам в <code>event.flags</code>:</p>
+    <div class="grid-2">
+      <div class="card flat"><span class="k">Right Option (kVK 61)</span><span class="v">bit 0x40</span></div>
+      <div class="card flat"><span class="k">Left Option (kVK 58)</span><span class="v">bit 0x20</span></div>
+    </div>
+
+    <h2>Сам callback</h2>
+    <pre class="code">${highlightSwift(`let rightOptionBit: UInt64 = 0x40
+let prev = previousFlags & rightOptionBit != 0
+let curr = event.flags.rawValue & rightOptionBit != 0
+
+if !prev && curr {
+    onPress()                              // 0 → 1: пользователь нажал
+} else if prev && !curr {
+    onRelease()                            // 1 → 0: пользователь отпустил
+}
+previousFlags = event.flags.rawValue       // запоминаем для следующего сравнения`)}</pre>
+
+    <div class="callout warn">macOS может выключить наш тап, если callback тормозит дольше секунды (<code>tapDisabledByTimeout</code>). Мы обязаны увидеть это событие и снова вызвать <code>CGEvent.tapEnable(tap:enable:true)</code>. Без этого Aura «молча» перестаёт реагировать на хоткей — самый невыносимый UX-баг для приложения дикта́ции.</div>
+  `;
+
+  case "session": return `
+    <span class="stage-tag changed">шаг 3 / 14 · обновлено</span>
+    <h1>Запуск сессии</h1>
+    <p><strong>RecordingSession — это value, а не singleton.</strong> На каждое нажатие создаётся новый объект, на отпускание — отбрасывается.</p>
+
+    <div class="callout new"><strong>Изменено в v2:</strong> первый чанк теперь <em>всегда</em> ждёт AX-снимок и захват insertion target. Раньше — мог уйти без контекста, если снимок не успел. Сейчас — hard timeout 250 мс, реальная блокировка 0–100 мс (первая фонема у пользователя обычно через 100–300 мс после press, так что чаще всего ждать не приходится вовсе).</div>
+
+    <h2>Параллельный старт (через withTaskGroup)</h2>
+    <ul class="tight">
+      <li><strong>ActiveAppDetector</strong> — синхронный, моментальный.</li>
+      <li><strong>AccessibilityTree.snapshot()</strong> — 50–200 мс, идёт параллельно (см. шаг 4).</li>
+      <li><strong>InsertionTarget.capture()</strong> — &lt; 5 мс, синхронно с AX-снимком.</li>
+      <li><strong>AudioRecorder.start()</strong> — запуск <code>AVAudioEngine</code> (~50 мс).</li>
+      <li><strong>SileroVAD.reset()</strong> — сброс LSTM-состояния модели.</li>
+    </ul>
+
+    <p>Audio capture стартует немедленно — мы пишем в ring buffer, пока контекст ещё собирается. К моменту, когда первый чанк готов отправляться в Gemini, AX-снимок и insertion target уже на руках.</p>
+
+    <h2>UI-переходы (на главном акторе)</h2>
+    <pre class="code">${highlightSwift(`@MainActor
+func startUI() {
+    menuBar.state = .recording                // mic.fill красный + таймер mm:ss
+    hud.show(.recording)                      // 300pt стеклянный HUD
+    timer.start()                             // TimelineView(.periodic(every: 1))
+}`)}</pre>
+
+    <div class="callout">Инвариант I6: «Session is a value, not a global». Если ты добавляешь сюда что-то — спроси себя, можно ли держать это в сессионном объекте, не пробрасывая в синглтон.</div>
+  `;
+
+  case "context": return `
+    <span class="stage-tag changed">шаг 4 / 14 · обновлено</span>
+    <h1>Снимок контекста</h1>
+    <p>Aura собирает <strong>две вещи</strong>, обе уходят в кешируемый префикс запроса:</p>
+    <ul class="tight">
+      <li><strong>Insertion target</strong> — содержимое поля под курсором + позиция курсора.</li>
+      <li><strong>On-screen accessibility tree</strong> — все видимые окна (для дисамбигуации имён, жаргона, кода).</li>
+    </ul>
+
+    <h2 style="color:var(--new)">Insertion target — новое в v2</h2>
+    <p>Самая важная часть контекста: <em>куда именно</em> встанет распознанный текст. Без неё модель не знает, продолжать ли с маленькой буквы (запятая в конце), ставить ли точку в конце (за курсором уже идёт текст другой фразы) и т.д.</p>
+
+    ${insertionPreview()}
+
+    <h2>Как это снимается (один раз на старте сессии)</h2>
+    <pre class="code">${highlightSwift(`// 1. Получить focused element
+var focused: AnyObject?
+AXUIElementCopyAttributeValue(systemWide,
+                              kAXFocusedUIElementAttribute as CFString,
+                              &focused)
+
+// 2. Прочитать значение и selection range
+let value = focused[kAXValueAttribute] as? String ?? ""
+let range = (focused[kAXSelectedTextRangeAttribute] as? CFRange)
+    ?? CFRange(location: value.count, length: 0)
+
+// 3. Разрезать на before/after по UTF-16 индексам (macOS считает так)
+let cursorOffset = range.location
+let textBefore = String(value.prefix(cursorOffset))
+let textAfter  = String(value.suffix(value.count - cursorOffset))
+
+// 4. Подрезать до 500 chars с каждой стороны (бюджет на кеш)
+let MAX_SIDE = 500
+let trimmedBefore = String(textBefore.suffix(MAX_SIDE))   // последние 500
+let trimmedAfter  = String(textAfter.prefix(MAX_SIDE))    // первые 500`)}</pre>
+
+    <div class="callout warn"><strong>Edge cases:</strong> если фокуса нет / поле не текстовое / <code>kAXSelectedTextRangeAttribute</code> отсутствует / Electron вернул мусор через <code>kAXValueAttribute</code> — ставим обе строки в <code>""</code>. <strong>Секцию из промпта НЕ убираем</strong> — иначе ломается shape префикса между сессиями и кеш промахнётся. Пустые значения с пустыми кавычками — нормальный случай.</div>
+
+    <p>Курсор после старта сессии не двигается (пользователь держит хоткей и не печатает), поэтому секция стабильна на всю сессию и попадает в кеш чанков 2..N. Точно такой же приём с UTF-16 нужен для эмодзи и составных Unicode — проверяй отдельно.</p>
+
+    <h2>On-screen accessibility tree</h2>
+    <p>А теперь — на твой вопрос: <strong>копируем ли мы весь файл из Xcode и весь буфер терминала?</strong> Нет. AX-обход структурный, с жёсткими лимитами:</p>
+
+    <div class="grid-3">
+      <div class="card"><span class="k">depth max</span><span class="v">6</span></div>
+      <div class="card"><span class="k">nodes / window</span><span class="v">500</span></div>
+      <div class="card"><span class="k">total cap</span><span class="v">5 000</span></div>
+      <div class="card"><span class="k">value max / node</span><span class="v">2 000 chars</span></div>
+      <div class="card"><span class="k">timeout / app</span><span class="v">100 ms</span></div>
+      <div class="card"><span class="k">target latency</span><span class="v">≤ 250 ms</span></div>
+    </div>
+
+    <ul class="tight">
+      <li><strong>Xcode:</strong> редактор = один <code>AXTextArea</code> с <code>value</code>, обрезанным до 2000 chars (видимая область + чуть выше/ниже — не весь файл на 5000 строк). Плюс структура: navigator, имена файлов, debug area.</li>
+      <li><strong>Terminal/iTerm:</strong> видимый буфер terminal-вьюхи, тоже truncated до 2000 chars. История прокрутки <em>не</em> достаётся.</li>
+      <li><strong>Slack:</strong> список каналов, видимые сообщения текущего чата (каждое — отдельный узел, своё значение до 2000 chars), composer.</li>
+    </ul>
+
+    <h2>SecureFieldMasker — это граница безопасности</h2>
+    <p>Каждое значение проходит через маскер. Skip-правила: <code>AXSecureTextField</code>, identifier с <code>password|secret|token|apikey</code>, password-sheets. Контентная маскировка: credit card (Луна), Stripe-ключи, AWS <code>AKIA…</code>, Bearer/Basic, длинные токены.</p>
+
+    <div class="callout danger">Тип <code>RedactedAXSnapshot</code> не имеет публичного API, который вернул бы сырой текст. Единственная точка получения текста для сети — <code>formattedForPrompt()</code>. Любая правка <code>SecureFieldMasker.swift</code> требует нового тест-кейса.</div>
+
+    <h2>Снимок для текущего приложения (${app.name})</h2>
+    <pre class="code">${app.axSample}</pre>
+  `;
+
+  case "audio": return `
+    <span class="stage-tag">шаг 5 / 14</span>
+    <h1>Захват аудио</h1>
+    <p><code>AVAudioEngine</code> (а не <code>AVCaptureSession</code>): нужны лёгкие тапы на input node и нативный resampling.</p>
+
+    <pre class="code">${highlightSwift(`let format = AVAudioFormat(
+    commonFormat: .pcmFormatFloat32,
+    sampleRate: 16_000,
+    channels: 1,
+    interleaved: false
+)!
+
+inputNode.installTap(onBus: 0, bufferSize: 512, format: format) { buffer, _ in
+    ringBuffer.write(buffer)                  // SPSC, lock-free
+}`)}</pre>
+
+    <h2>Параметры</h2>
+    <div class="grid-3">
+      <div class="card"><span class="k">sample rate</span><span class="v">16 000 Hz</span></div>
+      <div class="card"><span class="k">channels</span><span class="v">1 (mono)</span></div>
+      <div class="card"><span class="k">format</span><span class="v">float32, non-interleaved</span></div>
+      <div class="card"><span class="k">buffer</span><span class="v">512 samples (32 ms)</span></div>
+      <div class="card"><span class="k">ring</span><span class="v">30 s = 1.92 MB</span></div>
+      <div class="card"><span class="k">resample</span><span class="v">AVAudioMixerNode HW→16k</span></div>
+    </div>
+
+    <p>Зачем кольцо: (1) <strong>pre-roll</strong> для VAD-онсета (см. шаг 8), (2) нарезка чанков задним числом — когда детектор объявил паузу, нужно достать <em>уже записанные</em> сэмплы.</p>
+
+    <div class="callout warn">Смена устройства ввода посередине сессии (отключили AirPods) обрабатывается через <code>AVAudioEngineConfigurationChange</code>: тап перестраивается, PCM продолжается с того же места, в стыке появляется <em>несколько мс тишины</em>. Сессия не прерывается.</div>
+  `;
+
+  case "vad": return `
+    <span class="stage-tag">шаг 6 / 14</span>
+    <h1>Silero VAD</h1>
+    <p>Apple <code>SpeechDetector</code> рассмотрен и отклонён (ADR-002): не запускается без транскрайбера, требует locale, тянет ассеты, и в SDK 26.0/26.1 не conform к <code>SpeechModule</code>. RMS-VAD тоже отклонён — не отличает речь от музыки/шума.</p>
+
+    <p>Silero — нейросеть, обученная на 6000+ языках. ~2 МБ. Конвертирована из ONNX в CoreML, чтобы использовать ANE на M-чипах (~1 мс на 32-мс окно).</p>
+
+    <h2>Спецификация модели</h2>
+    <div class="grid-3">
+      <div class="card"><span class="k">input</span><span class="v">512 float32</span></div>
+      <div class="card"><span class="k">output</span><span class="v">scalar [0, 1]</span></div>
+      <div class="card"><span class="k">state</span><span class="v">stateful LSTM</span></div>
+      <div class="card"><span class="k">threshold default</span><span class="v">0.5</span></div>
+      <div class="card"><span class="k">low sens.</span><span class="v">0.6 (шумная среда)</span></div>
+      <div class="card"><span class="k">high sens.</span><span class="v">0.4 (тихая среда)</span></div>
+    </div>
+
+    <h2>Ритм инференса (визуально)</h2>
+    <div class="wave" id="wave-vad"></div>
+    <p style="color:var(--muted);font-size:12px;margin-top:-4px">оранжевые столбики — voiced (p &gt; 0.5), серые — silent. Каждый столбик ≈ 32 мс.</p>
+
+    <div class="callout">LSTM-состояние сбрасывается на старте каждой сессии — иначе модель «помнит» контекст прошлой записи и может фолсить на первых окнах.</div>
+  `;
+
+  case "pause": return `
+    <span class="stage-tag">шаг 7 / 14</span>
+    <h1>Детектор пауз — конечный автомат</h1>
+    <p>Silero выдаёт <code>p &isin; [0, 1]</code> на каждое окно, а нам нужны <em>дискретные границы чанков</em>. <code>PauseDetector</code> превращает поток вероятностей в события «начался чанк / закончился чанк».</p>
+
+    <div class="sm">
+      <div class="sm-node">Idle</div>
+      <div class="sm-arrow">→<small>≥ 3 voiced</small></div>
+      <div class="sm-node">Speaking</div>
+      <div class="sm-arrow">→<small>1 silent</small></div>
+      <div class="sm-node">Pausing</div>
+      <div class="sm-arrow">→<small>≥ 1.0 s silent</small></div>
+      <div class="sm-node">emit chunk</div>
+    </div>
+
+    <h2>Когда чанк точно полетит</h2>
+    <p>Никакого требования по числу слов нет. Граница чанка — <strong>только по времени</strong>:</p>
+
+    <div class="grid-3">
+      <div class="card"><span class="k">мин. длительность чанка</span><span class="v">200 ms</span></div>
+      <div class="card"><span class="k">пауза для эмита</span><span class="v">≥ 1.0 s silent</span></div>
+      <div class="card"><span class="k">вход в Speaking</span><span class="v">≥ 3 voiced ≈ 96 ms</span></div>
+      <div class="card"><span class="k">окно VAD</span><span class="v">32 ms</span></div>
+      <div class="card"><span class="k">мин. слов</span><span class="v">— (нет)</span></div>
+      <div class="card"><span class="k">короче 200 ms</span><span class="v">no-op, skip</span></div>
+    </div>
+
+    <p>Минимально жизнеспособный чанк — одно короткое слово вроде «yes» или «hi» (≥ 200 мс), за которым >1 с тишины. Если пользователь долбит хоткей быстрее 200 мс — ничего не отправляется, тихий no-op.</p>
+
+    <h2>Тонкости</h2>
+    <ul class="tight">
+      <li><strong>≥ 3 voiced подряд</strong> для <code>Idle → Speaking</code> — фильтр от чихания, кашля, щелчков.</li>
+      <li><strong>В <code>Pausing</code> голос вернулся</strong> — переходим обратно в <code>Speaking</code> без эмита (короткие межсловные паузы — часть одной фразы).</li>
+      <li><strong><code>pauseStart</code> = метка времени <em>первого</em> silent-фрейма</strong>, а не последнего. Иначе граница чанка получалась бы на секунду позже естественного конца фразы.</li>
+    </ul>
+
+    <h2>Константы</h2>
+    <pre class="code">${highlightSwift(`let preRollDuration: TimeInterval = 0.3        // 300 ms
+let pauseThreshold: TimeInterval = 1.0         // ≥ 1.0 s silent = пауза
+let voicedFrameThreshold: Float = 0.5
+let minVoicedRunForChunkStart: Int = 3         // ≈ 96 ms`)}</pre>
+  `;
+
+  case "chunk": return `
+    <span class="stage-tag">шаг 8 / 14</span>
+    <h1>Сборка чанка</h1>
+    <p>Когда детектор объявил паузу, <code>ChunkBuilder</code> вырезает из ring-буфера диапазон <code>[chunkStart − 300 ms … pauseStart]</code> и кодирует в m4a.</p>
+
+    <h2>Зачем pre-roll 300 ms</h2>
+    <p>Любой оконный VAD имеет <strong>onset latency</strong>: ему нужно несколько окон уверенности перед классификацией «речь началась». К моменту, когда <code>isVoiced</code> переключился в <code>true</code>, реальная речь стартовала ~100–300 мс назад.</p>
+
+    <p>Если резать чанки от момента «голос обнаружен» — теряются начальные согласные после каждой паузы. Неприемлемо. Поэтому каждый чанк отматывается назад на 300 мс <em>до</em> кодирования.</p>
+
+    <div class="wave" id="wave-chunk"></div>
+    <p style="color:var(--muted);font-size:12px;margin-top:-4px">жёлтое — pre-roll (тишина/дыхание перед речью), оранжевое — voiced часть, всё это идёт в чанк целиком.</p>
+
+    <h2>Кодирование в m4a / AAC</h2>
+    <pre class="code">${highlightSwift(`AVAssetWriter settings:
+  AVFormatIDKey:        kAudioFormatMPEG4AAC
+  AVSampleRateKey:      16_000
+  AVNumberOfChannelsKey: 1
+  AVEncoderBitRateKey:  32_000          // 32 kbps mono — для речи неотличимо от PCM`)}</pre>
+
+    <div class="grid-3">
+      <div class="card"><span class="k">~ size</span><span class="v">4 KB / sec</span></div>
+      <div class="card"><span class="k">storage</span><span class="v">in-memory Data</span></div>
+      <div class="card"><span class="k">min duration</span><span class="v">200 ms (иначе skip)</span></div>
+    </div>
+
+    <div class="callout warn">Edge case: если пользователь тапнул Right Option по ошибке (&lt; 200 мс) — Gemini-вызов не делается, это no-op. Это сильно лучше, чем «отправили шум, получили мусор, вставили мусор».</div>
+  `;
+
+  case "gemini1": return `
+    <span class="stage-tag changed">шаг 9 / 14 · обновлено</span>
+    <h1>Gemini · первый чанк</h1>
+    <p><strong>Endpoint:</strong> <code>POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent</code></p>
+
+    <p>Структура запроса <strong>load-bearing для кеша</strong>. Менять порядок частей в <code>parts</code> запрещено — это поломает префиксное кеширование на следующих чанках сессии (~90% скидка превратится в полную цену).</p>
+
+    <div class="callout new"><strong>Изменено в v2:</strong> между <code>Style hint</code> и <code>On-screen context</code> добавлена секция <code>Insertion target</code>. Метки секций ровно такие — system instruction на них завязан. Даже если <code>Insertion target</code> пуст (нет фокуса) — секция остаётся в префиксе с пустыми значениями, иначе shape ломается.</div>
+
+    <div class="legend">
+      <span><span class="swatch cached"></span>cached prefix (одинаковый между чанками сессии)</span>
+      <span><span class="swatch variable"></span>variable suffix (свой для каждого запроса)</span>
+      <span><span class="swatch new"></span>новое в v2</span>
+    </div>
+
+    <div class="seg cached"><span class="lbl">cached</span>system_instruction · v2 · ≈ 1100 tokens</div>
+    <div class="seg cached"><span class="lbl">cached</span>App: ${app.name} (${app.bundle})  ·  Style hint: ${app.style}</div>
+    <div class="seg new"><span class="lbl">new</span>Insertion target: Text before/after cursor (≈ 2× до 500 chars)</div>
+    <div class="seg cached"><span class="lbl">cached</span>On-screen context: &lt;redacted AX tree, ≈ 5–15K tokens&gt;</div>
+    <div class="seg cached"><span class="lbl">cached</span>Prior chunks (this session): (none yet) <em style="color:var(--muted)">— секция остаётся всегда</em></div>
+    <div class="seg variable"><span class="lbl">variable</span>Instruction: «Now transcribe chunk_1. is_final=false. …»</div>
+    <div class="seg variable"><span class="lbl">variable</span>inline_data { mime_type: "audio/mp4", data: &lt;base64 m4a&gt; }</div>
+
+    <h2>generationConfig</h2>
+    <div class="grid-3">
+      <div class="card"><span class="k">thinkingLevel</span><span class="v">"minimal"</span></div>
+      <div class="card"><span class="k">temperature</span><span class="v">0.2</span></div>
+      <div class="card"><span class="k">responseMimeType</span><span class="v">"text/plain"</span></div>
+    </div>
+
+    <h2>Текущий insertion target (для ${app.name})</h2>
+    ${insertionPreview()}
+    <p style="color:var(--muted);font-size:12px">↑ это то, что уйдёт в части <code>Insertion target:</code> запроса. Полный сгенерированный JSON — внизу панели.</p>
+
+    <div class="callout">У первого чанка кешу взяться неоткуда — это «нормально дорого». Зато он создаёт префикс, на котором будут экономить чанки 2..N. Минимум для попадания в кеш — 4096 токенов; AX-дерево + insertion target обычно 5–15K, проходим легко.</div>
+  `;
+
+  case "geminiN": return `
+    <span class="stage-tag changed">шаг 10 / 14 · обновлено</span>
+    <h1>Gemini · чанк N — попадание в кеш</h1>
+    <p>На N-м запросе <em>каждая</em> часть префикса <strong>идентична</strong> N−1-му: тот же <code>system_instruction</code>, тот же AX-снимок, тот же <code>Insertion target</code> (курсор не двигается во время записи), тот же style hint. Меняются только последний инстракшн, аудио и содержимое <code>Prior chunks</code>.</p>
+
+    <p>Это работает за счёт <strong>implicit caching</strong> — для Gemini 3.x он включён по умолчанию. Платим ~10% от цены на cached prefix tokens.</p>
+
+    <div class="legend">
+      <span><span class="swatch cached"></span>cached · ~90% скидка</span>
+      <span><span class="swatch variable"></span>variable · полная цена</span>
+    </div>
+
+    <div class="seg cached"><span class="lbl">cached</span>system_instruction</div>
+    <div class="seg cached"><span class="lbl">cached</span>App: ${app.name} · Style hint: ${app.style}</div>
+    <div class="seg cached"><span class="lbl">cached</span>Insertion target: &lt;тот же before/after, что был при первом чанке&gt;</div>
+    <div class="seg cached"><span class="lbl">cached</span>On-screen context: &lt;тот же AX-снимок&gt;</div>
+    <div class="seg variable"><span class="lbl">variable</span>Prior chunks (this session): chunk_1: «${(PRIOR_CHUNKS[state.chunk] || []).join('», chunk_X: «').replace(/\s+/g, ' ').trim() || '(none yet)'}» <em style="color:var(--muted)">— меняется на каждом N, но префикс N-1 всё равно матчится</em></div>
+    <div class="seg variable"><span class="lbl">variable</span>Instruction: «Now transcribe chunk_${state.chunk}. is_final=${state.chunk === 'final'}. …»</div>
+    <div class="seg variable"><span class="lbl">variable</span>inline_data { mime_type: "audio/mp4", data: &lt;base64 m4a chunk_${state.chunk}&gt; }</div>
+
+    <h2>Контроль попадания в кеш — в release не логируем, но в debug:</h2>
+    <pre class="code">${highlightSwift(`let ratio = Double(usage.cachedContentTokenCount) / Double(usage.promptTokenCount)
+logger.debug("cache ratio = \\(ratio, format: .fixed(precision: 2))")
+// Должно быть > 0.7 для не-первого чанка с AX-контекстом.
+// Если меньше — порядок parts сломан, инвариант I3 нарушен.`)}</pre>
+
+    <div class="callout danger">Никогда не просим модель «re-emit the full transcript» — это раздуло бы output tokens (×6 цены input) и убило бы каждый чанк, начиная со второго. Конкатенация всегда локально (см. шаг 12). Это инвариант I2.</div>
+
+    <h2 style="color:var(--info)">Что происходит, если несколько чанков накапливаются</h2>
+    <p>Один in-flight HTTP-запрос на сессию (инвариант I1, v2 форма), но единица работы — <strong>батч</strong>, не один чанк:</p>
+    <ul class="tight">
+      <li><strong>До кодирования:</strong> если граница чанка N+1 пришла, пока N ещё кодируется в m4a — отдельный чанк не создаётся, аудио продлевает N. Pre-encoding auto-coalesce (на уровне <code>PauseDetector</code>).</li>
+      <li><strong>После кодирования:</strong> N+1 (PCM-диапазон, ещё не закодированный) попадает в FIFO <code>pending</code>. Когда sender просыпается, он берёт <em>всё</em>, что накопилось.</li>
+      <li><strong>1 chunk в очереди</strong> → обычный <code>transcribe(audio:…)</code>.</li>
+      <li><strong>≥ 2 chunks в очереди</strong> → <code>transcribeBatch(audios:…)</code>: один запрос с N <code>inline_data</code> подряд, model возвращает <em>один сплошной transcript</em> через все чанки, с применёнными между ними правилами стыковки (whitespace/punct).</li>
+      <li><strong>В норме</strong> накопления не бывает: round-trip ~500 мс–1 с, пауза ≥ 1 с, обычно успеваем 1-by-1. Батчинг включается естественно, когда Gemini тормозит или речь быстрая с короткими паузами.</li>
+      <li><strong>Самый ценный кейс — release:</strong> если в момент отпускания хоткея в очереди уже есть c<sub>k</sub>..c<sub>m</sub> и финальный c<sub>m+1</sub> — все они уйдут одним запросом. Экономия = (m − k + 1) round-trip'ов на самой видимой пользователю задержке.</li>
+    </ul>
+
+    <h2>Батчевый instruction</h2>
+    <pre class="code">${highlightSwift(`Now transcribe chunks K through M. The audio for each chunk follows in order, as separate inline audio parts. Output one contiguous text that, read top to bottom, contains the words spoken across all (M-K+1) chunks in order. Apply the same continuation, whitespace, and punctuation rules between chunks as if you were stitching outputs from separate calls. is_final=true|false. ...`)}</pre>
+
+    <div class="callout">Префикс кеша между single и batch путями <strong>идентичен</strong> (тот же <code>sendRequest</code> внутри клиента). Меняется только инструкция и количество <code>inline_data</code>. Implicit cache всё так же ловит первые 4 секции независимо от того, было это «один чанк» или «батч из четырёх».</div>
+  `;
+
+  case "final": return `
+    <span class="stage-tag changed">шаг 11 / 14 · обновлено</span>
+    <h1>Финальный чанк (is_final=true)</h1>
+    <p>Когда пользователь отпускает Right Option, мы строим последний слайс <code>[lastChunkEnd … now]</code> и отправляем его с <code>is_final=true</code>. Префикс остаётся тем же — кеш всё ещё попадает; меняются только <code>Prior chunks</code> и текст инструкции.</p>
+
+    <div class="callout new"><strong>Изменено в v2:</strong> финальная инструкция теперь явно указывает модели <em>учитывать <code>Text after cursor</code></em> при выборе финальной пунктуации (и не эхо-репитить его). Раньше — модель видела секцию, но в инструкции не было привязки к ней.</div>
+
+    <div class="seg variable"><span class="lbl">variable</span>«Now transcribe chunk_N. <strong>is_final=true</strong>. … Apply final punctuation as natural for the spoken phrase, taking <code>Text after cursor</code> into account per the Insertion target rules. Do not repeat or re-emit any earlier chunks. Do not echo any text from <code>Text after cursor</code>.»</div>
+
+    <h2>Если предыдущий чанк ещё в полёте</h2>
+    <p><code>GeminiClient</code> — последовательный actor. Финальный чанк <em>ждёт</em> предыдущий, затем уходит сам. Worst-case latency = round-trip(chunk_{N-1}) + round-trip(chunk_N). Стриминг отключён в v1 (ADR-007).</p>
+
+    <h2>Edge case: «no final chunk»</h2>
+    <p>Если между последним эмитированным чанком и отпусканием хоткея <strong>не было аудио</strong> (полная тишина после паузы) — финальный запрос не делается. Тогда мы не получаем шанс «применить финальную пунктуацию» через модель. Эта дыра закрывается на следующем шаге — client-side cleanup.</p>
+
+    <div class="callout">Если сессия упала на любом из чанков (5xx после ретраев, 429, потеря интернета) — мы <em>не вставляем частичный транскрипт</em>. Лучше потерять реплику, чем вставить «недопредложение» в письмо или код.</div>
+  `;
+
+  case "concat": return `
+    <span class="stage-tag changed">шаг 12 / 14 · обновлено</span>
+    <h1>Конкатенация + client-side cleanup</h1>
+    <p>Каждый ответ Gemini содержит <em>только текст текущего чанка</em>. Полный транскрипт собирается на клиенте простым склеиванием:</p>
+
+    <pre class="code">${highlightSwift(`var stitched = ""
+for chunk in session.completedChunks {
+    stitched += chunk.text                    // никаких переносов между чанками
+}`)}</pre>
+
+    <h2 style="color:var(--new)">Client-side punctuation cleanup — новое в v2</h2>
+    <p>Edge case, который промпт сам по себе не закрывает: последний чанк ушёл как <code>is_final=false</code>, потом &gt;1 с тишины, пользователь отпустил хоткей. <strong>Финального запроса нет</strong>. В склейке остаётся точка от последнего non-final чанка — но в <code>Text after cursor</code> лежит продолжение фразы строчными. Точку надо снять.</p>
+
+    <p>Source of truth для финальной пунктуации — <strong>клиент, не модель</strong>: у нас полное состояние (ответы всех чанков + текст после курсора), у модели — нет.</p>
+
+    <pre class="code">${highlightSwift(`func finalizeForInsertion(_ stitched: String, textAfterCursor: String) -> String {
+    var out = stitched
+
+    let trimmedRight = textAfterCursor.trimmingCharacters(in: .whitespaces)
+    let continuesMidSentence: Bool = {
+        guard let first = trimmedRight.first else { return false }   // empty → keep punct
+        if first.isLowercase { return true }
+        if [",", ";", ":", "—", "-"].contains(first) { return true }
+        return false                                                 // capital / terminal → new sentence
+    }()
+
+    if continuesMidSentence {
+        let pattern = #"[.!?]\\s*$"#
+        if let range = out.range(of: pattern, options: .regularExpression) {
+            out.removeSubrange(range)
+        }
+    }
+
+    return out
+}`)}</pre>
+
+    <p>Вызывается <strong>один раз</strong> перед <code>inject(_:)</code>. На пути «no final chunk» тоже отрабатывает корректно — функция не зависит от того, был ли финальный запрос.</p>
+
+    <h2>Чего эта функция НЕ делает</h2>
+    <ul class="tight">
+      <li><strong>Не трогает пунктуацию между чанками внутри stitched</strong> — там модель распорядилась сама на основе <code>Prior chunks</code>.</li>
+      <li><strong>Не делает sentence-boundary normalizer</strong> (схлопывать «...you. In about...» → «...you, in about...»). Это отдельный дифф, пока не делаем.</li>
+      <li><strong>Не отрывает запятые / двоеточия / тире</strong> — только terminal punctuation (<code>. ! ?</code>).</li>
+    </ul>
+
+    <h2>Почему мы НЕ просим модель «выдать всё заново»</h2>
+    <ul class="tight">
+      <li><strong>Цена.</strong> Output tokens × 6 input tokens.</li>
+      <li><strong>Кеш.</strong> Длиннее ответ → больше времени до next chunk → меньше пользы от тёплого префикса.</li>
+      <li><strong>Стабильность.</strong> Меньше шансов, что модель «исправит» уже хорошо распознанный кусок.</li>
+    </ul>
+  `;
+
+  case "inject": return `
+    <span class="stage-tag">шаг 13 / 14</span>
+    <h1>Вставка через ⌘V</h1>
+    <p>AX-инъекция не работает в Electron, Terminal, многих NSText-вьюхах с кастомным field editor. Посимвольный <code>CGEvent</code> ломает IME и медленный. Универсальный путь — буфер обмена + ⌘V (ADR-004), как в Wispr Flow.</p>
+
+    <h2>Полный пайплайн</h2>
+    <pre class="code">${highlightSwift(`func inject(_ text: String) async {
+    let snap = PasteboardSnapshot.capture(.general)   // ВСЕ типы: string, image, RTF, file URL, custom UTI
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
+
+    postCommandV()                                    // CGEvent virtualKey 9, .maskCommand
+
+    try? await Task.sleep(for: .milliseconds(150))    // подождать пока приложение прочитает буфер
+
+    snap.restore(to: .general)                        // вернуть пользовательский буфер
+}`)}</pre>
+
+    <h2>Задержка восстановления</h2>
+    <p>Это самое тонкое место всего модуля. Если восстановим слишком рано — приложение получит <em>старый</em> буфер пользователя вместо нашего текста. Слишком поздно — пользователь видит, как «лагает» его буфер.</p>
+    <div class="grid-3">
+      <div class="card"><span class="k">AppKit native</span><span class="v">~ 50 ms</span></div>
+      <div class="card"><span class="k">Slack / Discord</span><span class="v">100–150 ms</span></div>
+      <div class="card"><span class="k">Notion / heavy Electron</span><span class="v">до 250 ms</span></div>
+      <div class="card"><span class="k">Terminal / iTerm</span><span class="v">~ 100 ms</span></div>
+      <div class="card"><span class="k">default</span><span class="v">150 ms</span></div>
+      <div class="card"><span class="k">range (Settings)</span><span class="v">50–500 ms</span></div>
+    </div>
+
+    <h2>Чего здесь не делаем</h2>
+    <ul class="tight">
+      <li><strong>Не ретраим ⌘V</strong>, если показалось, что не сработало — мы не можем надёжно это определить, а двойная вставка бесит сильнее.</li>
+      <li><strong>Не подбираем задержку по приложению</strong> — поддержка app-specific тюнинга оказалась бы дороже самой проблемы.</li>
+      <li><strong>Не пишем в private pasteboard и не «копируем оттуда»</strong> — ⌘V всегда работает с <code>.general</code>, обхода нет.</li>
+    </ul>
+  `;
+
+  case "history": return `
+    <span class="stage-tag">шаг 14 / 14</span>
+    <h1>История</h1>
+    <p>В <code>~/Library/Application Support/Aura/history.json</code> хранится <strong>только текст</strong> (инвариант I4 — никакого аудио на диске). Cap 10, FIFO. Без шифрования: системные file-permissions ограничивают доступ владельцем, а угрозо-модель v1 не включает враждебные локальные процессы (ADR-010).</p>
+
+    <h2>Схема</h2>
+    <pre class="code">${highlightSwift(`struct HistoryEntry: Codable, Identifiable, Sendable {
+    let id: UUID
+    let text: String                          // транскрипт
+    let sourceAppName: String                 // "Slack"
+    let sourceBundleID: String                // "com.tinyspeck.slackmacgap"
+    let timestamp: Date
+}`)}</pre>
+
+    <h2>Поведение</h2>
+    <ul class="tight">
+      <li><code>append(entry)</code> → если уже 10 записей, дроп самой старой.</li>
+      <li><code>remove(id:)</code> → атомарная перезапись файла; UI обновляется оптимистично.</li>
+      <li>Чтение для popover — newest-first, но в файле порядок не специфицирован.</li>
+      <li>Если файл повреждён — переименовываем в <code>history.json.corrupt-&lt;ts&gt;</code> и стартуем с пустого. Не теряем «тихо».</li>
+    </ul>
+
+    <h2>Жизненный цикл сессии — конец</h2>
+    <ol style="padding-left:18px;color:#cfcfcf">
+      <li>stitched транскрипт → <code>finalizeForInsertion</code> → текст готов.</li>
+      <li>Транскрипт вставлен через ⌘V.</li>
+      <li><code>HistoryStore.append(entry)</code>.</li>
+      <li><code>AudioRecorder.stop()</code>; ring-буфер обнуляется.</li>
+      <li><code>RecordingSession</code> отбрасывается (deinit).</li>
+      <li>Иконка в меню-баре — обратно в <code>mic</code> (template).</li>
+      <li>HUD свёрнут.</li>
+    </ol>
+
+    <p>Aura снова в покое. Готова к следующему нажатию Right Option.</p>
+  `;
+
+  }
+}
+
+/* ──────────────────────────────────────────────────────────────────
+   Промпт / нижняя панель
+   ────────────────────────────────────────────────────────────────── */
+
+function buildGeminiRequest(chunk) {
+  const app = APPS[state.app];
+  const isFinal = chunk === "final";
+  const chunkNum = isFinal ? (PRIOR_CHUNKS.final.length + 1) : Number(chunk);
+  const priors = PRIOR_CHUNKS[chunk] || [];
+  const priorsText = priors.length === 0
+    ? "(none yet)"
+    : priors.map((t, i) => `  chunk_${i + 1}: "${t.trim()}"`).join("\n");
+
+  const instructionFinal =
+    `Now transcribe chunk_${chunkNum}. is_final=true. This is the last chunk of the session. Output only the words spoken in this chunk's audio. Apply final punctuation as natural for the spoken phrase, taking \`Text after cursor\` into account per the Insertion target rules. Do not repeat or re-emit any earlier chunks. Do not echo any text from \`Text after cursor\`.`;
+  const instructionMid =
+    `Now transcribe chunk_${chunkNum}. is_final=false. Output only the words spoken in this chunk's audio. If the phrase ends mid-thought, omit terminal punctuation (. ! ?).`;
+
+  const insertionBlock =
+`Insertion target:
+  Text before cursor: "${escapeForJSON(app.insertionBefore)}"
+  Text after cursor: "${escapeForJSON(app.insertionAfter)}"`;
+
+  const onScreenBlock =
+`On-screen context:
+${app.axSample}`;
+
+  const priorBlock =
+`Prior chunks (this session):
+${priorsText}`;
+
+  return `POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=<API_KEY>
+Content-Type: application/json
+
+{
+  "system_instruction": {
+    "parts": [
+      { "text": "<see SYSTEM_INSTRUCTION constant — ~1100 tokens, identical across all sessions>" }
+    ]
+  },
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        // ─────────── cached prefix (identical across chunks of THIS session) ───────────
+        { "text": "App: ${app.name} (${app.bundle})\\nStyle hint: ${app.style}" },
+
+        { "text": "${escapeForJSON(insertionBlock)}" },
+
+        { "text": "${escapeForJSON(onScreenBlock)}" },
+
+        { "text": "${escapeForJSON(priorBlock)}" },
+
+        // ─────────── variable suffix (per chunk) ───────────
+        { "text": "${escapeForJSON(isFinal ? instructionFinal : instructionMid)}" },
+
+        { "inline_data": { "mime_type": "audio/mp4", "data": "<base64-encoded m4a, ~${(chunkNum * 8).toFixed(0)} KB>" } }
+      ]
+    }
+  ],
+  "generationConfig": {
+    "thinkingConfig": { "thinkingLevel": "minimal" },
+    "temperature": 0.2,
+    "responseMimeType": "text/plain"
+  }
+}`;
+}
+
+function promptFor(id) {
+  const app = APPS[state.app];
+
+  switch (id) {
+    case "idle": return {
+      title: "Что выполняется",
+      badge: "background loop",
+      body:
+`# HotkeyMonitor — фоновой цикл
+
+Thread:    "app.aura.hotkey"  (qos: .userInteractive)
+RunLoop:   собственный, не main
+EventTap:  CGEvent.tapCreate(
+             tap: .cgSessionEventTap,
+             place: .headInsertEventTap,
+             options: .listenOnly,
+             eventsOfInterest: 1 << CGEventType.flagsChanged.rawValue,
+             callback: handleEvent,
+             userInfo: refcon
+           )
+
+while (CFRunLoopRun()) {
+  // ждём событий flagsChanged
+  // на tapDisabledByTimeout — re-enable
+}`
+    };
+
+    case "press": return {
+      title: "Callback хоткея",
+      badge: "C function pointer",
+      body:
+`let callback: CGEventTapCallBack = { _, type, event, refcon in
+    guard let refcon else { return Unmanaged.passUnretained(event) }
+
+    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+        let monitor = Unmanaged<HotkeyMonitor>.fromOpaque(refcon).takeUnretainedValue()
+        CGEvent.tapEnable(tap: monitor.tap, enable: true)
+        return Unmanaged.passUnretained(event)
+    }
+
+    let monitor = Unmanaged<HotkeyMonitor>.fromOpaque(refcon).takeUnretainedValue()
+    monitor.handleEvent(event)
+    return Unmanaged.passUnretained(event)        // listenOnly — пропускаем дальше
+}
+
+// внутри monitor.handleEvent:
+let rightOptionBit: UInt64 = 0x40
+let prev = previousFlags & rightOptionBit != 0
+let curr = event.flags.rawValue & rightOptionBit != 0
+previousFlags = event.flags.rawValue
+
+if !prev && curr {
+    Task { @MainActor in delegate?.onPress() }       // → создаём RecordingSession
+} else if prev && !curr {
+    Task { @MainActor in delegate?.onRelease() }     // → отправляем финальный чанк
+}`
+    };
+
+    case "session": return {
+      title: "RecordingSession.start() — ждём контекст",
+      badge: "@MainActor · v2",
+      body:
+`@MainActor
+final class RecordingSession {
+    var context: ContextSnapshot!
+    var insertion: InsertionTarget!
+    let recorder: AudioRecorder
+    let geminiClient: GeminiClient
+    var transcripts: [String] = []
+    var lastChunkEnd: TimeInterval = 0
+
+    func start() async throws {
+        // audio capture стартует немедленно — пишем в ring buffer
+        try await recorder.start()
+        await vad.reset()
+
+        // АКТИВНО ЖДЁМ контекст (v2 change). Hard timeout 250 ms.
+        async let ctx       = ContextSnapshot.build()
+        async let insertion = InsertionTarget.capture()
+
+        do {
+            self.context   = try await withTimeout(.milliseconds(250)) { try await ctx }
+            self.insertion = try await withTimeout(.milliseconds(50))  { try await insertion }
+        } catch is TimeoutError {
+            // Fallback: пустой target / минимальный context. Секции в промпте остаются.
+            self.context   = ContextSnapshot.empty
+            self.insertion = InsertionTarget.empty
+        }
+
+        // VAD стримит события только теперь — гарантия что первый чанк
+        // не уйдёт без insertion target и AX snapshot.
+        Task.detached { [weak self] in
+            for await event in self!.vad.events {
+                await self?.handle(event)
+            }
+        }
+
+        menuBar.state = .recording
+        hud.show(.recording)
+    }
+}`
+    };
+
+    case "context": return {
+      title: "Insertion target + AX snapshot (v2)",
+      badge: "что отправляется в кешируемый префикс",
+      body:
+`# 1. INSERTION TARGET (новое в v2)
+
+Text before cursor: "${app.insertionBefore.replace(/\n/g, '\\n')}"
+Text after cursor:  "${app.insertionAfter.replace(/\n/g, '\\n')}"
+
+# Edge cases (все → пустые строки, секция остаётся):
+#  • нет фокуса (focused == nil)
+#  • поле не текстовое (нет kAXValueAttribute)
+#  • нет selection range
+#  • Electron / кастомный NSText → невалидный value
+
+# 2. ON-SCREEN ACCESSIBILITY TREE
+
+=== ${app.name} (${app.bundle}) ===
+${app.axSample}
+
+=== Notes (com.apple.Notes) ===
+Window: "Notes — TODO"
+  Note (open):
+    "remember: rebind hotkey for european layout"
+
+=== Aura (app.aura) ===
+(no visible windows during recording)
+
+──────────────────────────────────────────
+Total nodes: 217
+Truncated: 0
+Masked: 1 (likely card number in Mail subject)
+Capture time: 142 ms (cap 250 ms)
+──────────────────────────────────────────`
+    };
+
+    case "audio": return {
+      title: "Что течёт через ring buffer",
+      badge: "PCM float32 16 kHz mono",
+      body:
+`// 1 секунда речи в ring буфере:
+samples = [-0.012, 0.034, 0.041, 0.022, ..., -0.008]   // 16 000 значений
+bytes   = 64 KB                                        // float32 = 4 байта
+
+// За 30 секунд = 480 000 сэмплов = 1.92 MB
+// Lock-free SPSC — producer на render thread, consumer в VAD task
+
+// Consumer достаёт 32 ms кусками:
+while !Task.isCancelled {
+    let frame = try await ringBuffer.read(samples: 512)   // 512 × float32 = 32 ms
+    let probability = try await vad.classify(frame)
+    pauseDetector.feed(probability, at: ringBuffer.currentTime)
+}`
+    };
+
+    case "vad": return {
+      title: "Что выдаёт Silero",
+      badge: "tensor [1] in [0, 1]",
+      body:
+`// Inference pseudocode (per 32ms window):
+input  = MLMultiArray(shape: [1, 512], dataType: .float32)
+state  = previous LSTM hidden state
+output = silero.predict(input, state)
+prob   = output.scalar()                          // например, 0.87
+state  = output.newState                          // сохраняем для следующего окна
+
+// Поток вероятностей за ~5 секунд речи:
+[
+  0.01, 0.02, 0.04, 0.18, 0.62, 0.91, 0.94, 0.92, 0.88,    // ↑ начало "let me check"
+  0.85, 0.71, 0.42, 0.18, 0.05, 0.04, 0.03, 0.02,           // → пауза 350 мс
+  0.04, 0.21, 0.78, 0.92, 0.89, 0.84, ...                   // ↑ "and get back to you"
+]
+// threshold 0.5 → voiced/silent`
+    };
+
+    case "pause": return {
+      title: "Лента событий PauseDetector",
+      badge: "AsyncStream<VADEvent>",
+      body:
+`t=0.000  feed(0.02)   → state Idle
+t=0.032  feed(0.04)   → state Idle
+...
+t=0.480  feed(0.62)   → run=1
+t=0.512  feed(0.91)   → run=2
+t=0.544  feed(0.94)   → run=3 → state Speaking, chunkStart=0.480
+t=0.576  feed(0.92)   → state Speaking
+...
+t=2.110  feed(0.04)   → state Pausing, pauseStart=2.110
+t=2.142  feed(0.02)   → silent, count=2/32
+t=2.174  feed(0.03)   → silent, count=3/32
+...
+t=3.110  feed(0.01)   → silent ≥ 1.0s
+
+emit Chunk {
+  range:  0.180 ... 2.110          // chunkStart - 0.300 (preroll) ... pauseStart
+  text:   <to be transcribed>
+  index:  1
+}
+
+state → Idle, chunkStart=nil`
+    };
+
+    case "chunk": return {
+      title: "Заголовок m4a-чанка",
+      badge: "audio/mp4 container",
+      body:
+`MP4 box hierarchy (~37 KB чанк ≈ 1.93 секунды речи):
+
+ftyp:                  isom + mp42
+moov:
+  mvhd:                timescale=16000, duration=30880
+  trak:
+    tkhd:              track_id=1
+    mdia:
+      mdhd:            timescale=16000, lang=und
+      hdlr:            soun
+      minf:
+        stbl:
+          stsd:        mp4a
+            mp4a:      sample_rate=16000, channels=1
+              esds:    AAC LC, bitrate=32000
+mdat:                  ~32 768 bytes raw AAC frames
+
+# В коде: AVAssetWriter → AVAssetWriterInput → AVAssetWriterInputPullStyleAdaptor
+# Никаких файлов на диске: пишем в AVAssetWriter с временным URL,
+# по completion читаем Data, удаляем файл, держим только Data в памяти.`
+    };
+
+    case "gemini1": return {
+      title: "HTTP-запрос к Gemini (chunk 1, v2 формат)",
+      badge: "POST · no cache yet",
+      body: buildGeminiRequest("1")
+    };
+
+    case "geminiN": return {
+      title: `HTTP-запрос к Gemini (chunk ${state.chunk === 'final' ? 'final' : state.chunk}, v2 формат)`,
+      badge: state.chunk === "1" ? "POST · no cache (это первый чанк)" : "POST · ≈ 90% cached",
+      body: buildGeminiRequest(state.chunk)
+    };
+
+    case "final": return {
+      title: "HTTP-запрос финального чанка (v2 инструкция)",
+      badge: "POST · is_final=true",
+      body: buildGeminiRequest("final")
+    };
+
+    case "concat": return {
+      title: "Стыковка + client-side cleanup",
+      badge: "v2: finalizeForInsertion",
+      body:
+`# Шаг 1 — наивная склейка:
+chunk_1.text  =  "the timeline looks tight but doable"
+chunk_2.text  =  " could you double-check the QA window"
+chunk_3.text  =  " and ping me on Slack"
+chunk_4.text  =  " before the demo."          // is_final=true → точка
+
+stitched = chunk_1.text + chunk_2.text + chunk_3.text + chunk_4.text
+        = "the timeline looks tight but doable could you double-check the QA window and ping me on Slack before the demo."
+
+# Шаг 2 — finalizeForInsertion(stitched, textAfterCursor):
+textAfterCursor = ${JSON.stringify(app.insertionAfter)}
+
+# Анализ textAfterCursor:
+${(() => {
+  const t = app.insertionAfter.trimStart();
+  if (t.length === 0) return `  → пустой → continuesMidSentence=false → точка остаётся.`;
+  const c = t[0];
+  const isLow = c.toLowerCase() === c && c.toUpperCase() !== c.toLowerCase();
+  if (isLow) return `  → начинается со строчной "${c}" → continuesMidSentence=true → точка снимается.`;
+  if ([",", ";", ":", "—", "-"].includes(c)) return `  → начинается с "${c}" → continuesMidSentence=true → точка снимается.`;
+  return `  → начинается с "${c}" → новое предложение → continuesMidSentence=false → точка остаётся.`;
+})()}
+
+# Шаг 3 — что фактически вставится между before и after:
+final = "${app.insertionBefore.replace(/\n/g, '\\n')}<DICTATED TEXT (cleaned)>${app.insertionAfter.replace(/\n/g, '\\n')}"
+
+# В TextInjector уходит только finalText (без before/after — они уже в поле)`
+    };
+
+    case "inject": return {
+      title: "Поток событий вставки",
+      badge: "TextInjector.inject(...)",
+      body:
+`# t=0:        clipboard snapshot
+items captured = [
+  { type: public.utf8-plain-text,  data: "https://github.com/anthropic" },
+  { type: public.url,              data: "https://github.com/anthropic" }
+]
+
+# t=0+ε:      clear + setString
+NSPasteboard.general.clearContents()
+NSPasteboard.general.setString(
+    "<сюда уходит результат finalizeForInsertion(stitched, textAfterCursor)>",
+    forType: .string
+)
+
+# t=1ms:      synthesize ⌘V
+src  = CGEventSource(stateID: .combinedSessionState)
+down = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
+down.flags = .maskCommand
+down.post(tap: .cgAnnotatedSessionEventTap)
+up   = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
+up.flags = .maskCommand
+up.post(tap: .cgAnnotatedSessionEventTap)
+
+# t=1ms…151ms:  appkit/Electron read pasteboard, paste handled
+
+# t=151ms:    restore user clipboard
+NSPasteboard.general.clearContents()
+NSPasteboard.general.writeObjects(items)
+
+# Net effect: текст вставлен между Text before и Text after,
+# буфер пользователя выглядит так, как до вставки.`
+    };
+
+    case "history": return {
+      title: "Записи в history.json",
+      badge: "FIFO, cap 10",
+      body:
+`[
+  {
+    "id": "F4D8A3E1-7C92-4B1F-A4D2-3E8F7B6C9A1D",
+    "text": "the timeline looks tight but doable could you double-check the QA window and ping me on Slack",
+    "sourceAppName": "${app.name}",
+    "sourceBundleID": "${app.bundle}",
+    "timestamp": "2026-05-10T14:32:18Z"
+  },
+  {
+    "id": "9B2C1A5E-8F4D-4B9C-A1E3-7D5F8B2C4A6E",
+    "text": "Hi Sarah, thanks for the quick turnaround on the Q3 plan...",
+    "sourceAppName": "Mail",
+    "sourceBundleID": "com.apple.mail",
+    "timestamp": "2026-05-10T14:18:42Z"
+  }
+  // ... ещё до 8 записей. На 11-й — самая старая удаляется.
+]`
+    };
+  }
+}
+
+/* ──────────────────────────────────────────────────────────────────
+   Рендер
+   ────────────────────────────────────────────────────────────────── */
+
+function renderSteps() {
+  const ul = document.getElementById("steps");
+  ul.innerHTML = STEPS.map((s, i) => `
+    <li class="step ${s.id === state.step ? 'active' : ''} ${stepIndex(state.step) > i ? 'passed' : ''}" data-id="${s.id}">
+      <span class="num">${String(i + 1).padStart(2, '0')}</span>
+      <span class="label">${s.label}${s.changed ? '<span class="changed" title="изменено в v2"></span>' : ''}<small class="sub">${s.sub}</small></span>
+    </li>
+  `).join("");
+  ul.querySelectorAll(".step").forEach(el => {
+    el.onclick = () => { state.step = el.dataset.id; updateAll(); };
+  });
+}
+
+function stepIndex(id) { return STEPS.findIndex(s => s.id === id); }
+
+function renderStage() {
+  document.getElementById("stage").innerHTML = stepContent(state.step);
+  if (state.step === "vad") drawWave("wave-vad", false);
+  if (state.step === "chunk") drawWave("wave-chunk", true);
+}
+
+function drawWave(elId, withPreroll) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  const N = 80;
+  el.innerHTML = "";
+  for (let i = 0; i < N; i++) {
+    const div = document.createElement("div");
+    div.className = "bar";
+    let h, klass = "";
+    if (withPreroll) {
+      if (i < 12)            { klass = "preroll";  h = 14 + Math.random() * 8;  }
+      else if (i < 65)       { klass = "voiced";   h = 12 + Math.random() * 38; }
+      else                   { klass = "";         h = 4 + Math.random() * 6;   }
+    } else {
+      const block = Math.floor(i / 12);
+      if (block % 2 === 0)   { klass = "voiced";   h = 12 + Math.random() * 38; }
+      else                   { klass = "";         h = 4 + Math.random() * 8;   }
+    }
+    if (klass) div.classList.add(klass);
+    div.style.height = h + "px";
+    el.appendChild(div);
+  }
+}
+
+function renderPrompt() {
+  const p = promptFor(state.step);
+  document.getElementById("prompt-title").textContent = p.title;
+  document.getElementById("prompt-badge").textContent = p.badge;
+  const body = document.getElementById("prompt");
+  if (state.step === "gemini1" || state.step === "geminiN" || state.step === "final") {
+    body.innerHTML = highlightJSON(p.body);
+  } else {
+    body.innerHTML = highlightSwift(p.body);
+  }
+}
+
+function updateAll() {
+  renderSteps();
+  renderStage();
+  renderPrompt();
+}
+
+/* ──────────────────────────────────────────────────────────────────
+   Контролы
+   ────────────────────────────────────────────────────────────────── */
+
+document.querySelectorAll("#chunk-control button").forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll("#chunk-control button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    state.chunk = btn.dataset.chunk;
+    if (state.chunk !== "1" && state.step === "gemini1") state.step = "geminiN";
+    if (state.chunk === "final") state.step = "final";
+    updateAll();
+  };
+});
+
+document.querySelectorAll("#app-control button").forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll("#app-control button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    state.app = btn.dataset.app;
+    updateAll();
+  };
+});
+
+document.getElementById("copy").onclick = async () => {
+  const btn = document.getElementById("copy");
+  const text = document.getElementById("prompt").innerText;
+  try {
+    await navigator.clipboard.writeText(text);
+    btn.textContent = "Скопировано";
+    btn.classList.add("copied");
+    setTimeout(() => {
+      btn.textContent = "Копировать";
+      btn.classList.remove("copied");
+    }, 1500);
+  } catch (e) {
+    btn.textContent = "Ошибка";
+  }
+};
+
+// keyboard nav
+document.addEventListener("keydown", (e) => {
+  const idx = stepIndex(state.step);
+  if (e.key === "ArrowDown" || e.key === "ArrowRight") {
+    if (idx < STEPS.length - 1) { state.step = STEPS[idx + 1].id; updateAll(); }
+    e.preventDefault();
+  } else if (e.key === "ArrowUp" || e.key === "ArrowLeft") {
+    if (idx > 0) { state.step = STEPS[idx - 1].id; updateAll(); }
+    e.preventDefault();
+  }
+});
+
+updateAll();
+</script>
+</body>
+</html>

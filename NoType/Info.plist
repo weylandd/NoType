@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>NoType</string>
+	<key>CFBundleDisplayName</key>
+	<string>NoType</string>
+	<key>CFBundleIdentifier</key>
+	<string>app.notype</string>
+	<key>CFBundleVersion</key>
+	<string>2</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.1</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>LSUIElement</key>
+	<true/>
+	<!--
+	NSSupportsAutomaticTermination=false: as an LSUIElement app the
+	system would otherwise consider us idle whenever no windows are
+	visible — including while the menu-bar tray icon is the only UI —
+	and AppKit would silently terminate the process. That kills the
+	hotkey monitor, recording session, and history store in flight.
+	Opt out so the app stays alive until the user quits.
+	-->
+	<key>NSSupportsAutomaticTermination</key>
+	<false/>
+	<key>NSSupportsSuddenTermination</key>
+	<false/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>NoType uses the microphone to record your voice for dictation.</string>
+	<key>NSAccessibilityUsageDescription</key>
+	<string>NoType reads on-screen text to improve transcription accuracy.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>NoType reads on-screen text via screenshots to improve dictation accuracy in apps that don't expose their content via the accessibility API. Screen capture is optional — leave it off to use accessibility-only context.</string>
+</dict>
+</plist>

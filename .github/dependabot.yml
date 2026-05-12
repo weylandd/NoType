@@ -1,0 +1,16 @@
+version: 2
+updates:
+  # GitHub Actions used in workflows under .github/workflows/
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  # Swift Package Manager — currently no SPM deps, but Sparkle is planned.
+  # When Package.resolved appears, dependabot will start checking it.
+  - package-ecosystem: "swift"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

@@ -1,0 +1,237 @@
+import XCTest
+@testable import NoType
+
+/// Pins `DictionaryStore`'s contract — atomic round-trip, FIFO trim
+/// over 100 with user-stickiness, case-insensitive dedup, length cap,
+/// and corruption recovery.
+final class DictionaryStoreTests: XCTestCase {
+
+    private var tempDir: URL!
+    private var url: URL!
+
+    override func setUp() async throws {
+        try await super.setUp()
+        tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DictionaryStoreTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        url = tempDir.appendingPathComponent("dictionary.json")
+    }
+
+    override func tearDown() async throws {
+        try? FileManager.default.removeItem(at: tempDir)
+        try await super.tearDown()
+    }
+
+    // MARK: - Round-trip
+
+    func test_emptyFile_returnsEmptySnapshot() async {
+        let store = DictionaryStore(url: url)
+        let snap = await store.snapshot()
+        XCTAssertTrue(snap.entries.isEmpty)
+        XCTAssertTrue(snap.replacements.isEmpty)
+    }
+
+    func test_addUserEntry_persistsAndRoundTrips() async {
+        let store = DictionaryStore(url: url)
+        _ = await store.addUserEntry("NoType")
+        _ = await store.addUserEntry("Anthropic")
+
+        let other = DictionaryStore(url: url)
+        let snap = await other.snapshot()
+        XCTAssertEqual(snap.entries.count, 2)
+        XCTAssertEqual(Set(snap.entries.map { $0.word }), ["NoType", "Anthropic"])
+        XCTAssertTrue(snap.entries.allSatisfy { $0.source == .user })
+    }
+
+    func test_addReplacement_persistsAndRoundTrips() async {
+        let store = DictionaryStore(url: url)
+        _ = await store.addReplacement(from: "то есть", to: "т.е.")
+
+        let other = DictionaryStore(url: url)
+        let snap = await other.snapshot()
+        XCTAssertEqual(snap.replacements.count, 1)
+        XCTAssertEqual(snap.replacements.first?.from, "то есть")
+        XCTAssertEqual(snap.replacements.first?.to, "т.е.")
+    }
+
+    // MARK: - Dedup
+
+    func test_addUserEntry_dedupesCaseInsensitive() async {
+        let store = DictionaryStore(url: url)
+        _ = await store.addUserEntry("NoType")
+        let snap = await store.addUserEntry("notype")
+        XCTAssertEqual(snap.entries.count, 1,
+            "case-insensitive duplicate must not add a second entry")
+    }
+
+    func test_addUserEntry_promotesExistingAutoToUser() async {
+        let store = DictionaryStore(url: url)
+        _ = await store.addAutoEntries(["Anthropic"])
+        var snap = await store.snapshot()
+        XCTAssertEqual(snap.entries.first?.source, .auto)
+
+        snap = await store.addUserEntry("Anthropic")
+        XCTAssertEqual(snap.entries.count, 1)
+        XCTAssertEqual(snap.entries.first?.source, .user,
+            "case-insensitive duplicate of an .auto entry promotes it to .user (sticky)")
+    }
+
+    // MARK: - maxEntryLength cap
+
+    func test_addUserEntry_rejectsOverLengthInput() async {
+        let store = DictionaryStore(url: url)
+        let overLong = String(repeating: "a", count: DictionarySnapshot.maxEntryLength + 1)
+        _ = await store.addUserEntry(overLong)
+        let snap = await store.snapshot()
+        XCTAssertTrue(snap.entries.isEmpty,
+            "entries longer than maxEntryLength must be rejected")
+    }
+
+    func test_addAutoEntries_filtersOverLengthWords() async {
+        let store = DictionaryStore(url: url)
+        _ = await store.addAutoEntries([
+            "ok",
+            String(repeating: "x", count: DictionarySnapshot.maxEntryLength + 5),
+            "fine",
+        ])
+        let snap = await store.snapshot()
+        XCTAssertEqual(Set(snap.entries.map { $0.word }), ["ok", "fine"])
+    }
+
+    // MARK: - FIFO trim with user-stickiness
+
+    func test_addAutoEntries_trimsOldestAutoFirst_overCap() async {
+        let store = DictionaryStore(url: url)
+        // Fill with 100 auto entries.
+        let initial = (0..<100).map { "auto\($0)" }
+        _ = await store.addAutoEntries(initial)
+        var snap = await store.snapshot()
+        XCTAssertEqual(snap.entries.count, 100)
+
+        // Add 5 more — oldest 5 auto should be evicted.
+        _ = await store.addAutoEntries(["new1", "new2", "new3", "new4", "new5"])
+        snap = await store.snapshot()
+        XCTAssertEqual(snap.entries.count, 100, "cap honoured")
+        let words = Set(snap.entries.map { $0.word })
+        XCTAssertTrue(words.contains("new1"))
+        XCTAssertTrue(words.contains("new5"))
+        XCTAssertFalse(words.contains("auto0"),
+            "oldest auto entries must be evicted FIFO")
+    }
+
+    func test_userEntries_stickyOnAutoOverflow() async {
+        let store = DictionaryStore(url: url)
+        _ = await store.addUserEntry("Anthropic")
+        _ = await store.addUserEntry("NoType")
+        // Now pour in 99 auto entries — total would be 101, one must
+        // be dropped, and it must be the oldest auto, NOT a user.
+        let autos = (0..<99).map { "x\($0)" }
+        _ = await store.addAutoEntries(autos)
+        let snap = await store.snapshot()
+        XCTAssertEqual(snap.entries.count, 100)
+        let userWords = Set(snap.entries.filter { $0.source == .user }.map { $0.word })
+        XCTAssertEqual(userWords, ["Anthropic", "NoType"],
+            "user entries remain sticky over the trim")
+    }
+
+    // MARK: - Remove
+
+    func test_removeEntry_byID() async {
+        let store = DictionaryStore(url: url)
+        let snap = await store.addUserEntry("NoType")
+        let id = try? XCTUnwrap(snap.entries.first?.id)
+        _ = await store.removeEntry(id: id ?? UUID())
+        let after = await store.snapshot()
+        XCTAssertTrue(after.entries.isEmpty)
+    }
+
+    func test_removeEntry_missingID_isNoOp() async {
+        let store = DictionaryStore(url: url)
+        _ = await store.addUserEntry("NoType")
+        _ = await store.removeEntry(id: UUID())
+        let after = await store.snapshot()
+        XCTAssertEqual(after.entries.count, 1)
+    }
+
+    // MARK: - Replacements
+
+    func test_addReplacement_dedupesCaseInsensitiveFromKey() async {
+        let store = DictionaryStore(url: url)
+        _ = await store.addReplacement(from: "то есть", to: "т.е.")
+        _ = await store.addReplacement(from: "ТО ЕСТЬ", to: "ТЕ")
+        let snap = await store.snapshot()
+        XCTAssertEqual(snap.replacements.count, 1,
+            "duplicate `from` (case-insensitive) replaces existing pair")
+        XCTAssertEqual(snap.replacements.first?.to, "ТЕ")
+    }
+
+    func test_addReplacement_rejectsEmptyFromOrTo() async {
+        let store = DictionaryStore(url: url)
+        _ = await store.addReplacement(from: "", to: "т.е.")
+        _ = await store.addReplacement(from: "то есть", to: "")
+        _ = await store.addReplacement(from: "   ", to: "т.е.")
+        let snap = await store.snapshot()
+        XCTAssertTrue(snap.replacements.isEmpty,
+            "replacements with empty / whitespace sides must be rejected")
+    }
+
+    func test_updateReplacement_byID() async {
+        let store = DictionaryStore(url: url)
+        var snap = await store.addReplacement(from: "то есть", to: "т.е.")
+        let id = try? XCTUnwrap(snap.replacements.first?.id)
+        snap = await store.updateReplacement(id: id ?? UUID(), from: "то есть", to: "ТЕ")
+        XCTAssertEqual(snap.replacements.first?.to, "ТЕ")
+    }
+
+    func test_removeReplacement_byID() async {
+        let store = DictionaryStore(url: url)
+        let snap = await store.addReplacement(from: "то есть", to: "т.е.")
+        let id = try? XCTUnwrap(snap.replacements.first?.id)
+        _ = await store.removeReplacement(id: id ?? UUID())
+        let after = await store.snapshot()
+        XCTAssertTrue(after.replacements.isEmpty)
+    }
+
+    // MARK: - promptEntries
+
+    func test_promptEntries_includesBothBuckets_userFirst() async {
+        let store = DictionaryStore(url: url)
+        _ = await store.addUserEntry("NoType")
+        _ = await store.addAutoEntries(["Anthropic"])
+        let snap = await store.snapshot()
+        let prompt = snap.promptEntries()
+        XCTAssertTrue(prompt.contains("NoType"))
+        XCTAssertTrue(prompt.contains("Anthropic"))
+        XCTAssertLessThan(prompt.firstIndex(of: "NoType")!,
+                          prompt.firstIndex(of: "Anthropic")!,
+                          "user entries should come before auto entries")
+    }
+
+    func test_promptEntries_capsAtMaxTotalEntries() async {
+        let store = DictionaryStore(url: url)
+        for i in 0..<DictionarySnapshot.maxTotalEntries {
+            _ = await store.addUserEntry("user\(i)")
+        }
+        // Adding auto on top must not push the prompt past the 100 cap.
+        // Store's `addAutoEntries` itself trims, so promptEntries should
+        // never exceed 100.
+        _ = await store.addAutoEntries(["autoA", "autoB", "autoC"])
+        let snap = await store.snapshot()
+        let prompt = snap.promptEntries()
+        XCTAssertEqual(prompt.count, DictionarySnapshot.maxTotalEntries)
+    }
+
+    // MARK: - Corruption recovery
+
+    func test_corruptFile_isQuarantined_andEmptySnapshotReturned() async throws {
+        try Data("{ not valid json".utf8).write(to: url)
+        let store = DictionaryStore(url: url)
+        let snap = await store.snapshot()
+        XCTAssertTrue(snap.entries.isEmpty)
+        XCTAssertTrue(snap.replacements.isEmpty)
+        // A `.corrupt-*` sibling file should exist now.
+        let siblings = (try? FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)) ?? []
+        XCTAssertTrue(siblings.contains { $0.pathExtension.hasPrefix("corrupt-") },
+            "corrupt file must be renamed with .corrupt-<ts> suffix")
+    }
+}

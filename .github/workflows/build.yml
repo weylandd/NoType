@@ -1,0 +1,59 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-flight runs on the same branch when a new push lands.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & Test (macOS)
+    # NOTE: NoType requires macOS 26 (Tahoe) at runtime. GitHub-hosted macOS
+    # runners may lag behind the macOS release schedule — when that's the case,
+    # this job will fail on the xcodebuild step until a `macos-26` (or newer)
+    # runner image is available. Pin the runner version explicitly when one
+    # ships (e.g. `runs-on: macos-26`) instead of relying on `macos-latest`.
+    runs-on: macos-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain versions
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build (Debug)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project NoType.xcodeproj \
+            -scheme NoType \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            build
+
+      - name: Test
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project NoType.xcodeproj \
+            -scheme NoType \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            test

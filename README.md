@@ -1,0 +1,109 @@
+# NoType
+
+A macOS menu-bar app that turns push-to-talk voice into text and pastes it where the cursor is.
+
+Hold **Right Option** anywhere in macOS, talk, release. NoType transcribes via Gemini 3.1 Flash-Lite using on-screen context (accessibility tree of the focused app) for higher accuracy, then pastes at the cursor.
+
+Inspired by [Wispr Flow](https://wisprflow.ai) and [Monologue](https://monologue.to). Built as a transparent, BYOK-Gemini alternative.
+
+---
+
+## Status
+
+Early beta. The core push-to-talk → transcribe → paste loop works end-to-end. Distribution is via direct .dmg download (no Mac App Store, no auto-updates yet — Sparkle is planned).
+
+---
+
+## Requirements
+
+- macOS 26 (Tahoe) or later
+- A Gemini API key — [create one for free at Google AI Studio](https://aistudio.google.com/apikey)
+
+NoType uses your Gemini key directly from your machine. There is no NoType-operated proxy or account system. Your audio and on-screen context go from your Mac to Google's Gemini API and nowhere else.
+
+---
+
+## Install
+
+**Option A — pre-built release:**
+
+1. Download the latest `NoType-x.y.z.dmg` from [Releases](https://github.com/weylandd/NoType/releases).
+2. Open the DMG, drag NoType.app to `/Applications`.
+3. Launch — the onboarding wizard walks you through entering your Gemini key and granting permissions.
+
+**Option B — build from source** (see [docs/build.md](docs/build.md)):
+
+```bash
+brew install xcodegen
+xcodegen generate
+open NoType.xcodeproj
+# Build & run from Xcode
+```
+
+---
+
+## Permissions
+
+NoType asks for two permissions and one optional one. The onboarding wizard handles all three:
+
+| Permission | Required? | Why |
+|---|---|---|
+| **Microphone** | Required | Audio capture |
+| **Accessibility** | Required | (1) Global hotkey via `CGEventTap`, (2) reading on-screen text for transcription context |
+| **Screen Recording** | Optional | Fallback context source for apps that don't expose text via Accessibility (Electron apps like Slack/Discord, web-views like Notion). When granted, NoType screenshots the active window and OCR's it locally via Vision; pixels never reach Gemini, only OCR'd-and-scrubbed text |
+
+NoType does **not** use Apple's Speech Recognition framework — VAD runs locally via Silero (CoreML).
+
+For the full permission story, see [docs/permissions.md](docs/permissions.md).
+
+---
+
+## How it works
+
+```
+Hold Right Option → mic captures → Silero VAD detects pauses
+                  → chunks ship to Gemini with on-screen context
+                  → release → final chunk → stitched & pasted at cursor
+```
+
+Cache-friendly request structure means follow-up chunks within a session get a ~90% discount on prefix tokens. A free-tier Gemini key is enough for personal use.
+
+For the full architecture, see [docs/architecture.md](docs/architecture.md). For the why-not-X decisions, [docs/decisions.md](docs/decisions.md).
+
+---
+
+## Privacy
+
+- **No audio retention.** Audio exists in memory only during a session; it's discarded the moment the transcript is pasted.
+- **Last 10 transcripts only.** History is capped at 10 entries, plain text, in `~/Library/Application Support/NoType/`.
+- **Secure-field masking.** Anything from the Accessibility tree that looks like a password field, API key, JWT, credit card, etc. is redacted before it leaves your machine. See [`SecureFieldMasker.swift`](NoType/Context/SecureFieldMasker.swift) and [`docs/decisions.md`](docs/decisions.md) ADR-009/014.
+- **No telemetry, no analytics, no crash reporting.** Open source — read the code.
+- **Your Gemini key is stored in macOS Keychain.** Never logged, never sent anywhere except Google's API.
+
+---
+
+## Documentation
+
+- [`CLAUDE.md`](CLAUDE.md) — top-level project map
+- [`docs/architecture.md`](docs/architecture.md) — runtime data flow + invariants
+- [`docs/decisions.md`](docs/decisions.md) — architecture decision records (ADRs)
+- [`docs/conventions.md`](docs/conventions.md) — Swift 6 concurrency rules, error model, testing conventions
+- [`docs/permissions.md`](docs/permissions.md) — required macOS permissions
+- [`docs/build.md`](docs/build.md) — build, test, notarize, release
+- [`docs/TECHDEBT.md`](docs/TECHDEBT.md) — known improvements not yet shipped
+
+Per-module guides live in `NoType/<Module>/CLAUDE.md` (Recording, Context, Gemini, Hotkey, etc.).
+
+---
+
+## Contributing
+
+PRs welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening one — it covers the Conventional Commits convention, the security-critical files (`SecureFieldMasker`, `GeminiRequestBuilder`) that need extra care, and how to run the test suite.
+
+By contributing you agree to abide by the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).

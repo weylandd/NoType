@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or general discussion
+    url: https://github.com/weylandd/NoType/discussions
+    about: For "how do I...", "is X possible", or open-ended discussion. Bug reports and feature requests should use the templates above.
