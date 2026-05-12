@@ -72,31 +72,96 @@ On first launch you'll be prompted for Microphone and Accessibility — the onbo
 
 The project is signed with Apple Developer Team ID `49T6U8DQXZ` (see `project.yml` → `DEVELOPMENT_TEAM`) and uses a stable designated requirement (`signing/NoType.xcrequirements` — `designated => identifier "app.notype"`) so TCC grants and Keychain ACLs survive dev rebuilds.
 
-To cut a new release:
+### Cutting a release — the happy path
 
-1. Bump `CFBundleShortVersionString` and `CFBundleVersion` in `NoType/Info.plist`.
-2. From the repo root, run `./scripts/release.sh`.
+Releases are driven by **git tags**. Pushing `vX.Y.Z` fires `.github/workflows/release.yml` which builds + notarizes on a GitHub-hosted macOS runner, signs the Sparkle artefact, publishes the GitHub Release, and commits the updated `docs/appcast.xml` back to `main`. End-users on an older version see the update via Sparkle within 24 h (or immediately if they re-open the main window after the next check fires).
 
-The script reads the version from `Info.plist`, regenerates the Xcode project, archives + exports + signs the `.app`, notarizes both the `.app` and the `.dmg` via the `notype-notary` keychain profile, staples both, and emits `build/NoType-<version>.dmg` ready to ship. The Developer ID identity is auto-discovered from the login Keychain.
+```bash
+# 1. Bump version on main (PR or direct commit).
+#    Edit NoType/Info.plist:
+#      CFBundleShortVersionString  →  X.Y.Z      (semantic)
+#      CFBundleVersion              →  N         (monotonic integer; > previous)
+#    Add an entry to CHANGELOG.md describing what changed.
 
-One-time prerequisites on a fresh machine (already done on the current dev box):
-- A "Developer ID Application" certificate in the login Keychain (`security find-identity -p codesigning -v` to verify).
-- A notarytool keychain profile named `notype-notary`: `xcrun notarytool store-credentials "notype-notary" --apple-id "<id>" --team-id "49T6U8DQXZ"` (will prompt for an app-specific password).
-- `xcodegen` on PATH (`brew install xcodegen`).
+# 2. Tag the commit. Tag name MUST be `v` + CFBundleShortVersionString.
+git tag v0.1.2
+git push origin v0.1.2
+```
+
+That's it. Watch the workflow on GitHub Actions; ~10–15 minutes later the release is live, the appcast has the new `<item>`, and existing installs will pick it up on their next scheduled check.
+
+### What the workflow does
+
+1. Checkout at the tag (full history so the appcast push to `main` works).
+2. Install xcodegen + Sparkle CLI tools (downloaded as a tarball from Sparkle's release page; pinned via `SPARKLE_VERSION` env var in the workflow).
+3. Import the Developer ID Application certificate from GitHub Secrets.
+4. Create the `notype-notary` notarytool keychain profile from Apple secrets.
+5. Sanity-check that the tag version equals `CFBundleShortVersionString`.
+6. Run `scripts/release.sh` — archive + export + notarize + staple + DMG, plus the new `.zip` for Sparkle.
+7. Run `sign_update` against the `.zip` to produce the EdDSA signature.
+8. Switch to `main`, run `scripts/sparkle_appcast_item.sh` to insert a new `<item>` into `docs/appcast.xml`, commit, push.
+9. Create the GitHub Release with the `.dmg` and `.zip` attached, body from `CHANGELOG.md`.
+
+Tags with a hyphen (`v0.1.2-rc1`, `v0.2.0-beta`) are marked as **prerelease** on GitHub but **still appear in the appcast** — Sparkle has no separate prerelease channel yet. If you want to test a release without offering it to existing users, hold the push to `main` (i.e. tag a side branch and delete the appcast commit before merging).
+
+### Required GitHub Secrets
+
+The workflow needs six secrets in **Settings → Secrets and variables → Actions**:
+
+| Name                              | Value                                                                                    |
+|---|---|
+| `DEVELOPER_ID_CERT_P12`           | base64 of `Developer ID Application` certificate exported as `.p12`                       |
+| `DEVELOPER_ID_CERT_PASSWORD`      | password set when exporting the `.p12`                                                    |
+| `APPLE_ID`                        | Apple ID email used for notarization                                                       |
+| `APPLE_APP_PASSWORD`              | app-specific password generated at [appleid.apple.com](https://appleid.apple.com) → Sign-In and Security → App-Specific Passwords |
+| `TEAM_ID`                         | `49T6U8DQXZ`                                                                              |
+| `SPARKLE_ED_PRIVATE_KEY`          | base64 EdDSA private key exported via `generate_keys -x sparkle_private_key.txt`           |
+
+Exporting the certificate (one-time):
+
+```bash
+# Find it in the login Keychain
+security find-identity -p codesigning -v
+# Export to a .p12 (Keychain Access app: right-click → Export, or:)
+security export -k login.keychain -t identities -f pkcs12 \
+    -P "<choose a strong password>" \
+    -o ~/Desktop/NoType-DeveloperID.p12
+
+# Convert to base64 for GitHub Secrets
+base64 -i ~/Desktop/NoType-DeveloperID.p12 | pbcopy
+# Paste into the DEVELOPER_ID_CERT_P12 secret.
+```
+
+The Sparkle ED key:
+
+```bash
+# Sparkle tools live in the cask; the CLI is in /Applications/Sparkle.app/Contents/MacOS/
+brew install --cask sparkle
+# Or download the tarball — see .github/workflows/release.yml for the URL.
+
+generate_keys                                        # Stores the private key in Keychain
+generate_keys -x sparkle_private_key.txt             # Exports a base64 copy for the secret
+generate_keys -p                                     # Prints the public key — paste into Info.plist
+```
+
+Paste the contents of `sparkle_private_key.txt` into the `SPARKLE_ED_PRIVATE_KEY` GitHub Secret. Delete the local file once it's safely in the secret + your password manager (lose it = future updates rejected).
+
+### Running the script locally (without CI)
+
+`scripts/release.sh` is fully usable on its own when you need to validate the release pipeline without triggering CI. It produces `build/NoType-<version>.dmg` AND `build/NoType-<version>.zip`, and prints the EdDSA signature for the zip (if Sparkle's `sign_update` is on PATH).
 
 **Do not run `scripts/release.sh` from an agent** — it talks to Apple's notary service and ships a real binary; let the user invoke it.
 
----
+### GitHub Pages — one-time setup
 
-## Auto-updates — planned
+The appcast is served from `https://weylandd.github.io/NoType/appcast.xml`. To enable:
 
-Sparkle is **not yet wired up**. The plan for v0.1.0 RC:
+1. Repo Settings → Pages.
+2. Source: `Deploy from a branch`.
+3. Branch: `main`, Folder: `/docs`.
+4. Save. ~30 s later the URL resolves to the live XML.
 
-1. Add `Sparkle` via SPM, set `SUPublicEDKey` in `Info.plist`.
-2. Host an appcast at a stable URL (TBD when domain is set up; tentatively `https://notype.app/appcast.xml`).
-3. Per-release: bump `CFBundleShortVersionString` + `CFBundleVersion`, build/notarize as above, sign the DMG with Sparkle's `sign_update` tool, upload, append the entry to `appcast.xml`.
-
-Until Sparkle lands, ship updates as new DMGs via GitHub Releases; users re-download manually.
+That's it; the release workflow pushes new items into `docs/appcast.xml` on `main`, and Pages re-deploys automatically.
 
 ---
 

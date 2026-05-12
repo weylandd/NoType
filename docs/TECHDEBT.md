@@ -48,15 +48,6 @@ Format per item:
 **Why it's debt:** the walker has been stable since launch; nothing has regressed it. But refactoring it (e.g. when we wire the real per-app deadline check on a tighter loop) deserves a regression net.
 **Rough size:** M (mock graph type + ~10 cases).
 
-## Distribution
-
-### Sparkle auto-updates
-
-**Where:** Not yet present in the project.
-**What:** `docs/build.md` describes the planned wiring: SPM dep, `SUPublicEDKey` in `Info.plist`, appcast hosted at a stable URL, per-release DMG signing with `sign_update`. None of it exists today.
-**Why it's debt:** beta users still download new DMGs from GitHub Releases manually. Acceptable until we have a user base that complains.
-**Rough size:** M (the wiring itself is ~50 lines plus a chunk of release-time tooling).
-
 ## Context
 
 ### Settings section for screen-capture fallback

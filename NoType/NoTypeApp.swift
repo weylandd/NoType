@@ -27,6 +27,9 @@ struct NoTypeApp: App {
     /// can hold a reference and suppress permission HUDs while the
     /// wizard is showing.
     @State private var onboarding:  OnboardingState
+    /// Sparkle 2 auto-update wrapper. The sidebar banner in `MainWindow`
+    /// observes its `phase` and surfaces pending updates to the user.
+    @State private var updates:     UpdateController
 
     init() {
         let perms        = PermissionsViewModel()
@@ -55,6 +58,7 @@ struct NoTypeApp: App {
         )
         _appearance = State(wrappedValue: AppearanceController())
         _onboarding = State(wrappedValue: onboarding)
+        _updates    = State(wrappedValue: UpdateController())
     }
 
     var body: some Scene {
@@ -95,6 +99,11 @@ struct NoTypeApp: App {
                 .environment(permissions)
                 .environment(appearance)
                 .environment(onboarding)
+                .environment(updates)
+                // Sparkle wants a live NSApplication to attach its scheduler
+                // to — `start()` from MainWindowView's lifecycle fits that.
+                // Idempotent: the controller no-ops if started already.
+                .task { updates.start() }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)

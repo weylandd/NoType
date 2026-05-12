@@ -10,7 +10,7 @@ Inspired by [Wispr Flow](https://wisprflow.ai) and [Monologue](https://monologue
 
 ## Status
 
-Early beta. The core push-to-talk → transcribe → paste loop works end-to-end. Distribution is via direct .dmg download (no Mac App Store, no auto-updates yet — Sparkle is planned).
+Early beta. The core push-to-talk → transcribe → paste loop works end-to-end. Distribution is via direct .dmg download (no Mac App Store). NoType keeps itself up to date in the background via Sparkle 2 — once installed, you'll see a small "Update available" banner in the main window's sidebar when a new release ships.
 
 ---
 
@@ -27,9 +27,11 @@ NoType uses your Gemini key directly from your machine. There is no NoType-opera
 
 **Option A — pre-built release:**
 
-1. Download the latest `NoType-x.y.z.dmg` from [Releases](https://github.com/weylandd/NoType/releases).
+1. [Download the latest NoType.dmg](https://github.com/weylandd/NoType/releases/latest) (or grab a specific version from the [Releases page](https://github.com/weylandd/NoType/releases)).
 2. Open the DMG, drag NoType.app to `/Applications`.
 3. Launch — the onboarding wizard walks you through entering your Gemini key and granting permissions.
+
+Future updates arrive automatically via Sparkle — a sidebar banner in the main window will offer to install when a new release is published.
 
 **Option B — build from source** (see [docs/build.md](docs/build.md)):
 

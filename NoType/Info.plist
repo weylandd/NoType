@@ -38,5 +38,24 @@
 	<string>NoType reads on-screen text to improve transcription accuracy.</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>NoType reads on-screen text via screenshots to improve dictation accuracy in apps that don't expose their content via the accessibility API. Screen capture is optional — leave it off to use accessibility-only context.</string>
+	<!--
+	Sparkle 2 auto-update keys.
+	  SUFeedURL          — appcast.xml served by GitHub Pages from /docs of this repo.
+	  SUPublicEDKey      — EdDSA public key. Sparkle verifies every downloaded .zip
+	                       against this. PRIVATE counterpart lives in GitHub Secrets
+	                       as SPARKLE_ED_PRIVATE_KEY and is used by sign_update in CI.
+	  SUEnableAutomaticChecks  — Sparkle polls the feed once a day on its own.
+	  SUScheduledCheckInterval — 86400 = 24h.
+	NoType is non-sandboxed (ADR-012) so Sparkle 2 installs directly without the
+	XPC installer-launcher service; SUEnableInstallerLauncherService is not set.
+	-->
+	<key>SUFeedURL</key>
+	<string>https://weylandd.github.io/NoType/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>cOX4eaRJU0LtvXuG/SpYgDUj1TQliI3L8mildkbQsi8=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 </dict>
 </plist>

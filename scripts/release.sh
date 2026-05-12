@@ -29,6 +29,7 @@ EXPORT_OPTIONS="ExportOptions.plist"
 
 VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" NoType/Info.plist)
 DMG_PATH="${BUILD_DIR}/NoType-${VERSION}.dmg"
+SPARKLE_ZIP_PATH="${BUILD_DIR}/NoType-${VERSION}.zip"
 STAGING="${BUILD_DIR}/dmg-staging"
 ZIP_PATH="${BUILD_DIR}/NoType-notarize.zip"
 APP_PATH="${EXPORT_DIR}/NoType.app"
@@ -50,7 +51,7 @@ echo "▶ Building NoType ${VERSION}"
 echo
 
 echo "▶ Cleaning previous build outputs"
-rm -rf "${ARCHIVE_PATH}" "${EXPORT_DIR}" "${STAGING}" "${DMG_PATH}" "${ZIP_PATH}"
+rm -rf "${ARCHIVE_PATH}" "${EXPORT_DIR}" "${STAGING}" "${DMG_PATH}" "${ZIP_PATH}" "${SPARKLE_ZIP_PATH}"
 
 echo "▶ Regenerating Xcode project from project.yml"
 xcodegen generate
@@ -114,7 +115,23 @@ spctl --assess --type open --context context:primary-signature --verbose "${DMG_
 # Cleanup intermediates
 rm -rf "${STAGING}" "${ZIP_PATH}"
 
+# Sparkle 2 auto-update artefact: a zip of the notarized + stapled .app.
+# CI then runs `sign_update` against this to produce the EdDSA signature
+# that goes into docs/appcast.xml. The .dmg above stays the artefact the
+# website links to for first-time installs.
+echo "▶ Packaging .app into ${SPARKLE_ZIP_PATH} for Sparkle"
+ditto -c -k --keepParent "${APP_PATH}" "${SPARKLE_ZIP_PATH}"
+
+if command -v sign_update >/dev/null 2>&1; then
+    echo "▶ Computing Sparkle EdDSA signature (informational — paste into appcast if running outside CI)"
+    sign_update "${SPARKLE_ZIP_PATH}" || true
+else
+    echo "ℹ sign_update not on PATH — install Sparkle ('brew install --cask sparkle') to print the EdDSA signature here."
+fi
+
 echo
-echo "✓ Ready to send: ${DMG_PATH}"
+echo "✓ Ready to send:"
+echo "    ${DMG_PATH}            (first-time install)"
+echo "    ${SPARKLE_ZIP_PATH}    (Sparkle auto-update artefact)"
 echo
-ls -lh "${DMG_PATH}"
+ls -lh "${DMG_PATH}" "${SPARKLE_ZIP_PATH}"

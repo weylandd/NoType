@@ -5,6 +5,11 @@ options:
     macOS: "26.0"
   xcodeVersion: "26.0"
 
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: 2.6.0
+
 settings:
   base:
     SWIFT_VERSION: "6.0"
@@ -22,6 +27,8 @@ targets:
       - path: NoType
         excludes:
           - "**/*.md"
+    dependencies:
+      - package: Sparkle
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.notype

@@ -76,6 +76,10 @@ struct MainWindowView: View {
             sidebarHeader
             sidebarNav
             Spacer(minLength: 0)
+            // Pending Sparkle update — visible only when
+            // UpdateController.phase ≠ idle. Pinned to the bottom of
+            // the sidebar so it reads like a system tray.
+            UpdateBanner()
         }
         .frame(width: 220)
         // Slightly darker than `bgBase` per the design's
