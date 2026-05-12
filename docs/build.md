@@ -108,7 +108,7 @@ Installed copies of NoType see the new version through their next scheduled Spar
 5. `ditto -c -k --keepParent` the notarized `.app` into `build/NoType-<version>.zip` (Sparkle's artefact).
 
 `scripts/publish_release.sh`:
-1. Find `sign_update` (Sparkle CLI tool — checks PATH, `~/Downloads/Sparkle-*/bin/`, `/tmp/sparkle/bin/`, or `--sparkle-bin <path>` flag).
+1. Find `sign_update` (Sparkle CLI tool — checks `tools/sparkle/sign_update` first, then PATH, `~/Downloads/Sparkle-*/bin/`, `/tmp/sparkle/bin/`, or `--sparkle-bin <path>` flag).
 2. Sign `build/NoType-<version>.zip` with the EdDSA private key (read from Keychain — placed there by `generate_keys` once at setup time).
 3. Extract the version's section from `CHANGELOG.md` for release notes.
 4. Patch `docs/appcast.xml` via `scripts/sparkle_appcast_item.sh`, commit & push to `main`.
@@ -124,13 +124,9 @@ brew install xcodegen
 brew install gh                            # GitHub CLI
 gh auth login                              # log into your GitHub account
 
-# Sparkle CLI tools (sign_update). Download the tarball once — the
-# `--cask sparkle` only installs the Test App, not the CLI tools.
-SPARKLE_VERSION=2.6.4
-curl -fsSL -o /tmp/sparkle.tar.xz \
-  "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz"
-mkdir -p /tmp/sparkle && tar -xf /tmp/sparkle.tar.xz -C /tmp/sparkle
-# publish_release.sh will auto-find sign_update under /tmp/sparkle/bin/ or ~/Downloads/Sparkle-*/bin.
+# Sparkle CLI `sign_update`. Live at tools/sparkle/sign_update (gitignored).
+# See tools/sparkle/README.md for the obtain-once recipe. publish_release.sh
+# looks there first.
 
 # One-time: Apple Developer ID setup (already done on this Mac).
 #   1. "Developer ID Application" cert in login Keychain

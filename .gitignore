@@ -44,6 +44,13 @@ secrets/
 # Claude Code — personal harness overrides (settings.json itself is shared)
 .claude/settings.local.json
 
+# Local Sparkle CLI binaries (sign_update etc.) — used by scripts/publish_release.sh.
+# Not checked in because binaries don't belong in git and Sparkle ships MIT releases
+# anyone can re-download. See tools/sparkle/README.md for the obtain-and-place steps.
+tools/sparkle/sign_update
+tools/sparkle/generate_keys
+tools/sparkle/generate_appcast
+
 # Editor / OS junk
 *~
 Thumbs.db

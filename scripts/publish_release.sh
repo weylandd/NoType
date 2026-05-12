@@ -20,15 +20,16 @@
 #   brew install gh                                 # GitHub CLI
 #   gh auth login                                   # log into your account
 #
-#   # Sparkle CLI tools (sign_update). Either:
-#   #   • point --sparkle-bin at an extracted Sparkle-X.Y.Z/bin folder, OR
-#   #   • put `sign_update` on PATH, OR
-#   # the script auto-finds Sparkle at ~/Downloads/Sparkle-*/bin or /tmp/sparkle/bin.
+#   # Sparkle CLI `sign_update`. The canonical location is
+#   #   tools/sparkle/sign_update   (gitignored — see tools/sparkle/README.md
+#   #                                for the curl + tar + cp recipe)
+#   # The script also falls back to PATH, ~/Downloads/Sparkle-*/bin, and
+#   # /tmp/sparkle/bin, or you can pass --sparkle-bin <dir> explicitly.
 #
 # Usage:
 #   ./scripts/publish_release.sh                    # publish current Info.plist version
 #   ./scripts/publish_release.sh --dry-run          # don't push/release; print what would happen
-#   ./scripts/publish_release.sh --sparkle-bin ~/Downloads/Sparkle-2.9.1/bin
+#   ./scripts/publish_release.sh --sparkle-bin /path/to/Sparkle/bin
 #
 # Idempotent: if the GitHub Release for this version already exists, exits 0
 # without re-publishing. Re-run after deleting the Release if you need to redo.
@@ -50,13 +51,19 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ---------------------------------------------------------------------
-# Locate `sign_update` from a few well-known places.
+# Locate `sign_update` from a few well-known places. Search order:
+#   1. --sparkle-bin <dir>   (explicit override)
+#   2. tools/sparkle/        (the canonical in-repo location, gitignored)
+#   3. on PATH
+#   4. ~/Downloads/Sparkle-*/bin
+#   5. /tmp/sparkle/bin
 # ---------------------------------------------------------------------
 SIGN_UPDATE=""
 candidates=()
 if [[ -n "$SPARKLE_BIN_OVERRIDE" ]]; then
     candidates+=("$SPARKLE_BIN_OVERRIDE/sign_update")
 fi
+candidates+=("tools/sparkle/sign_update")
 if command -v sign_update >/dev/null 2>&1; then
     candidates+=("$(command -v sign_update)")
 fi
@@ -75,13 +82,9 @@ done
 
 if [[ -z "$SIGN_UPDATE" ]]; then
     cat <<EOF >&2
-✗ sign_update not found. Either pass --sparkle-bin <path-to-Sparkle/bin>, or download the Sparkle tarball once:
-
-    SPARKLE_VERSION=2.6.4
-    curl -fsSL -o /tmp/sparkle.tar.xz \\
-      "https://github.com/sparkle-project/Sparkle/releases/download/\${SPARKLE_VERSION}/Sparkle-\${SPARKLE_VERSION}.tar.xz"
-    mkdir -p /tmp/sparkle && tar -xf /tmp/sparkle.tar.xz -C /tmp/sparkle
-    # then re-run this script.
+✗ sign_update not found. Drop one into tools/sparkle/sign_update — see
+  tools/sparkle/README.md for the curl + tar + cp recipe. Alternatively
+  pass --sparkle-bin <path-to-Sparkle/bin> at the command line.
 EOF
     exit 1
 fi
