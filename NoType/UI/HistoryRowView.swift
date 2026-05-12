@@ -166,4 +166,3 @@ private struct TimestampDisplay: View {
         return "\(hours / 24)d ago"
     }
 }
-
