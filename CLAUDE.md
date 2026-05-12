@@ -56,6 +56,7 @@ Per-module guides (Claude Code auto-loads the relevant one when working in that 
 - **@NoType/UI/CLAUDE.md** — menu-bar icon states, history popover, settings sheet, Instructions tab.
 - **@NoType/Permissions/CLAUDE.md** — request flow, status surfacing.
 - **@NoType/Keychain/CLAUDE.md** — Gemini API key storage (`SecretStore`).
+- **@NoType/Updates/CLAUDE.md** — Sparkle 2 auto-updates with a custom `SPUUserDriver` that surfaces the "Update available" pill in the main-window sidebar instead of Sparkle's modal alert (ADR-017).
 - **@NoType/Onboarding/** — first-run wizard (steps in `NoType/Onboarding/Steps/`; no dedicated CLAUDE.md yet).
 
 ---

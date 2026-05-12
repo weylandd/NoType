@@ -317,3 +317,40 @@ The original ADR-016 v1 used a one-shot Gemini call per session to suggest dicti
 - Users start complaining that the harvester misses lowercase brand names they actually dictate frequently (Stripe / stripe, etc.). Add an "ignore casing" mode where any 4+ char alphabetic match in context is allowed through, behind a Dictionary-tab toggle.
 - The 30-char cap turns out to truncate real entries users care about (long compound names, technical phrases). Bump up to 50.
 - The replacement pass introduces user-visible bugs at boundaries (e.g. interaction with `finalizeForInsertion`'s leading-space rule). Move replacements to before boundary normalisation and add tests pinning both branches.
+
+---
+
+## ADR-017 — Sparkle 2 auto-updates with a custom in-app banner UI
+
+**Decision:** Distribute NoType updates via **Sparkle 2** (SPM dep, `from: 2.6.0`). Appcast lives in this repo at `docs/appcast.xml`, served by **GitHub Pages** from `/docs` of `weylandd/NoType` at `https://weylandd.github.io/NoType/appcast.xml`. Release binaries (`.dmg` + `.zip`) live on **GitHub Releases** of the same repo. The .zip is the Sparkle artefact, signed with **EdDSA** (`sign_update`); the .dmg is the first-time-install artefact the README links to.
+
+The update UI is custom: a small "Update to X.Y.Z" pill in the main-window sidebar rendered by `NoType/UI/UpdateBanner.swift`, driven by `NoType/Updates/UpdateController.swift` wrapping `SPUUpdater` with a custom `SPUUserDriver` (`NoType/Updates/UpdateUserDriver.swift`) — **Sparkle's standard modal alert window is bypassed entirely**. Click the banner → Sparkle downloads, verifies the EdDSA signature against `SUPublicEDKey` in `Info.plist`, and relaunches on the new build. No manual "Check for updates" button and no auto-check toggle ship in v1; daily scheduled checks are always on.
+
+**Why:**
+- **Sparkle 2 over Sparkle 1.x:** Sparkle 1 is on a frozen branch since 2022, doesn't ship strict-concurrency-friendly APIs, and has known XPC quirks on macOS 26. Sparkle 2.6+ adopts MainActor + Sendable, has a clean `SPUUserDriver` protocol for custom UIs, and is the actively maintained line.
+- **Sparkle 2 over rolling our own:** Auto-updating macOS apps correctly is hard — EdDSA signature verification, atomic in-place replacement (Sparkle uses a relauncher process so the app can replace itself), TCC preservation across the rebrand, ACL-aware Keychain access. Sparkle solves all of these; reproducing them would be 1000+ lines of finicky code we'd then need to maintain.
+- **Custom user driver over `SPUStandardUserDriver`:** NoType is `LSUIElement = true`, a menu-bar utility. Sparkle's standard alert window steals focus and looks out of place. A compact in-sidebar pill matches the rest of the UI shape and how peers like Claude Desktop surface updates.
+- **GitHub Pages from `docs/`, same repo:** stable CDN-cached URL (no rate-limit issues `raw.githubusercontent.com` has), zero cross-repo plumbing (no deploy keys / PATs to wire up), one repo to grant secrets to. The alternative — a separate `notype-releases` repo — is reasonable when the main repo is private and releases are public, neither of which applies here.
+- **EdDSA (Ed25519) over DSA:** Sparkle 2 deprecates DSA. EdDSA keys are 32 bytes (vs DSA's 1 KB+), signing is fast, verification is constant-time. The private key lives in the developer's Keychain (and a password-manager backup); the public key is embedded in `Info.plist`. Losing the private key permanently kills the update path — every installed copy rejects releases signed with a new public key — so it gets the same "back it up" treatment as a TLS root CA.
+
+**Decisions inside the decision:**
+- **`.zip` for Sparkle, `.dmg` for first-time install.** The .zip path is faster (no `hdiutil attach`), cleaner to `sign_update`, and Sparkle's documented recommendation. The .dmg is what the README's "Download" link points to and what a fresh user installs by dragging — its UX is the right shape for an introduction, the .zip's isn't.
+- **Auto-check always on, no user toggle, no manual trigger in Settings.** Same call as ADR-013 about telemetry: minimal v1, no controls that demand UX design we haven't earned. The check is in the background, the only visible artefact is the banner when a new release ships. Daily cadence is Sparkle's documented default. If users start complaining we'll add toggles.
+- **Banner inside the sidebar, not a floating HUD.** HUDs are reserved for transient action-driven states (recording, transcribing, errors). An available update is a persistent state of the app that the user might ignore for hours; embedding it in the sidebar gives it the same visual weight as the nav items without pulling focus away from the main pane.
+- **Auto-install on `showReady(toInstallAndRelaunch:)`.** When Sparkle finishes downloading and asks "ready to install + relaunch?", the custom driver replies `.install` without a second prompt — the user already clicked the banner once, asking again is friction. If we ever want a "download in background, install on next quit" flow we'll capture this reply on the controller and surface a second banner state.
+- **GitHub Actions release on `push: tags: ['v*']`** — implemented, currently disabled because GitHub-hosted `macos-latest` runners are on macOS 15 / Xcode 16 and reject our 26.0 deployment target. Releases happen locally via `scripts/release.sh` + `scripts/publish_release.sh` until `macos-26` images land. Re-enabling is a one-line change to the workflow's trigger.
+
+**Trade-offs accepted:**
+- **Local releases are the only path right now.** Each release requires the developer's Mac to be available and Xcode 26 to compile. Acceptable for a one-person beta; revisit when GitHub catches up.
+- **`Package.resolved` is gitignored.** A future Sparkle 2.x bump could ship a regression we don't see in CI (CI is disabled) until a user runs the next release locally. Mitigated by `from: 2.6.0` minimum + xcodebuild's lock-on-first-build, but not as airtight as committing the resolved file.
+- **The banner has no "Skip this version" affordance in v1.** Users who click "dismiss" (via the future close button, not implemented yet) will see the banner again on the next scheduled check. Acceptable — `.skip` is a separate `SPUUserUpdateChoice` we can wire up when a real Settings surface needs it.
+
+**Alternatives considered:**
+- **Mac App Store auto-update.** Rejected — see ADR-012. NoType needs Accessibility + `CGEventTap`, both of which fight MAS sandboxing.
+- **GitHub Releases polling without Sparkle.** Rejected — we'd have to ship our own download/verify/replace/relaunch flow, plus TCC preservation, plus delta updates if we ever want them. Sparkle's the right level of abstraction for this.
+- **Hosted appcast on `notype.app` once domain lands.** Reasonable migration target. When the domain is set up, change `SUFeedURL` in `Info.plist` AND publish a `<sparkle:newSUFeedURL>` element in the old appcast for one release cycle so existing installs migrate forward. Out of scope today.
+
+**Reconsider when:**
+- GitHub adds `macos-26` runner images — re-enable the CI workflow trigger and delete `scripts/publish_release.sh` (or keep it as a local fallback).
+- Users start asking for a "Check for Updates…" menu — add a manual trigger to Settings, but keep the banner as the primary surface.
+- We adopt delta updates (`generate_appcast --maximum-deltas N`) — small change to `scripts/release.sh` (sign the deltas too) + the appcast item generator.
