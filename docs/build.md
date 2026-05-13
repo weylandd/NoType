@@ -42,6 +42,13 @@ xcodebuild -project NoType.xcodeproj -scheme NoType -configuration Debug build
 
 Hard rules:
 
+- **Don't build when you don't need to.** Prompt-text edits, doc edits, comment-only changes — no build required. Only build when Swift source has changed and you actually need to verify it compiles. This is the simplest way to avoid the LaunchServices duplicate described in the next rule.
+- **After every required build, unregister the DerivedData bundle from LaunchServices.** `xcodebuild` runs a `RegisterWithLaunchServices` step on the freshly-signed `NoType.app` in DerivedData; macOS then surfaces that bundle in Launchpad / "Apps" alongside the real installed `/Applications/NoType.app`, giving the user two indistinguishable entries. Suppression flags don't exist for the registration; the only reliable cleanup is to call `lsregister -u` right after the build:
+  ```bash
+  /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister \
+      -u "$HOME/Library/Developer/Xcode/DerivedData/NoType-"*"/Build/Products/Debug/NoType.app"
+  ```
+  Idempotent; the bundle stays on disk (next build re-registers it, which you also clean up right after). This rule also applies after `xcodebuild test` — running tests includes a build that registers.
 - **Never** pass `-derivedDataPath` (or any flag that redirects build output into the repo, e.g. `./build/`). Output landing inside the working tree creates a duplicate `NoType.app` that macOS Spotlight indexes alongside the real one — the user ends up with multiple "NoType" entries in Launchpad / app pickers and can't tell which build they're launching. The repo `.gitignore` covers `build/`, so it won't reach a commit, but the on-disk duplicate is still confusing.
 - **Never** open / `open NoType.app` / launch the built bundle. The app installs a CGEventTap, mic recorder, and menu-bar UI — launching it from an agent surprises the user. Building is enough to verify the change compiles.
 - If you ever need to locate the freshly built bundle (e.g. to inspect Info.plist, sign-state, or resource layout), it's always at `~/Library/Developer/Xcode/DerivedData/NoType-*/Build/Products/Debug/NoType.app`.
