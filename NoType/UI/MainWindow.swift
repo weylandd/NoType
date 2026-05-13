@@ -93,21 +93,27 @@ struct MainWindowView: View {
         )
     }
 
-    /// Brand + version. Top padding clears the OS stoplights that sit
-    /// over this region thanks to `.windowStyle(.hiddenTitleBar)`.
+    /// Real app icon + name above version. Top padding clears the OS
+    /// stoplights that sit over this region thanks to
+    /// `.windowStyle(.hiddenTitleBar)`. The icon is read from
+    /// `NSApp.applicationIconImage` so it always tracks the bundle's
+    /// current icon set (Sparkle replaces the bundle on update, the
+    /// system updates the cached icon, and this view picks it up on
+    /// next launch). Falls back to the synthetic `BrandMark` if the
+    /// system hasn't given us a usable icon yet (very early launch).
     private var sidebarHeader: some View {
         HStack(spacing: DS.Space.s3) {
             Spacer().frame(width: 56)  // clear macOS stoplights
-            HStack(spacing: DS.Space.s3) {
-                BrandMark()
+            AppIconBadge(size: 32)
+            VStack(alignment: .leading, spacing: 1) {
                 Text("NoType")
                     .font(DS.Font.body(.semibold))
                     .foregroundStyle(DS.Color.textPrimary)
+                Text(Bundle.main.shortVersion)
+                    .font(DS.Font.labelMono())
+                    .foregroundStyle(DS.Color.textQuaternary)
             }
             Spacer(minLength: 0)
-            Text(Bundle.main.shortVersion)
-                .font(DS.Font.labelMono())
-                .foregroundStyle(DS.Color.textQuaternary)
         }
         .padding(.horizontal, DS.Space.s5)
         .padding(.top, DS.Space.s4 + 2)      // 14 pt
@@ -220,6 +226,39 @@ struct BrandMark: View {
                     .shadow(color: .white.opacity(0.5), radius: 4)
             )
             .frame(width: size, height: size)
+    }
+}
+
+// MARK: - App icon badge
+//
+// Renders the bundle's actual application icon as a rounded tile in the
+// sidebar header. Pulls from `NSApp.applicationIconImage` so the image
+// stays in sync with whatever is currently bundled at
+// `Contents/Resources/AppIcon.icns` — including after a Sparkle in-place
+// replacement. Falls back to the synthetic `BrandMark` for the brief
+// window after `applicationDidFinishLaunching` where AppKit hasn't
+// resolved the icon image yet.
+
+struct AppIconBadge: View {
+    var size: CGFloat = 32
+
+    var body: some View {
+        if let icon = Self.appIcon() {
+            Image(nsImage: icon)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: size, height: size)
+        } else {
+            BrandMark(size: size)
+        }
+    }
+
+    private static func appIcon() -> NSImage? {
+        let img = NSApp?.applicationIconImage
+        // A blank / 32×32 generic placeholder counts as "not ready" for
+        // our purposes — fall through to the synthetic mark instead.
+        guard let img, img.isValid, img.size.width > 0 else { return nil }
+        return img
     }
 }
 
