@@ -387,8 +387,10 @@ struct DSStatusPill<Content: View>: View {
 //   - .auto — bordered neutral (Gemini-extracted; visually softer)
 //
 // The X-button is laid out at all times (so the chip doesn't shift on
-// hover) but only becomes visible on hover. Same affordance pattern as
-// `HistoryRowView`'s row buttons.
+// hover) and is always visible. The remove glyph rests at ~70 % of the
+// chip's text colour and brightens to 100 % on hover via `removeColor`,
+// so the user always sees it as an affordance without the
+// disappear-on-mouse-leave invisibility that other transient rows use.
 
 struct DSWordChip: View {
     enum Style { case user, auto }
@@ -411,7 +413,6 @@ struct DSWordChip: View {
                     .frame(width: 14, height: 14)
             }
             .buttonStyle(.plain)
-            .opacity(hovered ? 1 : 0)
             .accessibilityLabel("Remove \(text)")
         }
         .padding(.leading, 8)

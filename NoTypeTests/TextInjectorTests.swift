@@ -437,4 +437,103 @@ final class TextInjectorTests: XCTestCase {
         let out = TextInjector.stitchChunks(["First.", "2nd is the doc"])
         XCTAssertEqual(out, "First. 2nd is the doc")
     }
+
+    // MARK: - contextKnown=false (AX failed — Electron / web-view path)
+    //
+    // When AX can't read the focused field, `textBefore` / `textAfter`
+    // arrive as empty strings but the meaning is "we don't know", not
+    // "field is empty". `finalizeForInsertion` is then defensive — it
+    // prepends a leading space when the dictation starts with a word
+    // opener, since the cursor is very likely sitting after a non-
+    // whitespace character we can't see.
+
+    func test_contextUnknown_emptyTextBefore_prependsDefensiveSpace() {
+        // The user-reported bug shape: cursor sits after "Прошлое
+        // предложение." in a Telegram-desktop / Slack / Discord message
+        // composer. AX returns no AXValue → textBefore arrives empty
+        // → without the fix we'd paste `"предложение.Новый ввод"`.
+        let out = TextInjector.finalizeForInsertion(
+            "Новый ввод",
+            textBeforeCursor: "",
+            textAfterCursor: "",
+            contextKnown: false
+        )
+        XCTAssertEqual(out, " Новый ввод")
+    }
+
+    func test_contextUnknown_quoteOpener_prependsDefensiveSpace() {
+        let out = TextInjector.finalizeForInsertion(
+            "\"quoted\"",
+            textBeforeCursor: "",
+            textAfterCursor: "",
+            contextKnown: false
+        )
+        XCTAssertEqual(out, " \"quoted\"")
+    }
+
+    func test_contextUnknown_gluePunctuation_noDefensiveSpace() {
+        // Even in defensive mode, output that opens with `,.;:!?-—`
+        // glues tight — adding a space before a comma is always wrong.
+        let out = TextInjector.finalizeForInsertion(
+            ", and then",
+            textBeforeCursor: "",
+            textAfterCursor: "",
+            contextKnown: false
+        )
+        XCTAssertEqual(out, ", and then")
+    }
+
+    func test_contextUnknown_alreadyHasLeadingSpace_noDoubleSpace() {
+        let out = TextInjector.finalizeForInsertion(
+            " модель угадала",
+            textBeforeCursor: "",
+            textAfterCursor: "",
+            contextKnown: false
+        )
+        XCTAssertEqual(out, " модель угадала")
+    }
+
+    func test_contextUnknown_doesNotStripTerminalPunct() {
+        // In defensive mode we don't know what comes after the cursor,
+        // so we can't decide whether the trailing `.` is stranded
+        // mid-sentence or ends the document. Default: keep it. (The
+        // model is the source of truth for terminal punct in this
+        // branch.)
+        let out = TextInjector.finalizeForInsertion(
+            "Hello world.",
+            textBeforeCursor: "",
+            textAfterCursor: "",
+            contextKnown: false
+        )
+        XCTAssertEqual(out, " Hello world.")
+    }
+
+    func test_contextUnknown_textBeforeStillBeatsDefensive() {
+        // If somehow we have BOTH a non-empty textBefore AND
+        // contextKnown=false (unusual but defensive code paths exist),
+        // the canonical "textBefore ends non-whitespace → leading space"
+        // rule fires. We don't end up with TWO spaces.
+        let out = TextInjector.finalizeForInsertion(
+            "next words",
+            textBeforeCursor: "some text",
+            textAfterCursor: "",
+            contextKnown: false
+        )
+        XCTAssertEqual(out, " next words")
+    }
+
+    func test_contextKnown_emptyTextBefore_stillNoLeadingSpace() {
+        // Regression guard for the existing `test_emptyTextBefore_*`
+        // contract: when AX confirmed the field is genuinely empty
+        // (contextKnown=true, textBefore=""), do NOT defensively prepend
+        // a space. The default-true overload covers this branch already
+        // but pin it explicitly with the new parameter spelled out.
+        let out = TextInjector.finalizeForInsertion(
+            "Hello world.",
+            textBeforeCursor: "",
+            textAfterCursor: "",
+            contextKnown: true
+        )
+        XCTAssertEqual(out, "Hello world.")
+    }
 }

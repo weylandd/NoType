@@ -65,6 +65,7 @@ Per-module guides (Claude Code auto-loads the relevant one when working in that 
 
 - Building from an agent / CLI, and the release script (`scripts/release.sh`) — see `@docs/build.md`.
 - Adding or closing tech-debt entries — see `@docs/TECHDEBT.md`.
+- **Don't run `xcodebuild build` / `test` unless Swift source actually changed.** Prompt edits, comment fixes, doc edits don't need a build. Every build registers the DerivedData `NoType.app` with LaunchServices and the user ends up with two NoType entries in Launchpad — see the "Hard rules" block at the top of `@docs/build.md` for the cleanup recipe (`lsregister -u`).
 
 ---
 

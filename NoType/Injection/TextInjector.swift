@@ -85,14 +85,19 @@ enum TextInjector {
     nonisolated static func finalizeForInsertion(
         _ stitched: String,
         textBeforeCursor: String,
-        textAfterCursor: String
+        textAfterCursor: String,
+        contextKnown: Bool = true
     ) -> String {
         var out = stitched
         guard !out.isEmpty else { return out }
 
         // ─── 1. Strip trailing terminal punct when cursor is mid-text ──
+        // Only fires when AX actually told us what's after the cursor.
+        // If AX couldn't read the field (contextKnown == false) we don't
+        // know whether we're mid-sentence or at end-of-doc → don't strip.
         let trimmedRight = textAfterCursor.trimmingCharacters(in: .whitespacesAndNewlines)
         let continuesMidText: Bool = {
+            guard contextKnown else { return false }
             guard let first = trimmedRight.first else { return false }
             if first.isLowercase { return true }
             // Any continuation punctuation: commas, semicolons, dashes,
@@ -113,23 +118,40 @@ enum TextInjector {
         }
 
         // ─── 2. Insert a leading space when textBefore needs one ──────
-        // Skip when stitched already starts with whitespace (model
-        // remembered) or with punctuation that should glue to the
-        // previous word (`.,;:!?`).
-        if let lastBefore = textBeforeCursor.last,
-           !lastBefore.isWhitespace,
-           let firstOut = out.first,
-           !firstOut.isWhitespace {
-            // Punctuation openers that should NOT get a leading space —
-            // they're meant to glue tight to whatever's before them
-            // (e.g. trailing comma typed as new dictation, mid-word
-            // hyphen, etc).
-            let gluePunctuation: Set<Character> = [".", ",", ";", ":", "!", "?", "—", "-"]
-            if !gluePunctuation.contains(firstOut) {
-                out = " " + out
-            }
+        // Two trigger paths:
+        //   a) contextKnown && textBefore ends with a non-whitespace
+        //      character — the canonical case the model often gets wrong
+        //      on `thinkingLevel: .minimal`.
+        //   b) !contextKnown — AX couldn't read the field (Electron /
+        //      web-view / Telegram-desktop / etc). The cursor very likely
+        //      sits after a non-whitespace character we can't see;
+        //      defensively prepend a space so `"sentence.Новый"` becomes
+        //      `"sentence. Новый"`. The trade-off: a genuinely empty
+        //      Electron input gets a stray leading space, which is far
+        //      less ugly than glued text and is one backspace to fix.
+        //
+        // In both paths the space is skipped when:
+        //   - `out` already starts with whitespace (model remembered), or
+        //   - `out` starts with glue punctuation that should sit tight
+        //     against the previous word (`.,;:!?—-`).
+        guard let firstOut = out.first, !firstOut.isWhitespace else {
+            return out
         }
+        let gluePunctuation: Set<Character> = [".", ",", ";", ":", "!", "?", "—", "-"]
+        if gluePunctuation.contains(firstOut) { return out }
 
+        let textBeforeEndsNonWhitespace =
+            textBeforeCursor.last.map { !$0.isWhitespace } ?? false
+
+        let shouldAddLeadingSpace: Bool = {
+            if textBeforeEndsNonWhitespace { return true }          // (a)
+            if !contextKnown && textBeforeCursor.isEmpty { return true } // (b)
+            return false
+        }()
+
+        if shouldAddLeadingSpace {
+            out = " " + out
+        }
         return out
     }
 

@@ -315,11 +315,16 @@ final class RecordingSession {
         // session doesn't sit blocked on AX / OCR safety caps just so
         // we can compute boundary punctuation. Empty target → benign
         // (no leading-space insertion, no trailing-punct strip).
-        let target = cachedContext?.insertionTarget ?? .empty
+        // Default to `.unknown` (not `.empty`) when no context was ever
+        // computed — same reasoning as `InsertionTarget.unknown` itself:
+        // we genuinely don't know what's around the cursor, so let
+        // `finalizeForInsertion` use its defensive leading-space path.
+        let target = cachedContext?.insertionTarget ?? .unknown
         let finalRaw = TextInjector.finalizeForInsertion(
             stitched,
             textBeforeCursor: target.textBefore,
-            textAfterCursor: target.textAfter
+            textAfterCursor: target.textAfter,
+            contextKnown: target.isKnown
         )
         // User-defined word replacements ("то есть" → "т.е."). Applied
         // after boundary normalisation so spacing/punctuation rules

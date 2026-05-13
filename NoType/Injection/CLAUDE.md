@@ -71,6 +71,8 @@ The model's choice of leading space + terminal punctuation is advisory — the c
 
 2. **Insert leading space** when `textBefore` ends with a non-whitespace character and `stitched` starts with a word-opener (letter/digit/quote/opening-bracket). Idempotent (no double space if `stitched` already starts with whitespace) and skipped when `stitched` opens with glue punctuation (`.`, `,`, `;`, `:`, `!`, `?`, `—`, `-`) — those should sit tight against the previous word.
 
+   **Defensive variant — `contextKnown = false`.** When AX couldn't read the focused field (Electron / web-view / Telegram desktop / Slack composer / Discord / Notion — anywhere `kAXValueAttribute` isn't exposed), `InsertionTarget.unknown` arrives with `textBefore = ""` but the meaning is "we don't see it", not "field is empty". `finalizeForInsertion` then prepends a leading space whenever `stitched` starts with a word-opener — closes the `"Прошлое предложение.Новый ввод"` bug at the cost of a stray space when the field is genuinely empty (one backspace, much less ugly than glued text). In this branch we also skip the trailing-punct strip — we don't know what `textAfter` is, so the model's terminal-punct choice stands.
+
 ```swift
 func finalizeForInsertion(
     _ stitched: String,

@@ -156,22 +156,58 @@ public struct RedactedScreenText: Sendable, Equatable {
 /// the hotkey, not typing), so the value is stable for the whole session
 /// and lives in the cached prompt prefix.
 ///
-/// Edge cases — all collapse to `.empty`. The corresponding prompt
-/// section is never dropped, only its values become empty strings:
+/// Edge cases — collapse to `.empty` or `.unknown`. The corresponding
+/// prompt section is never dropped, only its values become empty strings:
 ///
-/// - No focused element / `kAXFocusedUIElementAttribute` fails.
-/// - Element is not a text field (no `kAXValueAttribute`).
-/// - `kAXSelectedTextRangeAttribute` is missing.
-/// - Element is `AXSecureTextField` (we never read a password field's
-///   value, even if the user technically focused one).
-/// - Surrogate-pair cut at the soft limit (lossy decode used).
+/// - No focused element / `kAXFocusedUIElementAttribute` fails → `.unknown`.
+/// - Element is not a text field (no `kAXValueAttribute`) → `.unknown`.
+///   This is the typical Electron / web-view / Telegram-desktop /
+///   Slack-message-input / Discord / Notion failure mode. We can't see
+///   the field's content, but the field very likely has content the
+///   cursor sits inside of.
+/// - `kAXSelectedTextRangeAttribute` is missing → assume cursor at end
+///   of value; still `.known` (we have textBefore = entire value).
+/// - Element is `AXSecureTextField` → `.empty` (we deliberately refuse
+///   to read it; treating as empty is safer than `.unknown` because
+///   dictating into a password field is a user mistake we don't want to
+///   compensate for).
+/// - Surrogate-pair cut at the soft limit (lossy decode used) → `.known`.
+///
+/// The `isKnown` discriminator lets `TextInjector.finalizeForInsertion`
+/// tell "field is genuinely empty" from "we couldn't read the field" —
+/// the latter triggers a defensive leading-space when stitched starts
+/// with a word-opener, since we can't know what character is in front of
+/// the cursor. The prompt section is serialised identically in both cases
+/// (empty quoted strings), so the cached-prefix shape stays stable.
 struct InsertionTarget: Sendable, Equatable {
     /// Up to `maxSideLength` chars immediately before the cursor.
     let textBefore: String
     /// Up to `maxSideLength` chars immediately after the cursor.
     let textAfter: String
+    /// `false` when the AX subsystem failed to read the focused field
+    /// (no focused element, no `kAXValueAttribute`). `textBefore` /
+    /// `textAfter` are still empty strings in that case, but the meaning
+    /// is "we don't know what's around the cursor", not "the field is
+    /// empty". `true` for every successful read AND for the secure-field
+    /// refuse-to-read path (we know what the field is, we just won't
+    /// touch it).
+    let isKnown: Bool
 
-    static let empty = InsertionTarget(textBefore: "", textAfter: "")
+    static let empty = InsertionTarget(textBefore: "", textAfter: "", isKnown: true)
+    /// AX couldn't read the focused field. `finalizeForInsertion` treats
+    /// this as "probably non-empty, we just can't see it" and defensively
+    /// prepends a leading space.
+    static let unknown = InsertionTarget(textBefore: "", textAfter: "", isKnown: false)
+
+    /// Memberwise init with `isKnown` defaulting to `true`. Keeps callers
+    /// that don't care about the discriminator (tests, the prompt
+    /// renderer's fixtures) terse without sacrificing the type-level
+    /// distinction in `captureSync`.
+    init(textBefore: String, textAfter: String, isKnown: Bool = true) {
+        self.textBefore = textBefore
+        self.textAfter = textAfter
+        self.isKnown = isKnown
+    }
 
     /// Soft cap on each side. Keeps the cached-prefix budget bounded
     /// even when the user is dictating into a huge document.
@@ -181,7 +217,10 @@ struct InsertionTarget: Sendable, Equatable {
 
     /// Snapshot the focused field. Safe to call from any actor.
     static func capture() async -> InsertionTarget {
-        guard AXIsProcessTrusted() else { return .empty }
+        // Not trusted → we'll never read AX anything. Treat as unknown
+        // so the boundary heuristic in `finalizeForInsertion` is
+        // defensive about a possibly-populated field.
+        guard AXIsProcessTrusted() else { return .unknown }
         return await Task.detached(priority: .userInitiated) {
             captureSync()
         }.value
@@ -202,7 +241,7 @@ struct InsertionTarget: Sendable, Equatable {
               let focused = focusedRaw,
               CFGetTypeID(focused) == AXUIElementGetTypeID() else {
             log.info("ax capture: no focused element (err=\(focusErr.rawValue, privacy: .public))")
-            return .empty
+            return .unknown
         }
         let element = focused as! AXUIElement
 
@@ -224,10 +263,14 @@ struct InsertionTarget: Sendable, Equatable {
 
         guard let value = stringAttr(element, kAXValueAttribute as String) else {
             // Many Electron / web-view text fields don't expose
-            // AXValue. Without value we can't slice — log so the user
-            // can see why context is empty for their app.
+            // AXValue. Without value we can't slice. `.unknown` (not
+            // `.empty`) so the boundary heuristic treats the field as
+            // "probably populated, we just can't see it" — that's the
+            // common case for these apps and prevents
+            // `"Прошлое предложение.Новый ввод"` glue when the cursor
+            // actually sits after a non-whitespace character.
             log.info("ax capture: focused element \(role, privacy: .public) has no AXValue (likely Electron/web)")
-            return .empty
+            return .unknown
         }
 
         // macOS counts AX selection ranges in UTF-16 code units.
@@ -342,7 +385,7 @@ struct InsertionTarget: Sendable, Equatable {
         let textBefore = SecureFieldMasker.scrubContent(rawBefore)
         let textAfter  = SecureFieldMasker.scrubContent(rawAfter)
 
-        return InsertionTarget(textBefore: textBefore, textAfter: textAfter)
+        return InsertionTarget(textBefore: textBefore, textAfter: textAfter, isKnown: true)
     }
 
     private static func stringAttr(_ element: AXUIElement, _ key: String) -> String? {

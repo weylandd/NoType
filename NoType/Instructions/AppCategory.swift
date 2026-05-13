@@ -121,7 +121,7 @@ enum AppCategory: String, Codable, CaseIterable, Sendable, Equatable, Identifiab
 
     - Standard sentence-case capitalization and full punctuation in most cases, but adapt to the platform's convention if obvious from context.
     - Treat dictated hashtags as hashtags. When the speaker says "hashtag X" (or equivalent in their language), render as `#X` with no space.
-    - Treat dictated mentions as mentions. When the speaker says "at X" or "mention X" referring to a username, render as `@X` with no space.
+    - Treat dictated mentions as mentions ONLY when the speaker uses an unambiguous mention cue — "mention X", "tag X", or "at-mention X" (or the natural equivalent in their language). Render as `@X` with no space. A bare locative "at" ("at home", "at three pm", "at the office") is NOT a mention — keep it as the preposition.
     - No greetings or sign-offs — posts address the audience implicitly.
     - Line breaks between distinct points if the speaker pauses to shift topic. Otherwise keep as flowing prose.
     - Emoji only if the speaker said the emoji name explicitly.
