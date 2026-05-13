@@ -631,7 +631,7 @@ actor GeminiClient {
 
         Output ONE contiguous text covering, in order, every word spoken in every chunk. No chunk labels, no separators, no markers between chunks. Between adjacent chunks inside this output, apply the boundary rules from `Punctuation across chunk boundaries`: if a chunk ends mid-thought, the seam to the next chunk has no terminal punctuation; only complete sentences may close with `.`, `!`, or `?`.
 
-        Each chunk's audio must be fully represented. The length floor from `Output contract` applies per chunk: if chunk K contained N words of speech, those N words appear in the corresponding span of your output (minus filler/self-corrections only). Do not deduplicate across chunks — if the speaker repeated the same phrase in two chunks, both occurrences appear. Do not summarize, merge, condense, or aggregate across chunks. Verbatim discipline applies \(count) times independently, then concatenated.
+        Each chunk's audio must be fully represented. The length floor from `Output contract` applies per chunk: if chunk K contained N words of speech, those N words appear in the corresponding span of your output (minus filler/self-corrections only). Do not deduplicate across chunks — if the speaker repeated the same phrase in two chunks, both occurrences appear. Do not summarize, merge, condense, or aggregate across chunks. Treat batched mode as \(count) independent verbatim transcriptions glued together at chunk seams — not as a single text to be polished.
 
         \(suffix)
         """
@@ -662,11 +662,13 @@ actor GeminiClient {
     - An app that supports multiple modes → pick the dominant typing pattern. Slack → messaging (despite formal channels). Notion → notes (despite collaborative docs use). VS Code → code (despite markdown editing).
     - AI chat clients (ChatGPT, Claude, Perplexity) → messaging, not uncategorized.
     - LinkedIn → social (it is a public posting platform), not messaging despite having DMs.
-    - Browser-based apps (Gmail in Chrome, Twitter in Safari) → classify by the service, not the browser. If unclear which service the browser is showing, return uncategorized.
     - Personal vs formal: Apple Notes/Bear/Obsidian → notes. Google Docs/Word/Confluence → docs. The split is "for me" vs "for others".
-    - Generic web browsers (Chrome, Safari, Firefox, Arc, Brave) → uncategorized. The actual context depends on which site is open, which we cannot reliably determine here.
+    - Web browsers (Chrome, Safari, Firefox, Arc, Brave, Edge, Vivaldi, Orion, etc.) → uncategorized. You see only the bundle id and display name — the actual site loaded inside the browser cannot be inferred and we won't guess.
+    - Standalone PWA / Electron wrappers that ship with their OWN bundle id and display name (e.g. "Slack" / `com.tinyspeck.slackmacgap`, "WhatsApp" / `WhatsApp`) are NOT browsers — classify them by the service they wrap.
 
     If after research you are not confident the app fits any of the six named categories — including design tools, terminals running unusual workloads, system utilities, password managers, or anything ambiguous — return uncategorized. Do not stretch the categories to fit.
+
+    Note: `search` is NOT a valid output category. Search-field formatting is decided at runtime from the focused element's role/identifier, not from the app's identity. Returning `search` here would be silently downgraded to `uncategorized` by the client.
 
     Output format: a single JSON object with exactly two fields, no other text, no markdown, no code fence:
 
@@ -770,7 +772,7 @@ actor GeminiClient {
 
     After the session, the client will produce: `<Text before cursor><full session output><Text after cursor>`. Your text must make this concatenation read as one natural piece. Three rules:
 
-    **1. Start capitalization.** If `Text before cursor` is empty, or its last non-whitespace character is `.`, `!`, or `?`, start your first chunk with a capital letter as a new sentence. Otherwise — including endings like `,`, `:`, `—`, `;`, or no terminal punctuation at all — start in lowercase and continue the existing sentence.
+    **1. Start capitalization.** This rule applies to the FIRST word of your output for this request — whether you're transcribing one chunk or several in a batched call, you decide capitalization once at the very start, not at each chunk seam inside the batched output. If `Text before cursor` is empty, or its last non-whitespace character is `.`, `!`, or `?`, capitalize that first word as a new sentence. Otherwise — including endings like `,`, `:`, `—`, `;`, or no terminal punctuation at all — start in lowercase and continue the existing sentence.
 
     **2. Whitespace boundaries.** Do not duplicate or eat whitespace.
     - If `Text before cursor` is empty or ends with whitespace, do NOT begin your output with a leading space.
@@ -805,7 +807,7 @@ actor GeminiClient {
     - The dictionary is a SPELLING REFERENCE only, never a content pool. Do not insert a dictionary word the speaker did not actually say. The forbidden-failure-modes list under `# Context is never a source of words` applies here word-for-word.
     - Match is phonetic and inflectional, not exact: a dictionary entry like "Anthropic" should also bias your spelling when the speaker says "Anthropic's" or "Anthropics". Use the dictionary entry as the spelling of the root and apply the surrounding language's natural inflection.
     - Capitalisation and punctuation are taken from the dictionary entry as-is — that is the user's canonical form. Do not "fix" the casing.
-    - Dictionary entries do NOT override `On-screen context` for the same word. If the AX tree or OCR sub-block contains a specific spelling that conflicts with the dictionary, prefer the on-screen spelling for this session (the user is dictating into a place that has its own canonical form for that word).
+    - Precedence when `On-screen context` and the dictionary disagree on the same word: prefer the on-screen spelling. The user is dictating into a place that has its own canonical form for that word, and matching the surrounding text is more useful than enforcing a global canonical. Exception: if the on-screen form is clearly a single typo (one-character difference, appears at most once or twice) and the dictionary form is the well-known canonical, prefer the dictionary form — typos should not propagate.
     - When the section body is `(empty)`, the user has no dictionary; ignore the section entirely.
     - Never quote the dictionary, never list its entries in your output, never reference its existence.
 
