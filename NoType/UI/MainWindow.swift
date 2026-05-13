@@ -103,7 +103,6 @@ struct MainWindowView: View {
     /// system hasn't given us a usable icon yet (very early launch).
     private var sidebarHeader: some View {
         HStack(spacing: DS.Space.s3) {
-            Spacer().frame(width: 56)  // clear macOS stoplights
             AppIconBadge(size: 32)
             VStack(alignment: .leading, spacing: 1) {
                 Text("NoType")
@@ -113,11 +112,18 @@ struct MainWindowView: View {
                     .font(DS.Font.labelMono())
                     .foregroundStyle(DS.Color.textQuaternary)
             }
-            Spacer(minLength: 0)
         }
-        .padding(.horizontal, DS.Space.s5)
+        // Honest left-alignment using padding + a maxWidth/leading frame.
+        // The earlier `Spacer().frame(width: 56)` was ambiguous: a
+        // Spacer is greedy in its axis and `.frame(width:)` proposes a
+        // size rather than locking it, so it could float content right.
+        // Stoplight clearance: 56 pt on the leading side. The trailing
+        // padding matches the rest of the sidebar's horizontal rhythm.
+        .padding(.leading, 56)
+        .padding(.trailing, DS.Space.s5)
         .padding(.top, DS.Space.s4 + 2)      // 14 pt
         .padding(.bottom, DS.Space.s5 + 2)   // 18 pt
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var sidebarNav: some View {
