@@ -97,7 +97,7 @@ struct DictionaryView: View {
 
                 addReplacementRow
 
-                Text("Each pair is matched on whole words. When the search side starts with a lowercase letter, the capitalized variant is auto-applied — \u{201C}то есть\u{201D} also matches \u{201C}То есть\u{201D} and replaces it with the capitalized \u{201C}to\u{201D} value.")
+                Text("Each pair is matched on whole words. When the search side starts with a lowercase letter, the capitalized variant is auto-applied — \u{201C}that is\u{201D} also matches \u{201C}That is\u{201D} and replaces it with the capitalized \u{201C}to\u{201D} value.")
                     .font(.system(size: 11))
                     .foregroundStyle(DS.Color.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
