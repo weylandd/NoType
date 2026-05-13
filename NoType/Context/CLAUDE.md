@@ -32,14 +32,18 @@ The section appears in the request between the optional `Category instruction:` 
 struct InsertionTarget: Sendable, Equatable {
     let textBefore: String   // up to maxSideLength chars before cursor (scrubbed)
     let textAfter: String    // up to maxSideLength chars after cursor (scrubbed)
+    let isKnown: Bool        // false when AX couldn't read the field (Electron / web-views)
 
-    static let empty = InsertionTarget(textBefore: "", textAfter: "")
+    static let empty   = InsertionTarget(textBefore: "", textAfter: "", isKnown: true)
+    static let unknown = InsertionTarget(textBefore: "", textAfter: "", isKnown: false)
     static let maxSideLength = 500
 
     static func capture() async -> InsertionTarget { /* runs captureSync() off-actor */ }
     static func captureSync() -> InsertionTarget    { /* AX walk, see below */ }
 }
 ```
+
+The `isKnown` discriminator lets `TextInjector.finalizeForInsertion` tell "field is genuinely empty" (`.empty`, `isKnown = true`) from "we couldn't read the field" (`.unknown`, `isKnown = false`). The latter is the common Electron / web-view / Telegram-desktop / Slack-composer failure mode — `kAXValueAttribute` isn't exposed, so `textBefore` arrives empty but the cursor is very likely sitting after a non-whitespace character we can't see. `finalizeForInsertion` uses the flag to defensively prepend a leading space in that case (closes the `"Прошлое предложение.Новый ввод"` bug). The prompt section is rendered identically in both cases (empty quoted strings), so the cached-prefix shape stays stable across `.empty` / `.unknown`.
 
 `captureSync()`:
 
@@ -50,15 +54,15 @@ struct InsertionTarget: Sendable, Equatable {
 5. Trim each side to `maxSideLength = 500` chars.
 6. Run `SecureFieldMasker.scrubContent` over **both** sides — bearer tokens / card numbers / API keys at the cursor must be scrubbed before they enter the prompt. (Skip-rule enforcement is upstream in step 2; this is the value-content layer.)
 
-### Edge cases — all collapse to `.empty`, the section is NEVER dropped
+### Edge cases — `.empty` vs `.unknown`, the section is NEVER dropped
 
-- No focused element (`AXUIElementCopyAttributeValue` fails or returns `nil`).
-- Element is `AXSecureTextField` (role or subrole).
-- Element has no `kAXValueAttribute` (read-only views, terminals, custom NSText, many Electron/web-views).
-- All cursor-resolution paths fail (we silently default to end-of-value).
-- Composite Unicode / emoji at the boundary: UTF-16 slicing matches macOS's own range semantics, so we don't split codepoints macOS itself wouldn't split. If a slice still lands on a surrogate pair, we fall back to a lossy decode (U+FFFD) rather than dropping the side.
+- No focused element (`AXUIElementCopyAttributeValue` fails or returns `nil`) → `.unknown`.
+- Element has no `kAXValueAttribute` (read-only views, terminals, custom NSText, many Electron/web-views) → `.unknown`.
+- Element is `AXSecureTextField` (role or subrole) → `.empty`. We deliberately refuse to read it; treating it as "empty" (rather than "unknown") prevents `finalizeForInsertion`'s defensive leading space from kicking in on a focused password field — the user shouldn't be dictating there in the first place.
+- All cursor-resolution paths fail (we silently default to end-of-value) → `.known` with `textBefore` = entire value.
+- Composite Unicode / emoji at the boundary: UTF-16 slicing matches macOS's own range semantics, so we don't split codepoints macOS itself wouldn't split. If a slice still lands on a surrogate pair, we fall back to a lossy decode (U+FFFD) rather than dropping the side. → `.known`.
 
-When any of these happen, `textBefore = ""` and `textAfter = ""`. The section still goes into the prompt with empty values — dropping it would change the prefix shape and break implicit caching across sessions.
+In every case `textBefore` / `textAfter` are concrete strings (possibly empty) and the section still goes into the prompt with those values — dropping it would change the prefix shape and break implicit caching across sessions. The `isKnown` flag rides alongside, consumed by `finalizeForInsertion` only.
 
 ### Why captured once, not refreshed
 
