@@ -113,15 +113,19 @@ struct MainWindowView: View {
                     .foregroundStyle(DS.Color.textQuaternary)
             }
         }
-        // Honest left-alignment using padding + a maxWidth/leading frame.
-        // The earlier `Spacer().frame(width: 56)` was ambiguous: a
-        // Spacer is greedy in its axis and `.frame(width:)` proposes a
-        // size rather than locking it, so it could float content right.
-        // Stoplight clearance: 56 pt on the leading side. The trailing
-        // padding matches the rest of the sidebar's horizontal rhythm.
-        .padding(.leading, 56)
+        // Anchored to the sidebar's left edge, aligned with the nav-item
+        // icons below (sidebarNav: s3 horizontal padding + each item's
+        // s3 horizontal padding = 16 pt from the rail's leading edge).
+        //
+        // The earlier 56 pt leading inset was leftover stoplight
+        // clearance from when the header content sat on the same row as
+        // the OS stoplights. With the `top: 14 pt` inset the content is
+        // already below the stoplight zone vertically, so no horizontal
+        // clearance is needed — the stoplights live above this region
+        // purely by virtue of being drawn higher in the window.
+        .padding(.leading, DS.Space.s5)
         .padding(.trailing, DS.Space.s5)
-        .padding(.top, DS.Space.s4 + 2)      // 14 pt
+        .padding(.top, DS.Space.s8)          // 32 pt — keep clear of stoplights vertically
         .padding(.bottom, DS.Space.s5 + 2)   // 18 pt
         .frame(maxWidth: .infinity, alignment: .leading)
     }
