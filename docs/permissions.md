@@ -11,7 +11,7 @@ NoType needs two macOS permissions to function plus one optional permission that
 The Screen Recording card is rendered with an explicit "Optional" pill in onboarding and a neutral chip (not warning) when ungranted. The wizard's "Continue" button gates only on Microphone + Accessibility — skipping Screen Recording is fully supported and the user can grant later via System Settings; `PermissionsViewModel` polls and the fallback turns on without restart. Screen Recording is **deliberately not** part of `PermissionsViewModel.allGranted` / `.recordingReady`.
 
 We deliberately do **not** request:
-- **Speech Recognition** — we use Silero (CoreML) for VAD, not Apple's speech stack. `AVAudioEngine` does not trigger the TCC prompt for this on macOS 26 with our current entitlements; the key is not in `Info.plist`.
+- **Speech Recognition** — we use Silero (CoreML) for VAD, not Apple's speech stack. `AVAudioEngine` does not trigger the TCC prompt for this on the supported macOS versions (14+) with our current entitlements; the key is not in `Info.plist`.
 - **Apple Events** — we don't script other apps.
 - **Full Disk Access** — we only read/write our own Application Support folder.
 

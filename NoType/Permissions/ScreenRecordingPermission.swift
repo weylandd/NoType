@@ -41,7 +41,7 @@ enum ScreenRecordingPermission {
     ///    prompts the user AND registers the app with TCC so it shows up
     ///    in System Settings → Privacy & Security → Screen Recording.
     /// 3. Belt-and-braces: also attempt `SCShareableContent.current`. On
-    ///    macOS 26 this is what actually surfaces the app in the Settings
+    ///    macOS 14+ this is what actually surfaces the app in the Settings
     ///    list if step 2's prompt was suppressed (which can happen if the
     ///    user dismissed the dialog elsewhere). The call throws when
     ///    denied — we ignore the error; the side effect is what we want.

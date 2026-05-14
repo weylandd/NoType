@@ -18,7 +18,7 @@ labels: bug
 ## Environment
 
 - **NoType version:** <!-- About → version, e.g. 0.1.1 -->
-- **macOS version:** <!-- About this Mac, e.g. 26.1 (Tahoe) -->
+- **macOS version:** <!-- About this Mac, e.g. 14.7 (Sonoma), 15.3 (Sequoia), or 26.1 (Tahoe) -->
 - **Mac model:** <!-- e.g. MacBook Pro M3 Pro 2023 -->
 - **Active app where the bug happened:** <!-- e.g. Slack, Mail, VS Code -->
 
