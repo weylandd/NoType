@@ -148,9 +148,8 @@ struct DictionaryView: View {
     private var dictionaryPanel: some View {
         InstructionsPanel(
             title: "Dictionary (\(totalCount)/100)",
-            meta: autoExtractionPaused
-                ? "AUTO-EXTRACTION PAUSED"
-                : "SPELLING REFERENCE FOR GEMINI"
+            meta: autoExtractionPaused ? "AUTO-EXTRACTION PAUSED" : nil,
+            trailing: { dictionaryHeaderControls }
         ) {
             VStack(alignment: .leading, spacing: 0) {
                 addEntryRow
@@ -165,6 +164,44 @@ struct DictionaryView: View {
                     tagCloud
                 }
             }
+            .opacity(appState.dictionaryEnabled ? 1 : 0.45)
+            .animation(DS.Motion.base, value: appState.dictionaryEnabled)
+        }
+    }
+
+    /// Trailing controls in the dictionary panel header: optional
+    /// two-stage Clear-all button + master enable toggle.
+    private var dictionaryHeaderControls: some View {
+        HStack(spacing: DS.Space.s3) {
+            if totalCount > 0 {
+                ClearAllButton(
+                    destructive: autoCount == 0,
+                    action: clearAllStaged
+                )
+            }
+            Toggle(
+                "Use dictionary",
+                isOn: Binding(
+                    get: { appState.dictionaryEnabled },
+                    set: { appState.setDictionaryEnabled($0) }
+                )
+            )
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(DS.Color.accent)
+            .help("Ship the dictionary in Gemini's prompt to bias transcription toward these spellings. Off keeps your terms saved but stops sending them.")
+        }
+    }
+
+    /// Stage 1 (auto entries present) → wipe auto.
+    /// Stage 2 (only user entries left) → wipe user.
+    /// Stage 0 (nothing) — button is hidden so this is unreachable.
+    private func clearAllStaged() {
+        if autoCount > 0 {
+            appState.clearAutoDictionaryEntries()
+        } else if userCount > 0 {
+            appState.clearUserDictionaryEntries()
         }
     }
 
@@ -256,6 +293,52 @@ struct DictionaryView: View {
         }
         .padding(.horizontal, DS.Space.s5 + 2)
         .padding(.bottom, DS.Space.s5)
+    }
+}
+
+// MARK: - Clear-all button
+//
+// Small text-style button in the dictionary panel header. Always
+// labelled "Clear all" — the two-stage behaviour (first click wipes
+// auto entries, second click wipes the user's typed ones) is delivered
+// by the parent view, not the label. The destructive flag flips the
+// resting colour to `dangerFg` so the second click reads visually
+// distinct without a confirmation dialog.
+
+private struct ClearAllButton: View {
+    let destructive: Bool
+    let action: () -> Void
+
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text("Clear all")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(foreground)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(hovered ? hoverFill : .clear,
+                            in: RoundedRectangle(cornerRadius: 4))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .animation(DS.Motion.fast, value: hovered)
+        .animation(DS.Motion.fast, value: destructive)
+        .help(destructive
+              ? "Clear all your typed terms too."
+              : "Clear auto-extracted terms. Your typed ones stay.")
+    }
+
+    private var foreground: Color {
+        if destructive {
+            return hovered ? DS.Color.dangerFg : DS.Color.dangerFg.opacity(0.8)
+        }
+        return hovered ? DS.Color.textPrimary : DS.Color.textTertiary
+    }
+
+    private var hoverFill: Color {
+        destructive ? DS.Color.dangerSoft : DS.Color.bgHover
     }
 }
 

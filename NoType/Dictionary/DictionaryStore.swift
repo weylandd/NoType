@@ -134,15 +134,20 @@ actor DictionaryStore {
         return snap
     }
 
-    /// Append auto-extracted words. Deduped case-insensitively against
-    /// existing entries (both user and auto), filtered for length, then
-    /// trimmed to the global 100 cap by removing oldest `.auto`. User
-    /// entries are sticky. Returns the updated snapshot.
+    /// Add or refresh auto-extracted entries. For each input word:
+    /// - If the word (case-insensitive) is already an entry, **refresh
+    ///   its `addedAt`** so it survives the FIFO trim — the harvester
+    ///   re-saw it in the current session, so it's still relevant.
+    /// - Otherwise append it as a new `.auto` entry.
+    ///
+    /// After processing, trim to the global 100 cap by dropping the
+    /// oldest `.auto` entries first. User entries remain sticky.
+    ///
+    /// Length and trim invariants from `addUserEntry` apply identically.
     @discardableResult
     func addAutoEntries(_ words: [String], now: Date = Date()) -> DictionarySnapshot {
         var snap = snapshot()
-        var existingLower = Set(snap.entries.map { $0.word.lowercased() })
-        var added = 0
+        var changed = false
         // Anchor the batch strictly after any existing entry. Two
         // back-to-back `addAutoEntries` calls in a test (or any rapid-
         // fire scenario) can otherwise produce overlapping per-entry
@@ -150,22 +155,37 @@ actor DictionaryStore {
         // the trim path relies on.
         let maxExisting = snap.entries.map { $0.addedAt }.max() ?? .distantPast
         let baseStamp = max(now, maxExisting.addingTimeInterval(0.001))
+        var seenLower: Set<String> = []
+        var batchCount = 0
         for raw in words {
             let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !cleaned.isEmpty, cleaned.count <= DictionarySnapshot.maxEntryLength else { continue }
             let lower = cleaned.lowercased()
-            if existingLower.contains(lower) { continue }
-            existingLower.insert(lower)
-            // Slight monotonic addedAt so successive entries in the same
-            // batch keep their relative order in newest-first sorting.
-            // 1 ms increments are cheaper than tracking an explicit
-            // sequence; the resolution is enough for any realistic
-            // session count.
-            let stamp = baseStamp.addingTimeInterval(TimeInterval(added) * 0.001)
-            snap.entries.append(DictionaryEntry(word: cleaned, source: .auto, addedAt: stamp))
-            added += 1
+            // De-dup within the input batch (in case harvest returned
+            // the same word twice through different code paths).
+            if seenLower.contains(lower) { continue }
+            seenLower.insert(lower)
+            // Monotonic batch timestamp keeps ordering stable.
+            let stamp = baseStamp.addingTimeInterval(TimeInterval(batchCount) * 0.001)
+            batchCount += 1
+            if let idx = snap.entries.firstIndex(where: { $0.word.lowercased() == lower }) {
+                // Refresh existing entry's timestamp (don't overwrite
+                // source or original casing — a user-added entry stays
+                // user-source so the FIFO trim keeps protecting it).
+                let existing = snap.entries[idx]
+                snap.entries[idx] = DictionaryEntry(
+                    id: existing.id,
+                    word: existing.word,
+                    source: existing.source,
+                    addedAt: stamp
+                )
+                changed = true
+            } else {
+                snap.entries.append(DictionaryEntry(word: cleaned, source: .auto, addedAt: stamp))
+                changed = true
+            }
         }
-        if added == 0 { return snap }
+        if !changed { return snap }
         snap.entries = Self.trimmed(snap.entries)
         write(snap)
         return snap
@@ -177,6 +197,21 @@ actor DictionaryStore {
         var snap = snapshot()
         if let idx = snap.entries.firstIndex(where: { $0.id == id }) {
             snap.entries.remove(at: idx)
+            write(snap)
+        }
+        return snap
+    }
+
+    /// Wipe every entry of the given source in one shot. Drives the
+    /// Dictionary tab's two-stage "Clear all" button (first click clears
+    /// `.auto`, second click clears `.user`). Replacement pairs are
+    /// untouched — they live in their own panel.
+    @discardableResult
+    func removeEntries(source: DictionaryEntry.Source) -> DictionarySnapshot {
+        var snap = snapshot()
+        let before = snap.entries.count
+        snap.entries.removeAll { $0.source == source }
+        if snap.entries.count != before {
             write(snap)
         }
         return snap
