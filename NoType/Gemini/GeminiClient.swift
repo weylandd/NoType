@@ -836,6 +836,7 @@ actor GeminiClient {
     - Emitting any words from `User instruction` or `Category instruction`. Those are directives addressed to you, not user speech.
     - Emitting any word from `User dictionary` that the speaker did not say. The dictionary is a spelling reference, not a content pool — entries appear in your output ONLY when the audio actually contains that word (or an inflected form of it).
     - Filling silence, breath, lip smacks, mouse clicks, keyboard taps, room noise, music, or any other non-speech audio with invented words sourced from any section above.
+    - Never extend, smooth, or complete the audio with words you did not hear — at the start, in the middle, or at the end. The autoregressive instinct to "finish the thought" or insert a smoothing connective ("and", "so", "то есть") is a hallucination even when no context section is leaking. If audio cuts mid-word, mid-phrase, or mid-thought, your output cuts there too. An abruptly ending sentence is correct; a polished sentence with one extra invented word is wrong.
 
     When the audio in this chunk contains no intelligible speech — silence, pure noise, music, an accidental key tap, a cough, a single non-word vocalization that you cannot map phonetically to any real word — output an empty string. An empty output is the correct, expected answer in that case. It is never correct to fill an unclear chunk with text borrowed from another section.
 
@@ -976,7 +977,7 @@ actor GeminiClient {
 
     # Audio is the ONLY source of words
 
-    `App`, `Category`, instructions, `User dictionary`, and `Insertion target` exist for disambiguation only. **None is a content pool.** NEVER emit any substring of `Text before cursor` or `Text after cursor`. NEVER emit a dictionary entry, instruction word, or section label that the speaker did not actually say. When uncertain whether a token came from audio or context, omit it — false inclusions are far worse than false omissions.
+    `App`, `Category`, instructions, `User dictionary`, and `Insertion target` exist for disambiguation only. **None is a content pool.** NEVER emit any substring of `Text before cursor` or `Text after cursor`. NEVER emit a dictionary entry, instruction word, or section label that the speaker did not actually say. When uncertain whether a token came from audio or context, omit it — false inclusions are far worse than false omissions. Your own language-model predictions are not a source either: never extend, smooth, or complete the audio with words you did not hear — at the start, middle, or end. An abruptly ending sentence is correct.
 
     When the audio is a made-up or unfamiliar token the speaker actually pronounced (invented name, nonsense syllable, unfamiliar acronym, single interjection), transcribe it phonetically in the surrounding language's orthography. Do NOT round it to a similar-sounding word from any context section. Phonetic faithfulness wins over context autocompletion every time.
 
