@@ -12,6 +12,66 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
 
 ---
 
+## [0.1.3] — 2026-05-14
+
+First non-RC release through the Sparkle auto-update pipeline.
+Adds a master toggle and bulk-clear affordance to the Dictionary
+tab, and overhauls the auto-harvest algorithm to eliminate the
+chrome-word and case-promotion noise that polluted earlier
+sessions. Plus a paste-time boundary fix from `fix/insertion-
+leading-space-and-prompt-audit`.
+
+### Added
+- **Dictionary master toggle** — accent-tinted switch in the
+  Dictionary panel header. When off, the `User dictionary:` Gemini
+  prompt section ships `(empty)` (cache shape preserved) and
+  post-session auto-harvest is skipped. Panel body dims to 45 %
+  but stays editable. Replacement-pairs panel is intentionally
+  unaffected.
+- **Two-stage Clear-all** in the Dictionary panel header (visible
+  only when the dictionary is non-empty). First click wipes
+  `.auto` entries with neutral styling. Once only `.user` remains,
+  the button flips to a destructive tint (`dangerFg` + `dangerSoft`
+  hover fill) before wiping user-typed entries.
+- **NLLanguageRecognizer-based noun-cap-language detection**
+  (German today). Disables the first-cap tier on the auto-harvest
+  so German common nouns (`Haus`, `Auto`, `Termin`) don't surface
+  as dictionary entries. Extensible via
+  `DictionaryHarvester.nounCapitalizingLanguages`.
+
+### Changed
+- **Auto-harvest is now transcript-driven.** Triggers are detected
+  on transcript tokens, not on canonical pulled from context. The
+  earlier behaviour promoted lowercase transcript words (`минуты`,
+  `packages`) to capitalized canonicals when context showed them
+  capitalized — that case-promotion path is gone.
+- **Phrase candidate generation** uses a ±2 word window per
+  trigger within the same sentence (detected via
+  `NLTokenizer(.sentence)`). Boundary filter requires both the
+  first AND last tokens of a candidate phrase to look non-prose
+  (uppercase letter, digit, special binder, or long-dot). This
+  rejects `на Actions artifacts` and `iPhone 10 сохраняется`
+  cleanly while keeping `iPhone 10`, `GitHub Actions`, and
+  `Вася Пупкин`.
+- **`DictionaryStore.addAutoEntries`** now refreshes `addedAt` on
+  duplicate existing entries instead of silently skipping them.
+  Frequently-re-encountered auto entries survive the FIFO trim.
+  User-source entries refresh keeps the `.user` source intact.
+- **First-cap tier minimum length** raised to 5 chars to filter
+  short common words (`Так`, `Вот`, `Для`, `Auto`, `Tool`) while
+  keeping legitimate brand names (`Slack`, `Apple`, `Anthropic`).
+- **Sentence-start detection** uses `NLTokenizer(.sentence)` —
+  smarter than the previous punctuation heuristic on
+  abbreviations like `т.е.`, `etc.`, `Inc.`.
+
+### Fixed
+- **Missing leading space on paste boundary** when transcribing
+  into a field whose cursor sits immediately after a non-space
+  character. Cleanup pass on Gemini prompt section labels for
+  cache stability.
+
+---
+
 ## [0.1.2-rc1] — 2026-05-12
 
 First release through the new auto-update pipeline. Functionally
@@ -36,6 +96,7 @@ banner.
 
 Internal pre-public release.
 
-[Unreleased]: https://github.com/weylandd/NoType/compare/v0.1.2-rc1...HEAD
+[Unreleased]: https://github.com/weylandd/NoType/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/weylandd/NoType/releases/tag/v0.1.3
 [0.1.2-rc1]: https://github.com/weylandd/NoType/releases/tag/v0.1.2-rc1
 [0.1.1]: https://github.com/weylandd/NoType/releases/tag/v0.1.1
