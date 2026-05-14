@@ -16,7 +16,7 @@ Early beta. The core push-to-talk → transcribe → paste loop works end-to-end
 
 ## Requirements
 
-- macOS 26 (Tahoe) or later
+- macOS 14 (Sonoma) or later
 - A Gemini API key — [create one for free at Google AI Studio](https://aistudio.google.com/apikey)
 
 NoType uses your Gemini key directly from your machine. There is no NoType-operated proxy or account system. Your audio and on-screen context go from your Mac to Google's Gemini API and nowhere else.

@@ -6,15 +6,24 @@ Format: short, blunt, with the alternative considered.
 
 ---
 
-## ADR-001 — macOS 26 minimum
+## ADR-001 — macOS 14 (Sonoma) minimum
 
-**Decision:** NoType requires macOS 26 (Tahoe) or later.
+**Decision:** NoType requires macOS 14 (Sonoma) or later. The supported floor covers the two most recent macOS releases prior to the current one (14 Sonoma + 15 Sequoia + 26 Tahoe).
 
-**Why:** We considered using Apple's `SpeechAnalyzer` / `SpeechDetector` (only available on 26+) and ultimately rejected them — see ADR-002. So why keep 26 as minimum? Two reasons:
-1. Modern SwiftUI APIs (`MenuBarExtra`, `@Observable`) work cleanly without backporting.
-2. NoType's target audience is power users who keep up with macOS releases. The cost of supporting 14/15 (older Swift concurrency, no `@Observable`, AppKit fallbacks for menu bar) outweighs the marginal user gain.
+**Why:** A full audit of every native Apple API the project actually calls (Accessibility, ScreenCaptureKit, Vision, NaturalLanguage, AVFoundation, CoreML, CGEvent, AppKit, Security, SwiftUI) shows the **real** technical floor is macOS 14 — driven by:
+- `@Observable` + `@Environment(Type.self)` + `@Bindable` (the Observation framework, macOS 14.0+) — used in `AppState`, `AppearanceController`, `AudioDeviceManager`, `UpdateController`, `PermissionsViewModel`, `OnboardingState`.
+- `ScreenCaptureKit` (macOS 14.0+) — used by the optional OCR fallback (ADR-014). Permission-gated at runtime, but linking against the framework still requires the SDK floor.
 
-**Alternative considered:** macOS 14+ with AppKit fallbacks. Rejected — too much code for too little reach.
+Everything else (`MenuBarExtra`, `Window`/`openWindow`, `windowResizability`, `Layout` protocol, `TimelineView`, `task`, AX APIs, `CGEventTap`, Sparkle 2.9, Vision OCR including `automaticallyDetectsLanguage`, etc.) is available on macOS 13 or earlier. There are **no** macOS 15+ or 26+ APIs in the codebase. We previously kept `Scene.defaultLaunchBehavior(_:)` (macOS 15+) in `NoTypeApp.swift`, but it duplicated a fallback already present in `MenuBarIcon`'s `.task` (which calls `openWindow(id: "main")` while onboarding is pending), so we removed it.
+
+**Why not 26 (previous minimum):** The original ADR justified 26 on the basis of "modern SwiftUI APIs (`MenuBarExtra`, `@Observable`)". That reasoning was overstated — `MenuBarExtra` is macOS 13+ and `@Observable` is macOS 14+, neither requires 26. Holding the floor at 26 was costing us essentially the entire macOS 14–15 audience (~95 % of active Macs) with no technical justification, since we use zero macOS 26-only APIs.
+
+**Alternatives considered:**
+- **macOS 13 (Ventura).** Rejected — would require replacing `@Observable` with `ObservableObject` + `@Published` across 6 files (and migrating every `@Environment(Type.self)` to `@EnvironmentObject` with knock-on rewrites at every callsite), plus wrapping the entire ScreenCaptureKit OCR fallback in `@available(macOS 14, *)`. Real code churn for marginal additional reach.
+- **macOS 15 (Sequoia).** Rejected as too conservative — would skip the Sonoma audience without any technical gain. Sonoma users can run `@Observable` and ScreenCaptureKit just fine.
+- **macOS 26 (status quo).** Rejected as documented above.
+
+**Policy going forward:** track a "current major + two previous majors" support window. When macOS 27 ships, the floor moves to 15. When macOS 28 ships, to 16. Any change requiring a newer API should be gated with `@available` rather than forcing the floor up early.
 
 ---
 

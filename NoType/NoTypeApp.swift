@@ -87,12 +87,12 @@ struct NoTypeApp: App {
         // `.regular` (open) and `.accessory` (closed) so NoType only
         // appears in the Dock while the window is up.
         //
-        // `defaultLaunchBehavior` is decided once at scene-graph build
-        // time from a synchronous UserDefaults read — when the wizard
-        // is still pending we force-present the window so the user
-        // lands directly in onboarding, with no need for a tray-icon
-        // detour. After completion subsequent launches don't auto-open
-        // the window (matches today's "menu-bar utility" behaviour).
+        // First-launch window opening is handled by `MenuBarIcon`'s
+        // `.task` — when the wizard is still pending it calls
+        // `openWindow(id: "main")` so the user lands directly in
+        // onboarding. We don't use SwiftUI's `Scene.defaultLaunchBehavior`
+        // here because it requires macOS 15+ (`@available(macOS 15.0, *)`)
+        // and our minimum is macOS 14.
         Window("NoType", id: "main") {
             MainWindowView()
                 .environment(appState)
@@ -108,9 +108,6 @@ struct NoTypeApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
         .defaultSize(width: 1180, height: 820)
-        .defaultLaunchBehavior(
-            OnboardingState.hasCompletedOnboarding ? .automatic : .presented
-        )
         .commandsRemoved()
     }
 }

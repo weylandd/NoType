@@ -3,8 +3,8 @@
 ## Local development
 
 Requirements:
-- macOS 26 (Tahoe) or later.
-- Xcode 26 or later.
+- macOS 14 (Sonoma) or later (deployment target — see ADR-001).
+- Xcode 26 or later (needed for the macOS 26 SDK we link against; the resulting binary still runs on 14+).
 - [xcodegen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`). The Xcode project is regenerated from `project.yml` — do not edit `NoType.xcodeproj/project.pbxproj` by hand.
 - A Gemini API key for live testing (free tier is enough for development).
 
@@ -97,9 +97,9 @@ On first launch you'll be prompted for Microphone and Accessibility — the onbo
 
 The project is signed with Apple Developer Team ID `49T6U8DQXZ` (see `project.yml` → `DEVELOPMENT_TEAM`) and uses a stable designated requirement (`signing/NoType.xcrequirements` — `designated => identifier "app.notype"`) so TCC grants and Keychain ACLs survive dev rebuilds.
 
-### Cutting a release — the happy path (local-only, until macos-26 lands on GitHub runners)
+### Cutting a release — the happy path (local-only for now)
 
-> ⚠️ **CI is currently disabled.** GitHub-hosted `macos-latest` runners are still on macOS 15 / Xcode 16 and reject our `MACOSX_DEPLOYMENT_TARGET = 26.0` with "supported range is 10.13 to 15.5.99". The CI workflow `.github/workflows/release.yml` is preserved but its tag trigger is commented out — releases happen locally on this Mac until GitHub ships `macos-26`. Re-enable the workflow trigger at that point; the steps inside are still correct.
+> ℹ️ **CI is now a re-enable candidate.** With the deployment target lowered to macOS 14 (see ADR-001), GitHub-hosted `macos-latest` runners (currently macOS 15 / Xcode 16) no longer reject our deployment target — the old `MACOSX_DEPLOYMENT_TARGET = 26.0` mismatch is gone. The CI workflow at `.github/workflows/release.yml` is preserved with its tag trigger still commented out; re-enable it (one-line edit) when you're ready to move from local releases to CI releases. Caveat: Xcode 16 on the CI runner ships the macOS 15 SDK, not 26 — that's fine today because the codebase doesn't reach for any macOS 26-only symbols, but a future change that does would need to be gated with `@available` to keep CI green.
 
 Releases now go through two scripts:
 
