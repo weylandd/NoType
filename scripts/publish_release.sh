@@ -230,13 +230,19 @@ if [[ "$TAG" == *-* ]]; then
     PRERELEASE_FLAGS=(--prerelease)
 fi
 
+# `"${arr[@]+"${arr[@]}"}"` is the bash-3.2-safe way to expand an array
+# that might be empty. macOS still ships bash 3.2, and under `set -u` an
+# empty-array expansion via `"${arr[@]}"` triggers an "unbound variable"
+# error mid-release. The `${arr[@]+…}` parameter expansion returns
+# nothing when the array is unset/empty and the full expansion when
+# it has elements — safe in both cases.
 echo "▶ Creating GitHub Release ${TAG}"
 gh release create "$TAG" \
     "$DMG_PATH" \
     "$ZIP_PATH" \
     --title "$TAG" \
     --notes-file "$NOTES_FILE" \
-    "${PRERELEASE_FLAGS[@]}"
+    ${PRERELEASE_FLAGS[@]+"${PRERELEASE_FLAGS[@]}"}
 
 echo
 echo "✓ Released ${TAG}"
