@@ -64,18 +64,28 @@ echo "▶ Regenerating Xcode project from project.yml"
 xcodegen generate
 
 echo "▶ Archiving (${CONFIG})"
-# Pin the signing identity explicitly so the build doesn't fall back
-# to looking for "Apple Development" (the legacy "Mac Development"
-# cert) when signing intermediate artefacts like Sparkle.framework.
-# Locally both certs are usually present so this is a no-op; on CI
-# only Developer ID Application is imported and Xcode would otherwise
-# fail with `No "Mac Development" signing certificate found`.
+# Override the project's `CODE_SIGN_STYLE: Automatic` (set in project.yml)
+# to Manual for the archive step, and pin the identity explicitly.
+# Background:
+#  - project.yml uses Automatic so Debug builds on the maintainer's Mac
+#    can pick up Apple Development cleanly.
+#  - On CI only `Developer ID Application` is imported (via
+#    `apple-actions/import-codesign-certs` in release.yml). Automatic
+#    signing still tries to find "Apple Development" (the legacy
+#    "Mac Development" cert) to sign intermediate artefacts like
+#    Sparkle.framework — and fails on the runner.
+#  - Manual signing + Developer ID Application + Hardened Runtime is the
+#    standard recipe for non-App-Store macOS apps. Developer ID
+#    distribution does NOT require a provisioning profile, so we don't
+#    need to pin one here.
 xcodebuild -project "${PROJECT}" \
            -scheme "${SCHEME}" \
            -configuration "${CONFIG}" \
            -archivePath "${ARCHIVE_PATH}" \
            -destination "generic/platform=macOS" \
+           CODE_SIGN_STYLE=Manual \
            CODE_SIGN_IDENTITY="${SIGN_IDENTITY}" \
+           DEVELOPMENT_TEAM="49T6U8DQXZ" \
            -quiet \
            archive
 
