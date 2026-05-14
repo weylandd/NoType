@@ -8,8 +8,20 @@
     <key>teamID</key>
     <string>49T6U8DQXZ</string>
 
+    <!--
+    Manual signing matches what scripts/release.sh now passes to
+    `xcodebuild archive` (CODE_SIGN_STYLE=Manual + Developer ID
+    Application identity). On CI only Developer ID is imported,
+    so Automatic style fails on intermediate artefacts. Locally
+    the maintainer has Developer ID Application as well, so
+    Manual works there too — see the comment block above the
+    `xcodebuild ... archive` call in scripts/release.sh.
+    -->
     <key>signingStyle</key>
-    <string>automatic</string>
+    <string>manual</string>
+
+    <key>signingCertificate</key>
+    <string>Developer ID Application</string>
 
     <key>destination</key>
     <string>export</string>
