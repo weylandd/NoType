@@ -14,11 +14,12 @@ concurrency:
 jobs:
   build:
     name: Build & Test (macOS)
-    # NOTE: NoType requires macOS 26 (Tahoe) at runtime. GitHub-hosted macOS
-    # runners may lag behind the macOS release schedule — when that's the case,
-    # this job will fail on the xcodebuild step until a `macos-26` (or newer)
-    # runner image is available. Pin the runner version explicitly when one
-    # ships (e.g. `runs-on: macos-26`) instead of relying on `macos-latest`.
+    # NoType's deployment target is macOS 14 (Sonoma) — see ADR-001 in
+    # docs/decisions.md. GitHub-hosted `macos-latest` runners (currently
+    # macOS 15 / Xcode 16) link against the macOS 15 SDK; that's fine
+    # because the codebase doesn't reach for any macOS 26-only symbols.
+    # A future change that adds 26-only API must be guarded with
+    # `@available(macOS 26, *)` to keep this job green.
     runs-on: macos-latest
     timeout-minutes: 25
 
@@ -38,6 +39,10 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
+      # Disable code signing for the CI build — runners don't have our
+      # Developer ID certificate in keychain (signing is only set up in
+      # release.yml). The compiled `.app` isn't shipped from this job; it
+      # just verifies that the code compiles and tests pass.
       - name: Build (Debug)
         run: |
           set -o pipefail
@@ -46,6 +51,9 @@ jobs:
             -scheme NoType \
             -configuration Debug \
             -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
             build
 
       - name: Test
@@ -56,4 +64,7 @@ jobs:
             -scheme NoType \
             -configuration Debug \
             -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
             test
