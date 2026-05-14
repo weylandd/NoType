@@ -64,11 +64,18 @@ echo "▶ Regenerating Xcode project from project.yml"
 xcodegen generate
 
 echo "▶ Archiving (${CONFIG})"
+# Pin the signing identity explicitly so the build doesn't fall back
+# to looking for "Apple Development" (the legacy "Mac Development"
+# cert) when signing intermediate artefacts like Sparkle.framework.
+# Locally both certs are usually present so this is a no-op; on CI
+# only Developer ID Application is imported and Xcode would otherwise
+# fail with `No "Mac Development" signing certificate found`.
 xcodebuild -project "${PROJECT}" \
            -scheme "${SCHEME}" \
            -configuration "${CONFIG}" \
            -archivePath "${ARCHIVE_PATH}" \
            -destination "generic/platform=macOS" \
+           CODE_SIGN_IDENTITY="${SIGN_IDENTITY}" \
            -quiet \
            archive
 
