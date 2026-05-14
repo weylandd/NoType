@@ -1,18 +1,16 @@
 name: Release
 
-# ┌──────────────────────────────────────────────────────────────────┐
-# │ DISABLED as of 2026-05-12 — GitHub-hosted `macos-latest` runners │
-# │ are still on macOS 15 / Xcode 16 and reject our 26.0 deployment  │
-# │ target with: "supported deployment target versions is 10.13 to   │
-# │ 15.5.99". Releases happen locally via:                            │
-# │   ./scripts/release.sh                                            │
-# │   ./scripts/publish_release.sh                                    │
-# │ (see docs/build.md "Cutting a release"). Re-enable the `push:    │
-# │ tags: ['v*']` trigger below once `macos-26` images are available.│
-# └──────────────────────────────────────────────────────────────────┘
+# Triggers on a pushed semver tag (`vX.Y.Z` — and `vX.Y.Z-rcN` for
+# prereleases, which the workflow auto-marks via `prerelease:` below).
+# `workflow_dispatch` stays available so we can re-run from the Actions
+# UI without re-tagging.
+#
+# Local fallback: `./scripts/release.sh` + `./scripts/publish_release.sh`
+# still work end-to-end on the maintainer's Mac — see docs/build.md
+# "Cutting a release" for the local recipe.
 on:
-  # push:
-  #   tags: ['v*']
+  push:
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:

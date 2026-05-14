@@ -97,11 +97,9 @@ On first launch you'll be prompted for Microphone and Accessibility — the onbo
 
 The project is signed with Apple Developer Team ID `49T6U8DQXZ` (see `project.yml` → `DEVELOPMENT_TEAM`) and uses a stable designated requirement (`signing/NoType.xcrequirements` — `designated => identifier "app.notype"`) so TCC grants and Keychain ACLs survive dev rebuilds.
 
-### Cutting a release — the happy path (local-only for now)
+### Cutting a release — the happy path (CI)
 
-> ℹ️ **CI is now a re-enable candidate.** With the deployment target lowered to macOS 14 (see ADR-001), GitHub-hosted `macos-latest` runners (currently macOS 15 / Xcode 16) no longer reject our deployment target — the old `MACOSX_DEPLOYMENT_TARGET = 26.0` mismatch is gone. The CI workflow at `.github/workflows/release.yml` is preserved with its tag trigger still commented out; re-enable it (one-line edit) when you're ready to move from local releases to CI releases. Caveat: Xcode 16 on the CI runner ships the macOS 15 SDK, not 26 — that's fine today because the codebase doesn't reach for any macOS 26-only symbols, but a future change that does would need to be gated with `@available` to keep CI green.
-
-Releases now go through two scripts:
+The primary release path runs on GitHub Actions (`.github/workflows/release.yml`). The maintainer's role is to bump version metadata and push a tag; the runner does the rest (xcodegen → archive → notarize → DMG/.zip → EdDSA-sign → appcast → GitHub Release).
 
 ```bash
 # 1. On main, bump version + add CHANGELOG entry. Commit & push.
@@ -112,16 +110,33 @@ Releases now go through two scripts:
 #      ## [X.Y.Z] — YYYY-MM-DD
 #      ...what changed...
 
-# 2. Build + notarize + DMG + .zip locally (~10 minutes; ~5 of that is Apple notary).
+# 2. Tag the bump commit and push the tag — that's the trigger.
+git tag vX.Y.Z
+git push origin vX.Y.Z
+
+# 3. Watch the run (~12–18 min — most of it is Apple notarisation).
+gh run watch
+```
+
+The workflow verifies that the pushed tag matches `CFBundleShortVersionString` in `Info.plist`. If they're off (e.g. you forgot to bump), it fails fast with a readable error. Re-run after fixing.
+
+Hyphenated tags (`v0.1.2-rc1`, `v0.2.0-beta`) are uploaded as **prerelease** on GitHub. They still appear in the appcast — installed copies will pick them up — so use them for end-to-end testing of the release pipeline before a real cut.
+
+Installed copies of NoType see the new version through their next scheduled Sparkle check (≤ 24 h), or immediately if the user opens the main window after a launch with no recent check.
+
+### Local fallback path
+
+If CI is down, mid-fix, or you want to ship from your Mac directly, the two scripts that the workflow wraps still work end-to-end:
+
+```bash
+# Build + notarize + DMG + .zip locally (~10 minutes; ~5 of that is Apple notary).
 ./scripts/release.sh
 
-# 3. Sign the .zip, patch docs/appcast.xml, tag, push, create GitHub Release.
+# Sign the .zip, patch docs/appcast.xml, tag, push, create GitHub Release.
 ./scripts/publish_release.sh
 ```
 
-That's the whole flow. `publish_release.sh` is idempotent — if a Release for the current version already exists on GitHub, it exits without doing anything.
-
-Installed copies of NoType see the new version through their next scheduled Sparkle check (≤ 24 h), or immediately if the user opens the main window after a launch with no recent check.
+`publish_release.sh` is idempotent — if a Release for the current version already exists on GitHub, it exits without doing anything.
 
 ### What each script does
 
@@ -166,9 +181,20 @@ gh auth login                              # log into your GitHub account
 
 **Do not run `scripts/release.sh` from an agent** — it talks to Apple's notary service and ships a real binary; let the human invoke it.
 
-### CI secrets — still configured, currently unused
+### CI secrets
 
-The six GitHub Secrets set up for the CI path (`DEVELOPER_ID_CERT_P12`, `DEVELOPER_ID_CERT_PASSWORD`, `APPLE_ID`, `APPLE_APP_PASSWORD`, `TEAM_ID`, `SPARKLE_ED_PRIVATE_KEY`) stay in place. They'll start being read again the moment we re-enable the workflow trigger in `.github/workflows/release.yml` once GitHub adds `macos-26` runners. No action needed in the meantime.
+The CI release pipeline reads six GitHub Secrets:
+
+| Secret | Used for |
+|---|---|
+| `DEVELOPER_ID_CERT_P12` | Developer ID Application certificate (base64-encoded .p12) — imported into the runner's keychain |
+| `DEVELOPER_ID_CERT_PASSWORD` | Password for the .p12 above |
+| `APPLE_ID` | Apple ID for notarytool |
+| `APPLE_APP_PASSWORD` | App-specific password for the Apple ID |
+| `TEAM_ID` | Apple Developer Team ID (`49T6U8DQXZ`) |
+| `SPARKLE_ED_PRIVATE_KEY` | EdDSA private key for signing the Sparkle .zip artefact |
+
+All six are already configured on this repo. If you rotate the Developer ID cert, regenerate the Sparkle keypair, or change the App-Specific Password, update the corresponding secret in **Settings → Secrets and variables → Actions** before the next release.
 
 ### GitHub Pages — one-time setup
 
