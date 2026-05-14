@@ -110,10 +110,14 @@ BUILD=$(/usr/libexec/PlistBuddy   -c "Print :CFBundleVersion"            NoType/
 TAG="v${VERSION}"
 DMG_PATH="build/NoType-${VERSION}.dmg"
 ZIP_PATH="build/NoType-${VERSION}.zip"
+# Version-less alias produced by release.sh. Required for the stable
+# "always latest" download URL — GitHub's /latest/download/<filename>
+# only redirects when the same filename appears in the latest release.
+DMG_LATEST_PATH="build/NoType.dmg"
 
 echo "▶ Publishing NoType ${VERSION} (build ${BUILD}) as ${TAG}"
 
-for f in "$DMG_PATH" "$ZIP_PATH"; do
+for f in "$DMG_PATH" "$ZIP_PATH" "$DMG_LATEST_PATH"; do
     if [[ ! -f "$f" ]]; then
         echo "✗ Missing $f. Run ./scripts/release.sh first." >&2
         exit 1
@@ -240,6 +244,7 @@ echo "▶ Creating GitHub Release ${TAG}"
 gh release create "$TAG" \
     "$DMG_PATH" \
     "$ZIP_PATH" \
+    "$DMG_LATEST_PATH" \
     --title "$TAG" \
     --notes-file "$NOTES_FILE" \
     ${PRERELEASE_FLAGS[@]+"${PRERELEASE_FLAGS[@]}"}
