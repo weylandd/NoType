@@ -12,6 +12,61 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
 
 ---
 
+## [0.1.4] — 2026-05-14
+
+First release of the macOS 14+ era. NoType now installs and runs
+on Sonoma, Sequoia, and Tahoe — the previous macOS 26 floor was a
+policy choice that overstated the actual technical requirement.
+Release pipeline runs on GitHub Actions instead of a single Mac.
+Auto-update banner has a fresh look, and the website's download
+link now stays valid across versions without per-release edits.
+
+### Added
+- **Lowered minimum macOS to 14 (Sonoma)** (#7). A full audit of
+  every native Apple API the project uses confirmed nothing
+  required the previous macOS 26 floor — it was a policy choice
+  that overstated the real technical floor. ScreenCaptureKit-OCR
+  + `@Observable`-driven state set the actual floor at 14.0.
+  NoType now installs on 14 / 15 / 26. See ADR-001 for details.
+- **Stable "always latest" DMG download link** (#5) — the README's
+  download link now points at a redirector that always serves the
+  most recent published `.dmg`, so external references don't need
+  per-release renumbering.
+
+### Changed
+- **Update banner redesign** (#5) — pill placement, motion, and
+  download/install copy reworked to match the rest of the
+  sidebar's visual language.
+- **Release pipeline now runs on GitHub Actions** (#9). Tag a
+  commit with `vX.Y.Z` and push — the workflow handles xcodegen,
+  archive, notarisation, DMG/.zip assembly, Sparkle EdDSA
+  signing, appcast patching, and GitHub Release publication.
+  The local `./scripts/release.sh` + `./scripts/publish_release.sh`
+  recipe is preserved as the documented fallback.
+
+### Fixed
+- **CI Build & Test workflow** (#8). Was failing on a missing
+  code signing certificate (the runner doesn't have one, and the
+  build doesn't need it for compile/test verification). Now
+  passes `CODE_SIGNING_ALLOWED=NO` so the job completes its
+  actual purpose. Affects PR-on-PR checks only — release.yml
+  still does real signing via the imported cert.
+- **Release archive step on CI** (#11, #12). Switched the
+  `xcodebuild archive` invocation to Manual signing with
+  `Developer ID Application` pinned explicitly; the previous
+  Automatic-signing path looked for "Apple Development" cert
+  which isn't on the runner. \`ExportOptions.plist\` is synced
+  to manual signing as well.
+- **Sparkle appcast generation** for the new minimum macOS.
+  `sparkle_appcast_item.sh` was hardcoding `<sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>`
+  per item, which would have hidden v0.1.4 from users on
+  Sonoma / Sequoia even though the build supports them. Now
+  defaults to 14.0 and accepts `--minimum-system-version` to
+  override. Also extracts only the current version's section
+  from CHANGELOG.md instead of inlining the whole file.
+
+---
+
 ## [0.1.4-rc1] — 2026-05-14
 
 Validation release for the re-enabled CI pipeline. Functionally a
@@ -138,7 +193,8 @@ banner.
 
 Internal pre-public release.
 
-[Unreleased]: https://github.com/weylandd/NoType/compare/v0.1.4-rc1...HEAD
+[Unreleased]: https://github.com/weylandd/NoType/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/weylandd/NoType/releases/tag/v0.1.4
 [0.1.4-rc1]: https://github.com/weylandd/NoType/releases/tag/v0.1.4-rc1
 [0.1.3]: https://github.com/weylandd/NoType/releases/tag/v0.1.3
 [0.1.2-rc1]: https://github.com/weylandd/NoType/releases/tag/v0.1.2-rc1
