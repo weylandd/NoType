@@ -22,6 +22,68 @@
     <description>NoType release feed for Sparkle 2 auto-updates.</description>
     <language>en</language>
     <item>
+      <title>Version 0.1.4</title>
+      <pubDate>Thu, 14 May 2026 13:27:49 +0000</pubDate>
+      <sparkle:version>6</sparkle:version>
+      <sparkle:shortVersionString>0.1.4</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+First release of the macOS 14+ era. NoType now installs and runs
+on Sonoma, Sequoia, and Tahoe — the previous macOS 26 floor was a
+policy choice that overstated the actual technical requirement.
+Release pipeline runs on GitHub Actions instead of a single Mac.
+Auto-update banner has a fresh look, and the website's download
+link now stays valid across versions without per-release edits.
+
+### Added
+- **Lowered minimum macOS to 14 (Sonoma)** (#7). A full audit of
+  every native Apple API the project uses confirmed nothing
+  required the previous macOS 26 floor — it was a policy choice
+  that overstated the real technical floor. ScreenCaptureKit-OCR
+  + `@Observable`-driven state set the actual floor at 14.0.
+  NoType now installs on 14 / 15 / 26. See ADR-001 for details.
+- **Stable "always latest" DMG download link** (#5) — the README's
+  download link now points at a redirector that always serves the
+  most recent published `.dmg`, so external references don't need
+  per-release renumbering.
+
+### Changed
+- **Update banner redesign** (#5) — pill placement, motion, and
+  download/install copy reworked to match the rest of the
+  sidebar's visual language.
+- **Release pipeline now runs on GitHub Actions** (#9). Tag a
+  commit with `vX.Y.Z` and push — the workflow handles xcodegen,
+  archive, notarisation, DMG/.zip assembly, Sparkle EdDSA
+  signing, appcast patching, and GitHub Release publication.
+  The local `./scripts/release.sh` + `./scripts/publish_release.sh`
+  recipe is preserved as the documented fallback.
+
+### Fixed
+- **CI Build & Test workflow** (#8). Was failing on a missing
+  code signing certificate (the runner doesn't have one, and the
+  build doesn't need it for compile/test verification). Now
+  passes `CODE_SIGNING_ALLOWED=NO` so the job completes its
+  actual purpose. Affects PR-on-PR checks only — release.yml
+  still does real signing via the imported cert.
+- **Release archive step on CI** (#11, #12). Switched the
+  `xcodebuild archive` invocation to Manual signing with
+  `Developer ID Application` pinned explicitly; the previous
+  Automatic-signing path looked for "Apple Development" cert
+  which isn't on the runner. \`ExportOptions.plist\` is synced
+  to manual signing as well.
+- **Sparkle appcast generation** for the new minimum macOS.
+  `sparkle_appcast_item.sh` was hardcoding `<sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>`
+  per item, which would have hidden v0.1.4 from users on
+  Sonoma / Sequoia even though the build supports them. Now
+  defaults to 14.0 and accepts `--minimum-system-version` to
+  override. Also extracts only the current version's section
+  from CHANGELOG.md instead of inlining the whole file.
+      ]]></description>
+      <enclosure url="https://github.com/weylandd/NoType/releases/download/v0.1.4/NoType-0.1.4.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="z2GK71tsx2x9Y9FLAmB5liOFZNF7OjpgzycaLvoE8PfEOa53NtAJ7AyTLElWTelmajdzbdUOb7zj9Yk8P7UeBg==" length="5992549" />
+    </item>
+    <item>
       <title>Version 0.1.4-rc1</title>
       <pubDate>Thu, 14 May 2026 12:59:36 +0000</pubDate>
       <sparkle:version>5</sparkle:version>
