@@ -143,4 +143,48 @@ final class InsertionTargetTests: XCTestCase {
         XCTAssertEqual(InsertionTarget.empty.textBefore, "")
         XCTAssertEqual(InsertionTarget.empty.textAfter, "")
     }
+
+    // MARK: - Scrollback-shape detection (terminals not in known-bundles list)
+
+    func test_looksLikeScrollback_terminalShape_isTrue() {
+        // 6 lines of code-shaped content, well over 1000 chars, role
+        // AXTextArea — the typical terminal scrollback signature.
+        let line = String(repeating: "abc 123 ", count: 30)
+        let value = (0..<6).map { _ in line }.joined(separator: "\n")
+        XCTAssertTrue(value.utf16.count > 1000, "fixture must exceed length threshold")
+        XCTAssertTrue(InsertionTarget.looksLikeScrollback(value: value, role: "AXTextArea"))
+    }
+
+    func test_looksLikeScrollback_shortMultiLine_isFalse() {
+        // Multi-line note-style content but under length threshold — a
+        // legitimate compose box, NOT scrollback.
+        let value = """
+        Hello team,
+
+        I'd like to discuss a few items.
+        Let me know what works best.
+
+        Thanks.
+        """
+        XCTAssertFalse(InsertionTarget.looksLikeScrollback(value: value, role: "AXTextArea"))
+    }
+
+    func test_looksLikeScrollback_singleLineLong_isFalse() {
+        // 5000-char single-line URL or token — long but no newlines, so
+        // not scrollback (and a real text field could legit hold this).
+        let value = String(repeating: "x", count: 5000)
+        XCTAssertFalse(InsertionTarget.looksLikeScrollback(value: value, role: "AXTextArea"))
+    }
+
+    func test_looksLikeScrollback_textFieldRole_isFalse() {
+        // Even if the content shape matches, a single-line `AXTextField`
+        // is by definition not a scrollback viewport.
+        let line = String(repeating: "abc 123 ", count: 30)
+        let value = (0..<6).map { _ in line }.joined(separator: "\n")
+        XCTAssertFalse(InsertionTarget.looksLikeScrollback(value: value, role: "AXTextField"))
+    }
+
+    func test_looksLikeScrollback_emptyValue_isFalse() {
+        XCTAssertFalse(InsertionTarget.looksLikeScrollback(value: "", role: "AXTextArea"))
+    }
 }

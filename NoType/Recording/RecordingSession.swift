@@ -33,6 +33,36 @@ import OSLog
 final class RecordingSession {
     nonisolated static let log = Logger(subsystem: "app.notype", category: "session")
 
+    /// Final-only batch audio under this threshold triggers the
+    /// short-session lite-context path: empty AX tree, no OCR, no
+    /// `On-screen context` / `Prior chunks` prompt sections, and a
+    /// trimmed system instruction (`Self.systemPromptLite` in
+    /// `GeminiClient`). At 16 kHz, 32 000 samples = 2.0 s of audio.
+    /// Empirically covers 1–3 word utterances with breathing room.
+    nonisolated static let shortSessionMaxSamples = 32_000
+
+    /// Pure-function discriminator for the lite path. Extracted so
+    /// `RecordingSessionShortPathTests` can pin the contract without
+    /// standing up a full `RecordingSession`.
+    ///
+    /// Lite path fires iff ALL hold:
+    ///   1. `isFinalBatch` — batch contains the final chunk (user release).
+    ///   2. `priorTranscriptCount == 0` — no previous chunks went out
+    ///      (i.e. VAD didn't split off any mid-session chunks). Once
+    ///      transcripts exist, the prompt has to carry `Prior chunks`
+    ///      and the lite shape no longer fits.
+    ///   3. `totalBatchSamples < shortSessionMaxSamples` — audio fits
+    ///      under the 2 s short-utterance threshold.
+    nonisolated static func shouldUseLitePath(
+        isFinalBatch: Bool,
+        priorTranscriptCount: Int,
+        totalBatchSamples: Int
+    ) -> Bool {
+        isFinalBatch
+            && priorTranscriptCount == 0
+            && totalBatchSamples < shortSessionMaxSamples
+    }
+
     enum SessionError: Error, LocalizedError {
         case notStarted
         case noSpeech
@@ -59,6 +89,15 @@ final class RecordingSession {
     /// `.minimal(activeApp:)` (which carries empty replacements). Empty
     /// when the user has no replacement pairs configured.
     private var replacementsFrozen: [DictionaryReplacement] = []
+    /// Frozen `InstructionsContext` captured at session start. Used by
+    /// the short-session lite path (`buildLiteSnapshot`) to assemble a
+    /// minimal `ContextSnapshot` synchronously on the main actor without
+    /// touching the (possibly still-running) `contextTask`.
+    private var instructionsFrozen: InstructionsContext = .empty
+    /// Frozen `DictionaryContext` captured at session start. Same role
+    /// as `instructionsFrozen` — feeds `buildLiteSnapshot` for the
+    /// short-session path.
+    private var dictionaryFrozen: DictionaryContext = .empty
     private var contextTask: Task<ContextSnapshot, Never>?
     /// Mirror of `contextTask`'s eventual value, populated on the main
     /// actor the moment the snapshot is ready. Used by the **final-chunk**
@@ -134,6 +173,8 @@ final class RecordingSession {
     ) throws {
         self.apiKey = apiKey
         self.replacementsFrozen = dictionary.replacements
+        self.instructionsFrozen = instructions
+        self.dictionaryFrozen = dictionary
         let frontmost = NSWorkspace.shared.frontmostApplication
         sourceApp = frontmost
         startedAt = Date()
@@ -478,8 +519,23 @@ final class RecordingSession {
         // release session shouldn't sit blocked behind the 2.5 s OCR cap.
         // Mid-session batches (pause-triggered) keep the awaiting path
         // since the user is clearly speaking and we have time to spare.
+        //
+        // Additionally: when the final batch is short (<2 s) AND this is
+        // the only batch of the session, route through the lite path —
+        // a synchronous trimmed snapshot (no AX, no OCR) + a smaller
+        // system prompt at the Gemini layer. Reduces prompt by ~70% on
+        // single-word sessions where context never helps anyway.
         let isFinalBatch = batch.contains { $0.isFinal }
-        guard let snap = await snapshotForChunk(allowMinimalFallback: isFinalBatch) else { return }
+        let totalBatchSamples = batch.reduce(0) { $0 + ($1.pcmEnd - $1.pcmStart) }
+        let isShortFinalOnly = Self.shouldUseLitePath(
+            isFinalBatch: isFinalBatch,
+            priorTranscriptCount: transcripts.count,
+            totalBatchSamples: totalBatchSamples
+        )
+        guard let snap = await snapshotForChunk(
+            allowMinimalFallback: isFinalBatch,
+            forceLite: isShortFinalOnly
+        ) else { return }
 
         let recorder = self.recorder
         let gemini = self.gemini
@@ -508,7 +564,19 @@ final class RecordingSession {
 
         do {
             let text: String
-            if encoded.count == 1 {
+            if snap.isLite {
+                // Lite path is reachable only via the discriminator in
+                // `processBatch` — guaranteed `encoded.count == 1` and
+                // `containsFinal == true` by construction (final-only
+                // batch, transcripts empty, audio < 2 s).
+                let one = encoded[0]
+                text = try await gemini.transcribeShort(
+                    audio: one.audio,
+                    mimeType: "audio/mp4",
+                    context: snap.context,
+                    apiKey: snap.apiKey
+                )
+            } else if encoded.count == 1 {
                 let one = encoded[0]
                 text = try await gemini.transcribe(
                     audio: one.audio,
@@ -556,6 +624,11 @@ final class RecordingSession {
         let context: ContextSnapshot
         let priors: [String]
         let apiKey: String
+        /// `true` when assembled via `buildLiteSnapshot` — instructs the
+        /// caller to route through `GeminiClient.transcribeShort` (which
+        /// uses `systemPromptLite` and omits the On-screen context +
+        /// Prior chunks prompt parts).
+        let isLite: Bool
     }
 
     /// Resolve the `ContextSnapshot` to attach to the next Gemini call.
@@ -563,9 +636,21 @@ final class RecordingSession {
     ///   `contextTask` has produced so far without awaiting (final-chunk
     ///   path on quick release); when `false`, block until the task
     ///   completes (mid-session-chunk path).
-    private func snapshotForChunk(allowMinimalFallback: Bool = false) async -> ChunkSnapshot? {
+    /// - Parameter forceLite: when `true`, ignore `contextTask` entirely
+    ///   and synthesize a lite snapshot synchronously (no AX, no OCR,
+    ///   keeps insertion target + instructions + dictionary). Triggers
+    ///   the `systemPromptLite` path at the Gemini layer.
+    private func snapshotForChunk(
+        allowMinimalFallback: Bool = false,
+        forceLite: Bool = false
+    ) async -> ChunkSnapshot? {
         let context: ContextSnapshot
-        if allowMinimalFallback {
+        let isLite: Bool
+        if forceLite {
+            context = buildLiteSnapshot()
+            isLite = true
+            Self.log.info("short final-only batch: using lite context (no AX, no OCR)")
+        } else if allowMinimalFallback {
             if let cached = cachedContext {
                 context = cached
                 Self.log.info("final batch: using cached context (ready=true)")
@@ -576,15 +661,57 @@ final class RecordingSession {
                 ))
                 Self.log.info("final batch: context not ready, using minimal fallback")
             }
+            isLite = false
         } else if let task = contextTask {
             context = await task.value
+            isLite = false
         } else {
             context = ContextSnapshot.minimal(activeApp: AppInfo(
                 name: sourceApp?.localizedName ?? "Unknown",
                 bundleID: sourceApp?.bundleIdentifier ?? "unknown.bundle"
             ))
+            isLite = false
         }
-        return ChunkSnapshot(context: context, priors: transcripts, apiKey: apiKey)
+        return ChunkSnapshot(context: context, priors: transcripts, apiKey: apiKey, isLite: isLite)
+    }
+
+    /// Synchronously assemble a small `ContextSnapshot` for short
+    /// final-only sessions: full instructions + dictionary + insertion
+    /// target, but empty AX tree and no OCR. Doesn't touch `contextTask`
+    /// — if AX/OCR is still running we don't care; this path doesn't need
+    /// it. Returns in <50 ms typical (one synchronous AX read for the
+    /// search-field override + a sync `InsertionTarget.captureSync()`
+    /// when `cachedContext` isn't ready yet).
+    private func buildLiteSnapshot() -> ContextSnapshot {
+        let appInfo = AppInfo(
+            name: sourceApp?.localizedName ?? "Unknown",
+            bundleID: sourceApp?.bundleIdentifier ?? "unknown.bundle"
+        )
+
+        // Category resolution mirrors what `contextTask` does — stored
+        // lookup plus the synchronous AX search-field override. The
+        // override is the highest-leverage case (search bars dictating
+        // a query) and `CategoryResolver.resolveFromAX` is a single sync
+        // AX read on the system-wide focused element (~5–10 ms).
+        let stored = instructionsFrozen.cachedCategoryForBundle(appInfo.bundleID) ?? .uncategorized
+        let resolvedCategory = CategoryResolver.resolveFromAX(stored: stored)
+        let categoryInstruction = instructionsFrozen.promptForCategory(resolvedCategory)
+
+        // Insertion target — prefer the cache (mirror may have completed
+        // ahead of us even on quick-release), else synchronous capture.
+        let target = cachedContext?.insertionTarget ?? InsertionTarget.captureSync()
+
+        return ContextSnapshot(
+            activeApp: appInfo,
+            category: resolvedCategory,
+            userInstruction: instructionsFrozen.userInstruction,
+            categoryInstruction: categoryInstruction,
+            dictionary: dictionaryFrozen.activeEntries,
+            replacements: dictionaryFrozen.replacements,
+            tree: RedactedAXSnapshot(apps: []),
+            insertionTarget: target,
+            screenText: nil
+        )
     }
 
     private func appendTranscript(_ text: String) {

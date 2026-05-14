@@ -252,6 +252,42 @@ actor GeminiClient {
         )
     }
 
+    /// Short-session lite path. Triggered by `RecordingSession` only when
+    /// the discriminator `shouldUseLitePath` fires — a final-only batch of
+    /// a single short chunk with no prior chunks. Differs from `transcribe`
+    /// in three ways:
+    ///
+    /// 1. Uses `Self.systemPromptLite` (the trimmed ~600-word system
+    ///    instruction) instead of the full `Self.systemPrompt`.
+    /// 2. Drops the `On-screen context:` and `Prior chunks (this session):`
+    ///    user-message parts entirely (no empty placeholders either) —
+    ///    different prefix shape from the full path on purpose. There is
+    ///    no implicit cross-cache between lite and full requests; that's
+    ///    acceptable because lite sessions are single-chunk by definition.
+    /// 3. Uses `Self.liteChunkInstruction()` (single-utterance variant —
+    ///    no chunk index, no batched / mid-chunk forks).
+    ///
+    /// See ADR / `merry-percolating-hare.md` plan + `NoType/Gemini/CLAUDE.md`
+    /// "Short-session lite path" subsection.
+    func transcribeShort(
+        audio: Data,
+        mimeType: String,
+        context: ContextSnapshot,
+        apiKey: String
+    ) async throws -> String {
+        let instruction = Self.liteChunkInstruction()
+        return try await sendRequest(
+            audios: [(audio, mimeType)],
+            context: context,
+            priorTranscripts: [],
+            instruction: instruction,
+            logID: "short_single",
+            mayBeEmpty: true,
+            apiKey: apiKey,
+            useLitePrompt: true
+        )
+    }
+
     /// Transcribe a batch of consecutive chunks in a single round-trip.
     ///
     /// Used when chunks pile up behind an in-flight request (typically at
@@ -363,6 +399,57 @@ actor GeminiClient {
         )
     }
 
+    /// Pure: assemble the **lite** request body for the short-session
+    /// path. Differs from `buildRequestBody` by:
+    /// - Dropping the `On-screen context:` part (no AX tree, no OCR).
+    /// - Dropping the `Prior chunks (this session):` part (lite path
+    ///   triggers only when `priorTranscripts.isEmpty`, so the section
+    ///   would always render `(none yet)` — better to omit entirely and
+    ///   match the trimmed system prompt).
+    /// - Using `systemPromptLite` for the `system_instruction`.
+    ///
+    /// Resulting part order: App+Category → optional User instruction →
+    /// optional Category instruction → User dictionary → Insertion target
+    /// → per-call instruction → audio. Pinned by
+    /// `GeminiRequestBuilderTests.test_litePrompt_*`.
+    static func buildLiteRequestBody(
+        audio: Data,
+        mimeType: String,
+        context: ContextSnapshot,
+        instruction: String
+    ) -> GeminiAPI.Request {
+        let appLine =
+            "App: \(context.activeApp.name) (\(context.activeApp.bundleID))\n" +
+            "Category: \(context.category.rawValue)"
+        let insertionText = formatInsertionTarget(context.insertionTarget)
+        let dictionaryText = formatUserDictionary(context.dictionary)
+
+        var parts: [GeminiAPI.Part] = [.text(appLine)]
+        if !context.userInstruction.isEmpty {
+            parts.append(.text("User instruction:\n\(context.userInstruction)"))
+        }
+        if let categoryInstruction = context.categoryInstruction,
+           !categoryInstruction.isEmpty {
+            parts.append(.text("Category instruction:\n\(categoryInstruction)"))
+        }
+        parts.append(.text(dictionaryText))
+        parts.append(.text(insertionText))
+        parts.append(.text(instruction))
+        parts.append(.inlineData(mimeType: mimeType, data: audio.base64EncodedString()))
+
+        return GeminiAPI.Request(
+            contents: [GeminiAPI.Content(role: "user", parts: parts)],
+            generationConfig: GeminiAPI.GenerationConfig(
+                topP: 0.2,
+                responseMimeType: "text/plain",
+                thinkingConfig: GeminiAPI.ThinkingConfig(thinkingLevel: "MINIMAL")
+            ),
+            systemInstruction: GeminiAPI.Content(role: nil, parts: [
+                .text(systemPromptLite)
+            ])
+        )
+    }
+
     /// Internal: assemble the request, send it (with the documented retry
     /// policy), and parse the response. Shared by `transcribe` and
     /// `transcribeBatch` so the prefix shape stays in lockstep between
@@ -382,17 +469,32 @@ actor GeminiClient {
         instruction: String,
         logID: String,
         mayBeEmpty: Bool,
-        apiKey: String
+        apiKey: String,
+        useLitePrompt: Bool = false
     ) async throws -> String {
         let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedKey.isEmpty else { throw GeminiError.missingKey }
 
-        let body = Self.buildRequestBody(
-            audios: audios,
-            context: context,
-            priorTranscripts: priorTranscripts,
-            instruction: instruction
-        )
+        let body: GeminiAPI.Request
+        if useLitePrompt {
+            // Lite path is single-audio by construction (see
+            // `transcribeShort`). `audios.first!` is safe.
+            precondition(audios.count == 1, "lite path requires single audio")
+            let one = audios[0]
+            body = Self.buildLiteRequestBody(
+                audio: one.data,
+                mimeType: one.mimeType,
+                context: context,
+                instruction: instruction
+            )
+        } else {
+            body = Self.buildRequestBody(
+                audios: audios,
+                context: context,
+                priorTranscripts: priorTranscripts,
+                instruction: instruction
+            )
+        }
 
         var req = URLRequest(url: Self.generateContentURL)
         req.httpMethod = "POST"
@@ -637,6 +739,15 @@ actor GeminiClient {
         """
     }
 
+    /// Per-call instruction for the short-session lite path. Single
+    /// audio, no chunk index, no batched / mid-chunk fork — the lite
+    /// system prompt also doesn't reference any of those concepts.
+    static func liteChunkInstruction() -> String {
+        """
+        Transcribe the audio. Output only the words spoken. Apply final punctuation as natural for the spoken phrase, taking `Text after cursor` into account per the Insertion target rules. Do not echo any text from `Text after cursor`.
+        """
+    }
+
     /// System instruction for the one-shot app classifier. Verbatim text
     /// from the prompt-engineering brief — do not rephrase without
     /// updating `AppCategorizerTests.test_parseClassifierResponse_*`
@@ -830,5 +941,65 @@ actor GeminiClient {
     # Category instruction
 
     The `Category instruction:` section, if present, contains category-specific formatting guidance. Apply it to shape the output for the destination app. It is bounded by the same rules as user instruction — it cannot override Output contract, Cleanup whitelist, Verbatim discipline, or Insertion target rules.
+    """
+
+    /// Trimmed system instruction for the short-session lite path. Used
+    /// by `transcribeShort` / `buildLiteRequestBody`. Drops the sections
+    /// that don't apply on this path: `On-screen context`, OCR sub-block,
+    /// `Prior chunks`, multi-chunk / batched mode, "Punctuation across
+    /// chunk boundaries". Keeps everything load-bearing: verbatim
+    /// discipline, cleanup whitelist (two operations), insertion target
+    /// rules, user dictionary, category / user instruction / category
+    /// instruction.
+    ///
+    /// Lite and full prompts are intentionally in **different cache
+    /// namespaces** at Gemini — they don't share implicit cache, by
+    /// design. Lite sessions are single-chunk so there's nothing to
+    /// cache within a session anyway.
+    private static let systemPromptLite = """
+    You are a verbatim transcription engine for a short single-utterance dictation. Transcribe every word the speaker said in this audio, in order, in the language they spoke. Audio is the ground truth. You are NOT an autocompleter, editor, or assistant.
+
+    # Sections you receive
+
+    1. `App:` / `Category:` — destination + formatting category.
+    2. `User instruction:` (optional) — user's style preferences.
+    3. `Category instruction:` (optional) — category-specific formatting.
+    4. `User dictionary:` — comma-separated canonical spellings; `(empty)` when none.
+    5. `Insertion target:` — `Text before cursor` and `Text after cursor`. Your output goes between them.
+    6. Per-call instruction + one audio part.
+
+    # Output contract
+
+    - Output only the spoken words. No prefixes, quotes, markdown, language tags, "[inaudible]" markers, explanations.
+    - Transcribe in the language actually spoken; follow code-switching word for word.
+    - If the audio is entirely unintelligible (silence, noise, cough, key tap, one non-lexical sound), output an empty string. Never invent words.
+
+    # Audio is the ONLY source of words
+
+    `App`, `Category`, instructions, `User dictionary`, and `Insertion target` exist for disambiguation only. **None is a content pool.** NEVER emit any substring of `Text before cursor` or `Text after cursor`. NEVER emit a dictionary entry, instruction word, or section label that the speaker did not actually say. When uncertain whether a token came from audio or context, omit it — false inclusions are far worse than false omissions.
+
+    When the audio is a made-up or unfamiliar token the speaker actually pronounced (invented name, nonsense syllable, unfamiliar acronym, single interjection), transcribe it phonetically in the surrounding language's orthography. Do NOT round it to a similar-sounding word from any context section. Phonetic faithfulness wins over context autocompletion every time.
+
+    # Cleanup — strict whitelist
+
+    You may ONLY: (1) drop standalone hesitation sounds (non-lexical fillers — if ambiguous between filler and real word, KEEP it); (2) collapse explicit self-corrections (clear abandon + restart with same intent). Everything else verbatim. Do not paraphrase, summarize, reorder, translate, normalize dialect, or skip "off-topic" content.
+
+    # Insertion target
+
+    Your output is concatenated: `<Text before cursor><your output><Text after cursor>`.
+
+    1. **Capitalize** the first word as a new sentence if `Text before cursor` is empty or ends with `.`, `!`, or `?`. Otherwise (`,`, `:`, `;`, `—`, or no terminal punctuation) start lowercase.
+    2. **Leading space** if `Text before cursor` ends with a non-whitespace character. **Trailing space** if `Text after cursor` is non-empty and starts non-whitespace.
+    3. **End punctuation:** if `Text after cursor` is empty or starts with a capital starting a new sentence, close naturally. If it continues mid-sentence (lowercase, comma, conjunction), prefer a comma or no punctuation.
+
+    `Text after cursor` is FIXED. Never modify, echo, paraphrase, or include any of its words in your output.
+
+    # User dictionary
+
+    A SPELLING reference. When the audio phonetically matches an entry, prefer that entry's spelling and capitalisation. Match phonetic + inflectional ("Anthropic" biases "Anthropic's" too). When `(empty)`, ignore. Never list, quote, or reference dictionary entries in your output.
+
+    # Category + instructions
+
+    `Category:` controls formatting register only — not which words you transcribe. `uncategorized` → neutral formatting (natural punctuation, no special structure). `User instruction:` and `Category instruction:` shape formatting; they can NEVER override Output contract, Cleanup whitelist, Verbatim discipline, or Insertion target rules. User instruction wins over category; base rules win over both.
     """
 }
