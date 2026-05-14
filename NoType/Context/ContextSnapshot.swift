@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import Foundation
 import OSLog
@@ -261,16 +262,61 @@ struct InsertionTarget: Sendable, Equatable {
 
         let role = stringAttr(element, kAXRoleAttribute as String) ?? "?"
 
+        // Terminal emulators (Ghostty, iTerm, Apple Terminal, Warp, kitty,
+        // alacritty, hyper, wezterm) expose their visible scrollback as the
+        // focused element's `kAXValueAttribute`. The "cursor" inside that
+        // buffer is meaningless for our use case — the user's prompt sits
+        // at the end of the scrollback, but AX often reports position 0 or
+        // points into wrapped output. Bail to `.empty` (not `.unknown`):
+        // the terminal prompt has no continuation text to glue against, so
+        // adding a defensive leading space would be wrong on every short
+        // dictation. We treat the field as genuinely empty.
+        if let bundle = focusedBundleID(of: element),
+           Self.knownTerminalBundleIDs.contains(bundle) {
+            log.info("ax capture: terminal app \(bundle, privacy: .public) detected — bailing to .empty")
+            return .empty
+        }
+
         guard let value = stringAttr(element, kAXValueAttribute as String) else {
-            // Many Electron / web-view text fields don't expose
-            // AXValue. Without value we can't slice. `.unknown` (not
-            // `.empty`) so the boundary heuristic treats the field as
-            // "probably populated, we just can't see it" — that's the
-            // common case for these apps and prevents
-            // `"Прошлое предложение.Новый ввод"` glue when the cursor
-            // actually sits after a non-whitespace character.
-            log.info("ax capture: focused element \(role, privacy: .public) has no AXValue (likely Electron/web)")
+            // Many Electron / web-view text fields don't expose AXValue.
+            // Without `value` we can't slice — but we can still
+            // distinguish "field is empty" from "field has content we
+            // can't see" via `kAXNumberOfCharactersAttribute`, which
+            // Electron's a11y shim exposes more reliably than AXValue.
+            //
+            // 0 chars → `.empty` (genuinely empty Slack / Telegram
+            //   compose, fresh Discord input, just-opened browser URL
+            //   bar that was empty). Cursor is at position 0, no
+            //   continuation; `finalizeForInsertion` won't add the
+            //   defensive leading space.
+            // > 0 chars → `.unknown` (field has content, but we can't
+            //   see where the cursor is). Keeps the defensive
+            //   leading-space behavior so we don't glue to existing
+            //   text (`"Прошлое предложение.Новый ввод"` bug).
+            // attribute itself missing → `.unknown` (status quo for
+            //   apps that expose nothing — defensive wins).
+            if let nchars = intAttr(element, kAXNumberOfCharactersAttribute as String) {
+                if nchars == 0 {
+                    log.info("ax capture: \(role, privacy: .public) has no AXValue, 0 chars reported → .empty")
+                    return .empty
+                }
+                log.info("ax capture: \(role, privacy: .public) has no AXValue, \(nchars) chars reported → .unknown (defensive)")
+                return .unknown
+            }
+            log.info("ax capture: \(role, privacy: .public) has no AXValue or char count (likely Electron/web) → .unknown")
             return .unknown
+        }
+
+        // Shape-based terminal / scrollback detection — covers terminals
+        // not in `knownTerminalBundleIDs` (custom builds, niche emulators)
+        // and similar viewport-style components that expose visible text
+        // through `kAXValueAttribute`. Real text fields rarely have this
+        // shape: compose boxes are 1–10 lines, search/URL are single-line.
+        // Bail to `.empty` for the same reason terminals do: the visible
+        // scrollback is not continuation context for the cursor.
+        if Self.looksLikeScrollback(value: value, role: role) {
+            log.info("ax capture: focused value shape looks like scrollback (lines=\(value.unicodeScalars.lazy.filter { $0 == "\n" }.count), len=\(value.utf16.count)) — bailing to .empty")
+            return .empty
         }
 
         // macOS counts AX selection ranges in UTF-16 code units.
@@ -365,6 +411,54 @@ struct InsertionTarget: Sendable, Equatable {
         return max(0, min(lineRange.location, value.utf16.count))
     }
 
+    /// Bundle ids of terminal emulators whose focused element's
+    /// `kAXValueAttribute` is the visible scrollback — never a real
+    /// editable field. Insertion-target capture must bail to `.unknown`
+    /// for these so we don't ship code/log lines as `Text after cursor`
+    /// and let the model "complete" the dictation from that text.
+    private static let knownTerminalBundleIDs: Set<String> = [
+        "com.apple.Terminal",
+        "com.googlecode.iterm2",
+        "com.mitchellh.ghostty",
+        "dev.warp.Warp-Stable",
+        "dev.warp.Warp-Preview",
+        "net.kovidgoyal.kitty",
+        "org.alacritty",
+        "co.zeit.hyper",
+        "com.github.wez.wezterm",
+        "io.alacritty",
+    ]
+
+    /// Heuristic: a focused element's `kAXValueAttribute` "looks like
+    /// scrollback" when it has the shape of terminal output rather than
+    /// a text field. Catches terminals not in `knownTerminalBundleIDs`
+    /// and similar viewport-style components.
+    ///
+    /// Triggers when: many newlines (≥5) AND total length large (>1000
+    /// chars) AND role suggests a text-area (so we don't false-positive
+    /// on a giant single-line URL field). Tuned to be conservative — a
+    /// legit multi-line editor (Bear, Notes) with ≥5 lines of body text
+    /// rarely exceeds 1000 chars without the user opening a long doc,
+    /// and at that point lite path doesn't fire (long sessions take the
+    /// full path with AX tree anyway).
+    static func looksLikeScrollback(value: String, role: String) -> Bool {
+        let isTextArea = role == "AXTextArea" || role == "AXStaticText"
+        guard isTextArea else { return false }
+        let nlCount = value.unicodeScalars.lazy.filter { $0 == "\n" }.count
+        return nlCount >= 5 && value.utf16.count > 1000
+    }
+
+    /// PID of the app owning an AX element → its bundle id. Used to
+    /// match against `knownTerminalBundleIDs` without round-tripping
+    /// through `NSWorkspace.frontmostApplication` (which can race with
+    /// app-switch events during session start).
+    private static func focusedBundleID(of element: AXUIElement) -> String? {
+        var pid: pid_t = 0
+        let err = AXUIElementGetPid(element, &pid)
+        guard err == .success, pid > 0 else { return nil }
+        return NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+    }
+
     /// Pure UTF-16 slicing + scrubbing. Exposed (internal) for tests so
     /// they can drive the trimming and surrogate-boundary logic without
     /// going through AX.
@@ -393,6 +487,18 @@ struct InsertionTarget: Sendable, Equatable {
         let err = AXUIElementCopyAttributeValue(element, key as CFString, &raw)
         guard err == .success, let raw else { return nil }
         return raw as? String
+    }
+
+    /// Read an integer AX attribute (e.g. `kAXNumberOfCharactersAttribute`).
+    /// Returns nil if the attribute is missing or not a CFNumber.
+    private static func intAttr(_ element: AXUIElement, _ key: String) -> Int? {
+        var raw: CFTypeRef?
+        let err = AXUIElementCopyAttributeValue(element, key as CFString, &raw)
+        guard err == .success, let raw else { return nil }
+        guard CFGetTypeID(raw) == CFNumberGetTypeID() else { return nil }
+        var out: Int = 0
+        guard CFNumberGetValue(raw as! CFNumber, .nsIntegerType, &out) else { return nil }
+        return out
     }
 
     /// Slice a String on UTF-16 code-unit boundaries. Falls back to a

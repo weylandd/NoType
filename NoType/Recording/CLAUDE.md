@@ -182,6 +182,36 @@ Discriminator: `batch.contains { $0.isFinal }`. Only the final chunk arrives via
 
 If the release happens during silence (no audio since last chunk), `PauseDetector.finalize` returns `nil` → no final Gemini request → `finalizeForInsertion` cleans up any stranded terminal punctuation from the last non-final chunk on the client.
 
+### Short final-only path (lite context)
+
+A second, stricter layer of the quick-release optimisation. On top of "don't wait for `contextTask`", the lite path also **bypasses the full prompt entirely** for sessions where context-aware transcription doesn't earn its keep.
+
+Discriminator (`RecordingSession.shouldUseLitePath`, pure function, pinned by `RecordingSessionShortPathTests`): triggers iff ALL hold —
+
+1. `isFinalBatch` — batch contains the final chunk (user release).
+2. `transcripts.isEmpty` — no chunks have been shipped to Gemini in this session (i.e. VAD didn't split off any mid-session chunks). Once transcripts exist, the model needs `Prior chunks (this session):` to stitch correctly and the lite shape no longer fits.
+3. Sum of `pcmEnd - pcmStart` across the batch < `RecordingSession.shortSessionMaxSamples` (= 32 000 samples = 2.0 s at 16 kHz). Empirically covers 1–3 word utterances with breathing room.
+
+When triggered, `snapshotForChunk(forceLite: true)` synthesises the snapshot synchronously on the main actor via `buildLiteSnapshot()` — **never touches `contextTask`**. The snapshot:
+
+| Field | Value |
+|---|---|
+| `activeApp` | real (from `sourceApp`) |
+| `category` | `instructionsFrozen.cachedCategoryForBundle(...) ?? .uncategorized`, with `CategoryResolver.resolveFromAX(stored:)` sync override applied |
+| `userInstruction` | from `instructionsFrozen` (frozen at session start) |
+| `categoryInstruction` | from `instructionsFrozen.promptForCategory(resolvedCategory)` |
+| `dictionary` | from `dictionaryFrozen.activeEntries` |
+| `replacements` | from `dictionaryFrozen.replacements` (also still applied client-side via `replacementsFrozen` at paste time) |
+| `tree` | **`RedactedAXSnapshot(apps: [])`** — empty, never walked |
+| `insertionTarget` | `cachedContext?.insertionTarget ?? InsertionTarget.captureSync()` — sync read if mirror isn't ready |
+| `screenText` | **`nil`** — OCR never runs / result discarded |
+
+`processBatch` reads `snap.isLite` and routes the encoded audio through `GeminiClient.transcribeShort(...)` instead of `transcribe(...)` / `transcribeBatch(...)`. The Gemini client uses `Self.systemPromptLite` (trimmed system instruction) and `buildLiteRequestBody` (drops `On-screen context:` and `Prior chunks (this session):` user-message parts entirely). See `NoType/Gemini/CLAUDE.md` "Short-session lite path".
+
+**Trade-off accepted.** AX-context-driven disambiguation (proper nouns from sidebar windows, jargon from open docs) is lost for short sessions. In exchange the Gemini round-trip drops by ~500–1000 ms on quick-release sessions where the user was dictating a single word into a known field — the dominant pain point. User-level pinning (`User dictionary`, `User instruction`, `Category instruction`, `Insertion target`) is preserved, so the model still knows where in the sentence the word is being inserted and how to spell user-canonical brands.
+
+Logged once per lite session: `short final-only batch: using lite context (no AX, no OCR)`.
+
 ---
 
 ## Hard caps

@@ -124,6 +124,31 @@ For very short single-chunk sessions, there is no prior chunk → no cache hit p
 - **Don't promote the OCR fallback to a new top-level prompt part.** The optional `Screen text (OCR — active window)` sub-block lives **inside** the `On-screen context:` text part, appended after the AX tree text. Promoting it would change the part count and break the cache contract pinned by `GeminiRequestBuilderTests.test_partOrderAndLabels_stableWithAndWithoutOCR`.
 - **Don't ship transcription requests with `tools` declared.** Web search (`googleSearch`) is only enabled for the one-shot app classifier (`classifyApp`). Transcription requests must encode without a top-level `tools` field — pinned by `test_transcriptionRequest_doesNotIncludeTools`.
 
+### Short-session lite path
+
+For short single-utterance sessions (user release before VAD detects a pause, total audio < 2 s, no prior chunks of the same session), `GeminiClient.transcribeShort(audio:mimeType:context:apiKey:)` ships a deliberately reduced prompt shape via `Self.buildLiteRequestBody`. Discriminator and snapshot assembly live in `RecordingSession` — see `NoType/Recording/CLAUDE.md` "Short final-only path (lite context)".
+
+Differences from the full path:
+
+| Aspect | Full path | Lite path |
+|---|---|---|
+| `system_instruction` | `Self.systemPrompt` (~3500 words) | `Self.systemPromptLite` (~600 words) |
+| User-message text parts | 6–8 (App+Category, optional UI, optional CI, User dictionary, Insertion target, On-screen context, Prior chunks, instruction) | 4–6 (App+Category, optional UI, optional CI, User dictionary, Insertion target, instruction) |
+| `On-screen context:` part | **always present** (body `(no on-screen context available)` when empty) | **omitted entirely** |
+| `Prior chunks (this session):` part | **always present** (body `(none yet)` on chunk 1) | **omitted entirely** |
+| Per-call instruction | `midChunkInstruction(chunkIndex:)` / `finalChunkInstruction(chunkIndex:)` / `batchedChunkInstruction(indices:isFinal:)` | `liteChunkInstruction()` — single audio, no chunk index, no batched / mid-chunk fork |
+| Audio parts | 1..N (batching) | exactly 1 (lite is single-audio by construction; `sendRequest` has `precondition(audios.count == 1)` when `useLitePrompt: true`) |
+
+**Cache implications.** Lite and full live in **different implicit-cache namespaces** at Gemini — they don't share prefix bytes (different system instruction, different part shape) and thus can't share cache. By design:
+
+- Lite sessions are single-chunk by construction, so there's no within-session cache to hit anyway.
+- Cross-session lite-to-lite cache hits are possible when two short sessions share the same system instruction + App+Category + (optional) user/category instruction + user dictionary. In practice that's frequent (same app, same user), so the lite namespace does build up its own cache over time.
+- Cross-session lite-to-full or full-to-lite hits never happen — accepted.
+
+`Self.systemPromptLite` deliberately does NOT reference `On-screen context`, `Prior chunks`, OCR sub-block, batched mode, or "Punctuation across chunk boundaries". It keeps verbatim discipline, cleanup whitelist (two operations), insertion target rules, user dictionary rules, and category / user instruction / category instruction guidance — everything load-bearing for a single short utterance.
+
+Pinned by `GeminiRequestBuilderTests.test_litePrompt_*`. Any change to the lite prompt shape requires those tests to be updated explicitly.
+
 ### Optional OCR fallback sub-block (ADR-014)
 
 When `ContextSnapshot.screenText` is set, `buildRequestBody` appends `screenText.formattedForPrompt()` inside the **existing** `On-screen context:` text part. The sub-block opens with a separator line so the model can tell AX content from OCR content:
@@ -238,9 +263,10 @@ In release builds, do not log token counts (PII-adjacent — reveals usage patte
 
 All prompt-template strings live in `GeminiClient.swift` today:
 
-- `Self.systemPrompt` — the transcription system instruction (one for all sessions). Tells the model how to use `Category` / `User instruction` / `Category instruction` and how the boundary rules layer on top.
+- `Self.systemPrompt` — the transcription system instruction for the **full** path (mid-session chunks, multi-chunk final batches, all sessions ≥ 2 s of audio). Tells the model how to use `Category` / `User instruction` / `Category instruction`, on-screen context, prior chunks, and how the boundary rules layer on top.
+- `Self.systemPromptLite` — trimmed system instruction (~600 words) for the **short-session lite path** only. Reachable via `transcribeShort(...)` when `RecordingSession.shouldUseLitePath(...)` fires. Drops references to `On-screen context`, `Prior chunks`, OCR sub-block, batched mode, and chunk-boundary rules. Different cache namespace from `systemPrompt` — by design.
 - `Self.categorizerPrompt` — system instruction for the one-shot app classifier (`classifyApp`). Verbatim text in ADR-015's source brief; do not rephrase without updating `AppCategorizerTests.test_parseClassifierResponse_*`.
-- `Self.midChunkInstruction(chunkIndex:)`, `Self.finalChunkInstruction(chunkIndex:)`, `Self.batchedChunkInstruction(indices:isFinal:)` — the per-call variable suffix that goes immediately before the audio parts.
+- `Self.midChunkInstruction(chunkIndex:)`, `Self.finalChunkInstruction(chunkIndex:)`, `Self.batchedChunkInstruction(indices:isFinal:)`, `Self.liteChunkInstruction()` — per-call variable suffix that goes immediately before the audio parts. `liteChunkInstruction` is single-audio with no chunk index — paired with `systemPromptLite`.
 - Default per-category prompt texts live on `AppCategory.defaultPrompt` (see `NoType/Instructions/AppCategory.swift`). The user can override per category from the Instructions tab; overrides are stored in `InstructionsStore.categoryPromptOverrides`.
 
 ### System instruction (load-bearing — change only with full review)

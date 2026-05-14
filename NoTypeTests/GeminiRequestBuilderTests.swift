@@ -637,4 +637,139 @@ final class GeminiRequestBuilderTests: XCTestCase {
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertNil(json["tools"], "transcription requests must not declare tools")
     }
+
+    // MARK: - Short-session lite path
+    //
+    // The lite path (see `GeminiClient.buildLiteRequestBody` and
+    // `RecordingSession.shouldUseLitePath`) has a different prompt shape
+    // from the full path on purpose: it drops `On-screen context:` and
+    // `Prior chunks (this session):`, uses `systemPromptLite`, and uses
+    // a single-audio per-call instruction. Lite and full are different
+    // cache namespaces — by design.
+
+    func test_litePrompt_omitsOnScreenContext_andPriorChunks() {
+        let body = GeminiClient.buildLiteRequestBody(
+            audio: Data([0x00]),
+            mimeType: "audio/mp4",
+            context: ctx(before: "Hi ", after: " then"),
+            instruction: GeminiClient.liteChunkInstruction()
+        )
+        let texts = textParts(body)
+        for t in texts {
+            XCTAssertFalse(t.hasPrefix("On-screen context:"),
+                "lite path must not include the On-screen context section: \(t)")
+            XCTAssertFalse(t.hasPrefix("Prior chunks (this session):"),
+                "lite path must not include the Prior chunks section: \(t)")
+        }
+    }
+
+    func test_litePrompt_keepsInsertionTarget_andUserDictionary() {
+        let body = GeminiClient.buildLiteRequestBody(
+            audio: Data([0x00]),
+            mimeType: "audio/mp4",
+            context: ctx(dictionary: ["NoType", "Anthropic"], before: "Hi ", after: " then"),
+            instruction: GeminiClient.liteChunkInstruction()
+        )
+        let texts = textParts(body)
+        XCTAssertNotNil(indexOfPart(prefix: "Insertion target:", in: texts),
+            "lite path must keep Insertion target — boundary handling depends on it")
+        let dictIdx = indexOfPart(prefix: "User dictionary:", in: texts)
+        XCTAssertNotNil(dictIdx, "lite path must keep User dictionary")
+        XCTAssertTrue(texts[dictIdx!].contains("NoType, Anthropic"))
+    }
+
+    func test_litePrompt_minimumShape_fivePartsInOrder() {
+        // Uncategorized + no user instruction + empty dictionary →
+        // App+Category, User dictionary, Insertion target, instruction,
+        // audio. Five textual parts + one inline_data.
+        let body = GeminiClient.buildLiteRequestBody(
+            audio: Data([0x00]),
+            mimeType: "audio/mp4",
+            context: ctx(),
+            instruction: GeminiClient.liteChunkInstruction()
+        )
+        let texts = textParts(body)
+        XCTAssertEqual(texts.count, 4,
+            "lite minimum: App+Category, User dictionary, Insertion target, instruction (4 text parts)")
+        XCTAssertTrue(texts[0].hasPrefix("App: "))
+        XCTAssertTrue(texts[0].contains("Category: uncategorized"))
+        XCTAssertTrue(texts[1].hasPrefix("User dictionary:"))
+        XCTAssertTrue(texts[2].hasPrefix("Insertion target:"))
+        XCTAssertTrue(texts[3].hasPrefix("Transcribe the audio."),
+            "lite per-call instruction starts with 'Transcribe the audio.'")
+        XCTAssertEqual(inlineCount(body), 1)
+    }
+
+    func test_litePrompt_fullShape_sixPartsInOrder() {
+        // Classified category + non-empty user instruction + non-empty
+        // dictionary → App+Category, User instruction, Category
+        // instruction, User dictionary, Insertion target, instruction.
+        // Six textual parts + one inline_data.
+        let body = GeminiClient.buildLiteRequestBody(
+            audio: Data([0x00]),
+            mimeType: "audio/mp4",
+            context: fullCtx(before: "Hi ", after: " then"),
+            instruction: GeminiClient.liteChunkInstruction()
+        )
+        let texts = textParts(body)
+        XCTAssertEqual(texts.count, 6,
+            "lite full: +User instruction, +Category instruction → 6 text parts")
+        XCTAssertTrue(texts[0].hasPrefix("App: "))
+        XCTAssertTrue(texts[1].hasPrefix("User instruction:"))
+        XCTAssertTrue(texts[2].hasPrefix("Category instruction:"))
+        XCTAssertTrue(texts[3].hasPrefix("User dictionary:"))
+        XCTAssertTrue(texts[4].hasPrefix("Insertion target:"))
+        XCTAssertTrue(texts[5].hasPrefix("Transcribe the audio."))
+        XCTAssertEqual(inlineCount(body), 1)
+    }
+
+    func test_litePrompt_usesSeparateSystemInstruction() {
+        let liteBody = GeminiClient.buildLiteRequestBody(
+            audio: Data([0x00]),
+            mimeType: "audio/mp4",
+            context: ctx(),
+            instruction: GeminiClient.liteChunkInstruction()
+        )
+        let fullBody = GeminiClient.buildRequestBody(
+            audios: [(Data([0x00]), "audio/mp4")],
+            context: ctx(),
+            priorTranscripts: [],
+            instruction: GeminiClient.midChunkInstruction(chunkIndex: 1)
+        )
+        func systemText(_ body: GeminiAPI.Request) -> String? {
+            guard let parts = body.systemInstruction?.parts else { return nil }
+            for p in parts {
+                if case .text(let s) = p { return s }
+            }
+            return nil
+        }
+        let liteSys = systemText(liteBody)
+        let fullSys = systemText(fullBody)
+        XCTAssertNotNil(liteSys)
+        XCTAssertNotNil(fullSys)
+        XCTAssertNotEqual(liteSys, fullSys,
+            "lite must use a separate, trimmed system instruction (different cache namespace)")
+        // Spot-check: lite must NOT reference omitted sections.
+        let liteText = liteSys ?? ""
+        XCTAssertFalse(liteText.contains("On-screen context"),
+            "lite system prompt must not reference On-screen context")
+        XCTAssertFalse(liteText.contains("Prior chunks"),
+            "lite system prompt must not reference Prior chunks")
+        XCTAssertFalse(liteText.contains("Screen text (OCR"),
+            "lite system prompt must not reference OCR sub-block")
+        XCTAssertFalse(liteText.contains("batched"),
+            "lite system prompt must not reference batched mode")
+    }
+
+    func test_litePrompt_doesNotIncludeTools() throws {
+        let body = GeminiClient.buildLiteRequestBody(
+            audio: Data([0x00]),
+            mimeType: "audio/mp4",
+            context: ctx(),
+            instruction: GeminiClient.liteChunkInstruction()
+        )
+        let data = try JSONEncoder().encode(body)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertNil(json["tools"], "lite transcription requests must not declare tools")
+    }
 }
