@@ -30,6 +30,13 @@ EXPORT_OPTIONS="ExportOptions.plist"
 VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" NoType/Info.plist)
 DMG_PATH="${BUILD_DIR}/NoType-${VERSION}.dmg"
 SPARKLE_ZIP_PATH="${BUILD_DIR}/NoType-${VERSION}.zip"
+# Version-less alias of the .dmg. Lets the README / website use a
+# stable "always points to latest" link:
+#   https://github.com/weylandd/NoType/releases/latest/download/NoType.dmg
+# GitHub requires the asset filename to match exactly across releases
+# for `/latest/download/<filename>` to redirect — so we ship NoType.dmg
+# in every release alongside the versioned one.
+DMG_LATEST_PATH="${BUILD_DIR}/NoType.dmg"
 STAGING="${BUILD_DIR}/dmg-staging"
 ZIP_PATH="${BUILD_DIR}/NoType-notarize.zip"
 APP_PATH="${EXPORT_DIR}/NoType.app"
@@ -51,7 +58,7 @@ echo "▶ Building NoType ${VERSION}"
 echo
 
 echo "▶ Cleaning previous build outputs"
-rm -rf "${ARCHIVE_PATH}" "${EXPORT_DIR}" "${STAGING}" "${DMG_PATH}" "${ZIP_PATH}" "${SPARKLE_ZIP_PATH}"
+rm -rf "${ARCHIVE_PATH}" "${EXPORT_DIR}" "${STAGING}" "${DMG_PATH}" "${DMG_LATEST_PATH}" "${ZIP_PATH}" "${SPARKLE_ZIP_PATH}"
 
 echo "▶ Regenerating Xcode project from project.yml"
 xcodegen generate
@@ -112,6 +119,12 @@ xcrun stapler staple "${DMG_PATH}"
 echo "▶ Final Gatekeeper check on DMG"
 spctl --assess --type open --context context:primary-signature --verbose "${DMG_PATH}"
 
+# Version-less alias. Identical bytes; we copy (not symlink) so
+# GitHub Releases stores it as a real asset that `/latest/download`
+# can redirect to.
+echo "▶ Creating version-less alias ${DMG_LATEST_PATH}"
+cp "${DMG_PATH}" "${DMG_LATEST_PATH}"
+
 # Cleanup intermediates
 rm -rf "${STAGING}" "${ZIP_PATH}"
 
@@ -132,6 +145,7 @@ fi
 echo
 echo "✓ Ready to send:"
 echo "    ${DMG_PATH}            (first-time install)"
+echo "    ${DMG_LATEST_PATH}                (stable 'always latest' alias)"
 echo "    ${SPARKLE_ZIP_PATH}    (Sparkle auto-update artefact)"
 echo
-ls -lh "${DMG_PATH}" "${SPARKLE_ZIP_PATH}"
+ls -lh "${DMG_PATH}" "${DMG_LATEST_PATH}" "${SPARKLE_ZIP_PATH}"

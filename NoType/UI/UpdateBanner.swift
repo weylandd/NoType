@@ -6,12 +6,18 @@ import SwiftUI
 ///
 /// - `.idle` / `.checking` / `.failed` → hidden entirely (no chrome
 ///    flash on transient states).
-/// - `.available` → "Update to X.Y.Z" + "Restart to apply". Click to
-///    trigger the download.
-/// - `.downloading(p)` → "Downloading update" + progress bar.
-/// - `.extracting(p)` → "Preparing…" + progress bar.
-/// - `.installing` → "Installing…" + indeterminate bar. App will
-///    relaunch on its own; clicking is a no-op here.
+/// - `.available` → "Relaunch to update" + `vX.Y.Z` subtitle, with a
+///    trailing arrow as the click affordance. Click triggers the
+///    download.
+/// - `.downloading(p)` → "Downloading update" + percent + progress bar.
+/// - `.extracting(p)` → "Preparing update" + percent + progress bar.
+/// - `.installing` → "Installing…" + indeterminate bar; the app will
+///    relaunch on its own.
+///
+/// Surface chrome is a neutral `bgSurface` card with `borderSubtle`
+/// (mirrors the calm "we have an update for you" treatment in apps
+/// like Claude Desktop) — the accent shows up only on the pulse dot,
+/// progress fill, and hover state.
 struct UpdateBanner: View {
     @Environment(UpdateController.self) private var updates
 
@@ -22,9 +28,10 @@ struct UpdateBanner: View {
                 EmptyView()
             case let .available(update):
                 BannerShell(
-                    title: "Update to \(update.versionString)",
-                    subtitle: "Click to install and restart",
+                    title: "Relaunch to update",
+                    subtitle: "v\(update.versionString)",
                     progress: nil,
+                    showsTrailingArrow: true,
                     onClick: { updates.installNow() }
                 )
             case let .downloading(progress):
@@ -34,6 +41,7 @@ struct UpdateBanner: View {
                         ? "\(Int(progress * 100))%"
                         : "Starting…",
                     progress: progress,
+                    showsTrailingArrow: false,
                     onClick: nil
                 )
             case let .extracting(progress):
@@ -43,6 +51,7 @@ struct UpdateBanner: View {
                         ? "\(Int(progress * 100))%"
                         : nil,
                     progress: progress,
+                    showsTrailingArrow: false,
                     onClick: nil
                 )
             case .installing:
@@ -51,6 +60,7 @@ struct UpdateBanner: View {
                     subtitle: "NoType will restart",
                     progress: nil,
                     indeterminate: true,
+                    showsTrailingArrow: false,
                     onClick: nil
                 )
             }
@@ -84,6 +94,10 @@ private struct BannerShell: View {
     /// `nil` → no progress chrome. `0..<1` → determinate bar at that fill.
     let progress: Double?
     var indeterminate: Bool = false
+    /// `true` renders a chevron-right on the trailing edge — the click
+    /// affordance for the `.available` phase. Hidden during in-progress
+    /// phases (download/extract/install) where clicking is a no-op.
+    let showsTrailingArrow: Bool
     /// `nil` makes the banner non-interactive (download/install phases).
     let onClick: (() -> Void)?
 
@@ -91,10 +105,10 @@ private struct BannerShell: View {
 
     var body: some View {
         Button(action: { onClick?() }) {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: DS.Space.s2) {
                 HStack(spacing: DS.Space.s3) {
                     AccentPulseDot()
-                    VStack(alignment: .leading, spacing: 1) {
+                    VStack(alignment: .leading, spacing: 2) {
                         Text(title)
                             .font(DS.Font.bodySM(.semibold))
                             .foregroundStyle(DS.Color.textPrimary)
@@ -107,18 +121,26 @@ private struct BannerShell: View {
                         }
                     }
                     Spacer(minLength: 0)
+                    if showsTrailingArrow {
+                        DSIcon(
+                            name: .chevronRight,
+                            size: 14,
+                            color: isHovered ? DS.Color.textPrimary : DS.Color.textTertiary
+                        )
+                        .animation(DS.Motion.fast, value: isHovered)
+                    }
                 }
                 if progress != nil || indeterminate {
                     progressTrack
                 }
             }
             .padding(.horizontal, DS.Space.s4)
-            .padding(.vertical, DS.Space.s3)
+            .padding(.vertical, DS.Space.s3 + 1)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(background, in: RoundedRectangle(cornerRadius: DS.Radius.md))
             .overlay(
                 RoundedRectangle(cornerRadius: DS.Radius.md)
-                    .strokeBorder(DS.Color.accentBorder, lineWidth: DS.Border.hairline)
+                    .strokeBorder(DS.Color.borderSubtle, lineWidth: DS.Border.hairline)
             )
         }
         .buttonStyle(.plain)
@@ -130,8 +152,8 @@ private struct BannerShell: View {
     }
 
     private var background: Color {
-        if isHovered { return DS.Color.accentSoftHover }
-        return DS.Color.accentSoft
+        if isHovered { return DS.Color.bgHover }
+        return DS.Color.bgSurface
     }
 
     private var accessibilityLabel: String {
