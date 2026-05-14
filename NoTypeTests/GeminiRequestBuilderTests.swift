@@ -356,6 +356,47 @@ final class GeminiRequestBuilderTests: XCTestCase {
         XCTAssertEqual(body.generationConfig?.thinkingConfig?.thinkingLevel, "MINIMAL")
     }
 
+    /// Pins the anti-completion clause in BOTH system prompts. Closes the
+    /// autoregressive-completion class of hallucinations (model adds words
+    /// at the end of a phrase, or inserts smoothing connectives in the
+    /// middle, that the speaker did not actually say) which is orthogonal
+    /// to context leakage. Anchor phrase "Never extend, smooth, or
+    /// complete" is intentionally unique — `smooth` does not appear
+    /// anywhere else in either prompt.
+    func test_systemPrompts_pinAntiCompletionClause() {
+        func systemText(_ body: GeminiAPI.Request) -> String {
+            guard let parts = body.systemInstruction?.parts else { return "" }
+            for p in parts {
+                if case .text(let s) = p { return s }
+            }
+            return ""
+        }
+        let fullBody = GeminiClient.buildRequestBody(
+            audios: [(Data([0x00]), "audio/mp4")],
+            context: ctx(),
+            priorTranscripts: [],
+            instruction: GeminiClient.midChunkInstruction(chunkIndex: 1)
+        )
+        let liteBody = GeminiClient.buildLiteRequestBody(
+            audio: Data([0x00]),
+            mimeType: "audio/mp4",
+            context: ctx(),
+            instruction: GeminiClient.liteChunkInstruction()
+        )
+        let fullSys = systemText(fullBody)
+        let liteSys = systemText(liteBody)
+
+        XCTAssertTrue(fullSys.contains("Never extend, smooth, or complete"),
+            "Full system prompt must forbid LM-driven extension/smoothing/completion of audio")
+        XCTAssertTrue(fullSys.contains("An abruptly ending sentence is correct"),
+            "Full system prompt must include the anchor preferring abrupt cut-off over invented completion")
+
+        XCTAssertTrue(liteSys.contains("never extend, smooth, or complete"),
+            "Lite system prompt must forbid LM-driven extension/smoothing/completion of audio")
+        XCTAssertTrue(liteSys.contains("An abruptly ending sentence is correct"),
+            "Lite system prompt must include the anchor preferring abrupt cut-off over invented completion")
+    }
+
     // MARK: - Empty-section preservation for non-optional sections
 
     func test_emptyInsertionTarget_sectionStillPresent() {

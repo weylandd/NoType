@@ -282,6 +282,8 @@ The actual text lives in `Self.systemPrompt`. Highlights:
 
 Outside those three sections, the system instruction is unchanged from the pre-feature version (Output contract, Cleanup whitelist, Punctuation across chunk boundaries, Insertion target rules, Using on-screen context).
 
+The forbidden-failure-modes list inside `# Context is never a source of words` carries an additional bullet ("Never extend, smooth, or complete the audio with words you did not hear …") that closes the autoregressive-completion class of hallucinations — model dropping in a smoothing connective in the middle of a phrase, or completing a thought past the audio's end — which is orthogonal to context leakage. The lite prompt carries the same idea as a single sentence at the end of `# Audio is the ONLY source of words`. Pinned by `GeminiRequestBuilderTests.test_systemPrompts_pinAntiCompletionClause`. Anchor phrase `"Never extend, smooth, or complete"` is intentionally unique — `smooth` appears nowhere else in either prompt.
+
 ### Per-chunk instruction templates
 
 The variable suffix that goes immediately before the `inline_data` audio part. `\(chunkIndex)` is 1-based and is **not** reset on the final chunk.
