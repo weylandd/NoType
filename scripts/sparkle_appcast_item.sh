@@ -35,15 +35,19 @@ SIGNATURE=""
 NOTES_FILE=""
 OUTPUT_APPCAST="docs/appcast.xml"
 DOWNLOAD_URL_BASE="https://github.com/weylandd/NoType/releases/download"
+# Defaults to the current MACOSX_DEPLOYMENT_TARGET (see ADR-001).
+# Pass --minimum-system-version to override.
+MIN_SYSTEM_VERSION="14.0"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --version)           VERSION="$2";           shift 2 ;;
-        --build)             BUILD="$2";             shift 2 ;;
-        --signature)         SIGNATURE="$2";         shift 2 ;;
-        --notes-file)        NOTES_FILE="$2";        shift 2 ;;
-        --output-appcast)    OUTPUT_APPCAST="$2";    shift 2 ;;
-        --download-url-base) DOWNLOAD_URL_BASE="$2"; shift 2 ;;
+        --version)                VERSION="$2";              shift 2 ;;
+        --build)                  BUILD="$2";                shift 2 ;;
+        --signature)              SIGNATURE="$2";            shift 2 ;;
+        --notes-file)             NOTES_FILE="$2";           shift 2 ;;
+        --output-appcast)         OUTPUT_APPCAST="$2";       shift 2 ;;
+        --download-url-base)      DOWNLOAD_URL_BASE="$2";    shift 2 ;;
+        --minimum-system-version) MIN_SYSTEM_VERSION="$2";   shift 2 ;;
         -h|--help)
             sed -n '1,40p' "$0"; exit 0 ;;
         *)
@@ -64,30 +68,64 @@ fi
 ZIP_URL="${DOWNLOAD_URL_BASE}/v${VERSION}/NoType-${VERSION}.zip"
 PUB_DATE=$(LC_ALL=C date -u +"%a, %d %b %Y %H:%M:%S +0000")
 
-export VERSION BUILD SIGNATURE NOTES OUTPUT_APPCAST ZIP_URL PUB_DATE
+export VERSION BUILD SIGNATURE NOTES OUTPUT_APPCAST ZIP_URL PUB_DATE MIN_SYSTEM_VERSION
 
 python3 - <<'PYEOF'
 import os, re, sys
 
-path      = os.environ["OUTPUT_APPCAST"]
-version   = os.environ["VERSION"]
-build     = os.environ["BUILD"]
-signature = os.environ["SIGNATURE"]
-notes     = os.environ["NOTES"]
-zip_url   = os.environ["ZIP_URL"]
-pub_date  = os.environ["PUB_DATE"]
+path       = os.environ["OUTPUT_APPCAST"]
+version    = os.environ["VERSION"]
+build      = os.environ["BUILD"]
+signature  = os.environ["SIGNATURE"]
+notes      = os.environ["NOTES"]
+zip_url    = os.environ["ZIP_URL"]
+pub_date   = os.environ["PUB_DATE"]
+min_sys_ver = os.environ["MIN_SYSTEM_VERSION"]
+
+# Extract the section for `version` from the full CHANGELOG.md text.
+# We expect Keep-a-Changelog layout: each version starts with
+#   `## [X.Y.Z] — ...`
+# and the next section starts with another `## [` line. The section
+# ends at the `---` separator that precedes the next `## [`. Anything
+# between is taken verbatim.
+#
+# If the version isn't found in the changelog (unlikely; release.yml
+# verifies the bump beforehand), we fall back to using the full file
+# so we never ship an empty description. A warning is printed to
+# stderr in that case.
+def extract_section(text: str, version: str) -> str:
+    # Match `## [VERSION]` followed by anything until the next `## [`
+    # or end of file. The trailing `---` separator (if present) and
+    # any whitespace immediately before the next heading are dropped.
+    pattern = re.compile(
+        r"^##\s+\[" + re.escape(version) + r"\][^\n]*\n(.*?)(?=\n##\s+\[|\Z)",
+        re.DOTALL | re.MULTILINE,
+    )
+    m = pattern.search(text)
+    if not m:
+        sys.stderr.write(
+            f"warning: changelog section for {version} not found — "
+            f"using full CHANGELOG as description\n"
+        )
+        return text
+    body = m.group(1).strip()
+    # Drop a trailing `---` horizontal rule (the section separator).
+    body = re.sub(r"\n---\s*$", "", body).rstrip()
+    return body
+
+description = extract_section(notes, version)
 
 # CDATA can't contain "]]>". Defensively split if it ever appears.
-safe_notes = notes.replace("]]>", "]]]]><![CDATA[>")
+safe_description = description.replace("]]>", "]]]]><![CDATA[>")
 
 item = f"""    <item>
       <title>Version {version}</title>
       <pubDate>{pub_date}</pubDate>
       <sparkle:version>{build}</sparkle:version>
       <sparkle:shortVersionString>{version}</sparkle:shortVersionString>
-      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <sparkle:minimumSystemVersion>{min_sys_ver}</sparkle:minimumSystemVersion>
       <description><![CDATA[
-{safe_notes}
+{safe_description}
       ]]></description>
       <enclosure url="{zip_url}"
                  type="application/octet-stream"
