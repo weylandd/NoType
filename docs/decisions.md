@@ -347,11 +347,10 @@ The update UI is custom: a small "Update to X.Y.Z" pill in the main-window sideb
 - **Auto-check always on, no user toggle, no manual trigger in Settings.** Same call as ADR-013 about telemetry: minimal v1, no controls that demand UX design we haven't earned. The check is in the background, the only visible artefact is the banner when a new release ships. Daily cadence is Sparkle's documented default. If users start complaining we'll add toggles.
 - **Banner inside the sidebar, not a floating HUD.** HUDs are reserved for transient action-driven states (recording, transcribing, errors). An available update is a persistent state of the app that the user might ignore for hours; embedding it in the sidebar gives it the same visual weight as the nav items without pulling focus away from the main pane.
 - **Auto-install on `showReady(toInstallAndRelaunch:)`.** When Sparkle finishes downloading and asks "ready to install + relaunch?", the custom driver replies `.install` without a second prompt — the user already clicked the banner once, asking again is friction. If we ever want a "download in background, install on next quit" flow we'll capture this reply on the controller and surface a second banner state.
-- **GitHub Actions release on `push: tags: ['v*']`** — implemented, currently disabled because GitHub-hosted `macos-latest` runners are on macOS 15 / Xcode 16 and reject our 26.0 deployment target. Releases happen locally via `scripts/release.sh` + `scripts/publish_release.sh` until `macos-26` images land. Re-enabling is a one-line change to the workflow's trigger.
+- **GitHub Actions release on `push: tags: ['v*']`** — enabled. Tag a commit with `vX.Y.Z` and push; the workflow runs xcodegen → archive → notarize → sign → publish. See `docs/build.md` "Cutting a release" for the recipe and the CI-secret list. Local fallback (`scripts/release.sh` + `scripts/publish_release.sh`) is preserved and exercises the same code paths.
 
 **Trade-offs accepted:**
-- **Local releases are the only path right now.** Each release requires the developer's Mac to be available and Xcode 26 to compile. Acceptable for a one-person beta; revisit when GitHub catches up.
-- **`Package.resolved` is gitignored.** A future Sparkle 2.x bump could ship a regression we don't see in CI (CI is disabled) until a user runs the next release locally. Mitigated by `from: 2.6.0` minimum + xcodebuild's lock-on-first-build, but not as airtight as committing the resolved file.
+- **`Package.resolved` is gitignored.** A future Sparkle 2.x bump could ship a regression we don't catch until the next CI release run. Mitigated by `from: 2.6.0` minimum + xcodebuild's lock-on-first-build, but not as airtight as committing the resolved file.
 - **The banner has no "Skip this version" affordance in v1.** Users who click "dismiss" (via the future close button, not implemented yet) will see the banner again on the next scheduled check. Acceptable — `.skip` is a separate `SPUUserUpdateChoice` we can wire up when a real Settings surface needs it.
 
 **Alternatives considered:**
@@ -360,6 +359,5 @@ The update UI is custom: a small "Update to X.Y.Z" pill in the main-window sideb
 - **Hosted appcast on `notype.app` once domain lands.** Reasonable migration target. When the domain is set up, change `SUFeedURL` in `Info.plist` AND publish a `<sparkle:newSUFeedURL>` element in the old appcast for one release cycle so existing installs migrate forward. Out of scope today.
 
 **Reconsider when:**
-- GitHub adds `macos-26` runner images — re-enable the CI workflow trigger and delete `scripts/publish_release.sh` (or keep it as a local fallback).
 - Users start asking for a "Check for Updates…" menu — add a manual trigger to Settings, but keep the banner as the primary surface.
 - We adopt delta updates (`generate_appcast --maximum-deltas N`) — small change to `scripts/release.sh` (sign the deltas too) + the appcast item generator.

@@ -8,7 +8,10 @@ import ScreenCaptureKit
 /// **active window** of a specific app. Used by the screenshot + OCR
 /// fallback orchestrator (`ScreenCaptureContext`).
 ///
-/// Targets macOS 26 (project minimum). Capture is ~10–30 ms on Apple Silicon.
+/// Requires macOS 14+ — ScreenCaptureKit (SCShareableContent /
+/// SCScreenshotManager) landed in macOS 14.0, which matches the
+/// project's deployment target (see ADR-001).
+/// Capture is ~10–30 ms on Apple Silicon.
 enum ScreenCaptureController {
     private static let log = Logger(subsystem: "app.notype", category: "screen-capture")
 
