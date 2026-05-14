@@ -104,7 +104,12 @@ jobs:
           BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" NoType/Info.plist)
           DMG="build/NoType-${VERSION}.dmg"
           ZIP="build/NoType-${VERSION}.zip"
-          for f in "$DMG" "$ZIP"; do
+          # Version-less alias produced by release.sh — required for the
+          # stable https://github.com/weylandd/NoType/releases/latest/download/NoType.dmg
+          # link to redirect. GitHub's /latest/download/<filename> only
+          # works when the same filename ships in the latest release.
+          DMG_LATEST="build/NoType.dmg"
+          for f in "$DMG" "$ZIP" "$DMG_LATEST"; do
             test -f "$f" || { echo "::error::missing $f" >&2; exit 1; }
           done
           {
@@ -112,8 +117,9 @@ jobs:
             echo "build=$BUILD"
             echo "dmg=$DMG"
             echo "zip=$ZIP"
+            echo "dmg_latest=$DMG_LATEST"
           } >> "$GITHUB_OUTPUT"
-          ls -lh "$DMG" "$ZIP"
+          ls -lh "$DMG" "$ZIP" "$DMG_LATEST"
 
       - name: Sign update + publish appcast on main
         env:
@@ -166,6 +172,7 @@ jobs:
           files: |
             ${{ steps.artefacts.outputs.dmg }}
             ${{ steps.artefacts.outputs.zip }}
+            ${{ steps.artefacts.outputs.dmg_latest }}
           body_path: CHANGELOG.md
           generate_release_notes: false
           draft: false
