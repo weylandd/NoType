@@ -48,6 +48,22 @@ final class AppState {
     /// to Gemini.
     var dictionaryReplacements: [DictionaryReplacement] = []
 
+    /// Master toggle for the `User dictionary:` Gemini prompt section.
+    /// When `false`, `currentDictionaryContext()` ships empty
+    /// `activeEntries` (so the section body renders as `(empty)` —
+    /// preserving the cache-prefix shape, see ADR-016) and post-session
+    /// auto-harvest is skipped. The Dictionary tab keeps full
+    /// add/remove access so users can manage entries while disabled.
+    /// Replacement pairs (`Auto-replacement` panel) are intentionally
+    /// NOT gated — they're a separate client-side concern.
+    var dictionaryEnabled: Bool = UserDefaults.standard.object(forKey: AppState.dictionaryEnabledKey) as? Bool ?? true
+
+    /// UserDefaults key for the dictionary master toggle. Read with
+    /// `object(forKey:) as? Bool` so the absent-key path defaults to
+    /// `true` (existing installs keep their previous behaviour — words
+    /// continue to ship to Gemini).
+    @ObservationIgnored fileprivate static let dictionaryEnabledKey = "notype.dictionaryEnabled"
+
     @ObservationIgnored private var hotkeyMonitor: HotkeyMonitor?
     @ObservationIgnored private let permissions: PermissionsViewModel
     @ObservationIgnored private let hud: HUDController
@@ -805,6 +821,7 @@ final class AppState {
     /// entries — `DictionaryStore.addAutoEntries` would no-op anyway, and
     /// running the harvest is a small waste of work in that case.
     func harvestDictionaryIfRoom(session: RecordingSession, transcript: String) {
+        guard dictionaryEnabled else { return }
         guard dictionaryUserEntryCount < DictionarySnapshot.maxTotalEntries else { return }
         guard !transcript.isEmpty else { return }
         guard let context = session.cachedContext else { return }
@@ -857,10 +874,46 @@ final class AppState {
             entries: dictionaryEntries,
             replacements: dictionaryReplacements
         )
+        // When the master toggle is off, ship zero entries so the
+        // `User dictionary:` prompt section renders `(empty)`. The
+        // replacement pass is intentionally untouched — Auto-replacement
+        // is a separate panel and a separate concern.
+        let activeEntries = dictionaryEnabled ? snapshot.promptEntries() : []
         return DictionaryContext(
-            activeEntries: snapshot.promptEntries(),
+            activeEntries: activeEntries,
             replacements: snapshot.replacements
         )
+    }
+
+    /// Flip the master toggle. Persists immediately to UserDefaults so a
+    /// crash mid-session doesn't reset the user's choice.
+    func setDictionaryEnabled(_ enabled: Bool) {
+        guard dictionaryEnabled != enabled else { return }
+        dictionaryEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.dictionaryEnabledKey)
+    }
+
+    /// Two-stage bulk delete. First call wipes every `.auto` entry; once
+    /// only `.user` entries remain, a second call wipes those. The UI's
+    /// "Clear all" button selects the source based on what's still
+    /// present and styles itself destructively on stage 2 so the user
+    /// gets a visual hint before nuking their typed terms.
+    func clearAutoDictionaryEntries() {
+        let removed = dictionaryEntries.filter { $0.source == .auto }
+        guard !removed.isEmpty else { return }
+        dictionaryEntries.removeAll { $0.source == .auto }
+        Task { [dictionaryStore] in
+            await dictionaryStore.removeEntries(source: .auto)
+        }
+    }
+
+    func clearUserDictionaryEntries() {
+        let removed = dictionaryEntries.filter { $0.source == .user }
+        guard !removed.isEmpty else { return }
+        dictionaryEntries.removeAll { $0.source == .user }
+        Task { [dictionaryStore] in
+            await dictionaryStore.removeEntries(source: .user)
+        }
     }
 
     /// Add a user-typed entry. Trims, caps at `DictionarySnapshot.maxEntryLength`

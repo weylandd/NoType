@@ -206,9 +206,10 @@ struct CategoryIconTile: View {
 // Local copy — HomeView's `Panel` is `private`. Kept tight to a single
 // header row + content slot, with the same surface treatment.
 
-struct InstructionsPanel<Content: View>: View {
+struct InstructionsPanel<Content: View, Trailing: View>: View {
     let title: String
     let meta: String?
+    @ViewBuilder let trailing: () -> Trailing
     @ViewBuilder let content: () -> Content
 
     var body: some View {
@@ -224,6 +225,7 @@ struct InstructionsPanel<Content: View>: View {
                         .foregroundStyle(DS.Color.textQuaternary)
                         .tracking(0.6)
                 }
+                trailing()
             }
             .padding(.horizontal, DS.Space.s5 + 2)
             .padding(.top, DS.Space.s4 + 2)
@@ -238,6 +240,20 @@ struct InstructionsPanel<Content: View>: View {
             RoundedRectangle(cornerRadius: DS.Radius.lg - 2)
                 .strokeBorder(DS.Color.borderSubtle, lineWidth: DS.Border.hairline)
         )
+    }
+}
+
+/// Convenience init for the common case where the panel header has no
+/// trailing controls. Lets existing call sites stay at
+/// `InstructionsPanel(title:, meta:) { … }` without specifying a
+/// trailing slot.
+extension InstructionsPanel where Trailing == EmptyView {
+    init(
+        title: String,
+        meta: String?,
+        @ViewBuilder content: @escaping () -> Content
+    ) {
+        self.init(title: title, meta: meta, trailing: { EmptyView() }, content: content)
     }
 }
 

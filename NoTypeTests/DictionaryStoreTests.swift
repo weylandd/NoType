@@ -119,6 +119,41 @@ final class DictionaryStoreTests: XCTestCase {
             "oldest auto entries must be evicted FIFO")
     }
 
+    func test_addAutoEntries_refreshesExistingEntryTimestamp() async {
+        // Existing auto entry → `addAutoEntries` re-encountering it
+        // should bump its `addedAt`, not skip it. This is what lets
+        // the FIFO trim see frequently-mentioned auto entries as
+        // "newer" and evict actually-stale ones first.
+        let store = DictionaryStore(url: url)
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        _ = await store.addAutoEntries(["Anthropic"], now: t0)
+        let snap1 = await store.snapshot()
+        let original = try? XCTUnwrap(snap1.entries.first(where: { $0.word == "Anthropic" }))
+
+        // Re-encounter the same word an hour later.
+        let t1 = t0.addingTimeInterval(3600)
+        _ = await store.addAutoEntries(["Anthropic"], now: t1)
+        let snap2 = await store.snapshot()
+        let refreshed = try? XCTUnwrap(snap2.entries.first(where: { $0.word == "Anthropic" }))
+
+        XCTAssertEqual(snap2.entries.count, 1, "no new entry — same word refreshed")
+        XCTAssertEqual(original?.id, refreshed?.id, "id is stable across refresh")
+        XCTAssertTrue((refreshed?.addedAt ?? .distantPast) > (original?.addedAt ?? .distantFuture),
+            "addedAt should be bumped on refresh")
+    }
+
+    func test_addAutoEntries_refreshKeepsExistingSource() async {
+        // Refreshing an existing USER entry must not silently downgrade
+        // it to `.auto`. The store updates timestamp only; source stays.
+        let store = DictionaryStore(url: url)
+        _ = await store.addUserEntry("Anthropic")
+        _ = await store.addAutoEntries(["Anthropic"])
+        let snap = await store.snapshot()
+        XCTAssertEqual(snap.entries.count, 1)
+        XCTAssertEqual(snap.entries.first?.source, .user,
+            "user entry stays user across auto-harvest refresh")
+    }
+
     func test_userEntries_stickyOnAutoOverflow() async {
         let store = DictionaryStore(url: url)
         _ = await store.addUserEntry("Anthropic")
@@ -151,6 +186,42 @@ final class DictionaryStoreTests: XCTestCase {
         _ = await store.removeEntry(id: UUID())
         let after = await store.snapshot()
         XCTAssertEqual(after.entries.count, 1)
+    }
+
+    func test_removeEntries_bySource_wipesAutoButKeepsUser() async {
+        let store = DictionaryStore(url: url)
+        _ = await store.addUserEntry("NoType")
+        _ = await store.addUserEntry("Aura")
+        _ = await store.addAutoEntries(["Anthropic", "GitHub"])
+
+        let after = await store.removeEntries(source: .auto)
+
+        XCTAssertEqual(after.entries.count, 2)
+        XCTAssertTrue(after.entries.allSatisfy { $0.source == .user })
+        XCTAssertTrue(after.entries.contains { $0.word == "NoType" })
+        XCTAssertTrue(after.entries.contains { $0.word == "Aura" })
+    }
+
+    func test_removeEntries_bySource_wipesUser() async {
+        let store = DictionaryStore(url: url)
+        _ = await store.addUserEntry("NoType")
+        _ = await store.addAutoEntries(["Anthropic"])
+
+        let after = await store.removeEntries(source: .user)
+
+        XCTAssertEqual(after.entries.count, 1)
+        XCTAssertEqual(after.entries.first?.source, .auto)
+        XCTAssertEqual(after.entries.first?.word, "Anthropic")
+    }
+
+    func test_removeEntries_bySource_noMatches_isNoOp() async {
+        let store = DictionaryStore(url: url)
+        _ = await store.addUserEntry("NoType")
+
+        // No auto entries to wipe — call must not nuke the user entry.
+        let after = await store.removeEntries(source: .auto)
+        XCTAssertEqual(after.entries.count, 1)
+        XCTAssertEqual(after.entries.first?.word, "NoType")
     }
 
     // MARK: - Replacements

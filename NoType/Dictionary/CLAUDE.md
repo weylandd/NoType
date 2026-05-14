@@ -44,8 +44,13 @@ Single JSON file at `~/Library/Application Support/NoType/dictionary.json`:
 
 - **Total entries cap: 100.** Trim removes oldest `.auto` first (`addedAt` ascending). User entries are sticky — never trimmed by cap logic.
 - **Harvest skip rule: `userCount >= 100`.** When all 100 slots are taken by sticky user entries, the harvester can't write anything anyway, so `AppState.harvestDictionaryIfRoom` short-circuits before doing work. This is the only skip rule — short transcripts ARE processed (the old `< 30 chars` skip was a cost-saver for the LLM extractor; the algorithmic harvester is free).
+- **Master toggle (`AppState.dictionaryEnabled`).** Persisted to `UserDefaults` under `notype.dictionaryEnabled`, defaults to `true` (absent key → enabled). When `false`:
+  - `currentDictionaryContext()` ships `activeEntries: []` regardless of stored entries → `User dictionary:` prompt section renders `(empty)` (preserving the 8-part cache shape).
+  - `harvestDictionaryIfRoom` short-circuits before tokenising the transcript — no `.auto` entries get added while the feature is off.
+  - The toggle is **scoped to the entries panel only**. Replacement pairs are unaffected — `replacements` keeps flowing into `DictionaryContext` so client-side find/replace still runs at paste time.
+  - The Dictionary tab stays fully editable while disabled (chips visually dimmed to 45 % opacity), so users can curate entries in advance.
 - **30-char cap on entries**, enforced at the UI textfield (live), `DictionaryStore` mutators, `DictionaryHarvester` (`sanityMaxLength`), and on-disk decoder.
-- **`DictionaryContext` is frozen at session start.** Edits to the Dictionary tab during a recording session do NOT reach the in-flight session. `RecordingSession` stores `replacementsFrozen` separately from `cachedContext.replacements` so a quick-release fallback to `ContextSnapshot.minimal(activeApp:)` still picks up the user's replacement pairs.
+- **`DictionaryContext` is frozen at session start.** Edits to the Dictionary tab during a recording session do NOT reach the in-flight session. `RecordingSession` stores `replacementsFrozen` separately from `cachedContext.replacements` so a quick-release fallback to `ContextSnapshot.minimal(activeApp:)` still picks up the user's replacement pairs. The master toggle is also captured at session start through this same freeze (via `currentDictionaryContext()`'s read of `dictionaryEnabled`).
 
 ---
 
@@ -69,29 +74,72 @@ Pinned by `GeminiRequestBuilderTests`:
 
 ## Harvester algorithm (`DictionaryHarvester.harvest`)
 
-Pure function, ~150 LOC, <10 ms on realistic sessions. Pipeline:
+Pure function, <10 ms on realistic sessions. **Transcript-driven** — context is only used to verify that a candidate phrase actually appears on screen, never to invent candidates or promote casing.
 
-1. **Tokenize transcript.** Maximal runs of letter / digit / `_` / `/` / `-`, optionally with internal `.` (period between two letter-or-digit chars — for `claude.md`, `react.dev`). A trailing period is dropped (sentence end). Tokens that contain no letter are discarded (pure-digit, pure-binder).
-2. **For each token position**, try increasingly long multi-word spans (3 → 2 → 1).
-3. **For each span**, search the context string (case-insensitive, word-boundary via look-around — `\b` doesn't work for tokens ending in `/` or `_`). If found, capture the **context's casing** as canonical.
-4. **Shape filter on canonical form** (not on transcript form): keep when canonical starts with uppercase, has any internal uppercase, or contains an atypical-text binder (`.`, `_`, `/`, `-`). This is what lets a lowercase transcript token `anthropic` save as canonical `Anthropic` from the on-screen text.
-5. **Longest-match wins.** If 3-span matches, consume 3 positions; don't double-save the 1-spans inside it.
-6. **Dedup case-insensitive** against `existing` (current dictionary entries) and against candidates already saved this session.
-7. **Caps:** `maxCandidates = 5` per session; `sanityMaxLength = 30` chars per entry.
+Pipeline:
 
-Shape filter examples:
-- `Anthropic` (capital first) → pass
-- `iOS` / `gRPC` (mixed case) → pass
-- `NASA` (all caps) → pass
-- `claude.md` / `bin/python` / `_priv` / `state-of-the-art` (atypical binders) → pass
-- `hello` / `send` / `inbox` (lowercase plain word) → reject (this is what filters out UI chrome)
-- `12345` (pure digits) → reject (no letters)
+1. **Sentence segmentation via `NLTokenizer(unit: .sentence)`.** Apple's tokenizer handles abbreviations (`т.е.`, `etc.`, `Inc.`) better than punctuation heuristics. Each sentence is then word-tokenized; the first word of each sentence is marked `isSentenceStart=true`.
+2. **Word tokenization.** Maximal runs of letter / digit / `_` / `/` / `-`, optionally with internal `.` (between two letter-or-digit chars — `claude.md`, `react.dev`). A trailing period is dropped. Pure-binder runs (`___`) are discarded; pure-digit runs (`10`, `2024`) are KEPT so they can participate as **phrase boundaries** but never seed phrases on their own.
+3. **Trigger detection (`isTrigger`)** — applied to TRANSCRIPT tokens (not canonical from context). A token is a trigger if it passes the shape filter:
+   - **(a) Internal uppercase** — uppercase letter at position ≥ 1 (`iPhone`, `gRPC`, `iCloud`, `macOS`).
+   - **(b) Contains digit AND at least one letter** (`h264`, `mp4`, `version1`). Pure-digit tokens are NOT triggers (`10`, `2024`).
+   - **(c) Special binder** — `/`, `_`, `*`, `#`, `$`. Strong non-prose signal. Hyphen `-` and period `.` are NOT in this set (they're common in `что-то`, `т.е.`).
+   - **(d) Dot + length ≥ 6 chars** — filename / domain-like (`claude.md`, `react.dev`).
+   - **(e) First-letter cap, length ≥ `firstCapTierMinLength` (5), AND NOT sentence-start** — `Anthropic`, `Slack`, `Apple`, `Vasya`, `Microsoft`. Filters out short Russian/English chrome (`Так`, `Вот`, `Для`, `Auto`) and sentence-start words.
+4. **±2 window per trigger.** For each trigger at position `i` within its sentence, the window is `[max(0, i-2)..min(n-1, i+2)]`. The harvester generates all sub-phrases `[a..b]` such that `leftWin ≤ a ≤ i ≤ b ≤ rightWin`.
+5. **Sort candidates longest-first per trigger.** Try each in order, **first match wins** (matches the user's spec: "если находим, то сразу же заканчиваешь поиск и останавливаешься").
+6. **Boundary filter (`hasInterestingSignal`).** Phrase first AND last tokens must look non-prose: have uppercase letter, contain a digit, contain a special binder, or be a long-dot token. This is what rejects `на Actions artifacts` (`на`/`artifacts` are prose) while keeping `iPhone 10` (`iPhone` cap + `10` digit) and `Вася Пупкин` (both first-cap).
+7. **Verbatim context match** — case-insensitive, word-boundary via Unicode look-arounds (regular `\b` fails on tokens ending in `/` or `_`).
+8. **Session substring dedup** — skip candidate if it's a contiguous sub-sequence of any phrase already saved this session. Stops the algorithm from descending to shorter sub-phrases of an already-covered span.
+9. **Existing-dictionary dedup**:
+   - Candidate is STRICTLY contained in an existing entry → skip (existing is more informative).
+   - Candidate is EXACT match of an existing entry → **include** in the return list; the caller (`DictionaryStore.addAutoEntries`) refreshes the existing entry's `addedAt` timestamp so the FIFO trim treats it as fresh.
+10. **Save with transcript casing.** Tokens are joined as they appear in the TRANSCRIPT. No context-driven case promotion (the user-reported `минуты → Минуты` regression came from the old design that pulled casing from context).
+11. **Caps:** `maxCandidates = 5` per session; `sanityMaxLength = 30` chars; `minSingleTokenLength = 3` for 1-gram saves.
 
-Multi-word matching examples:
-- transcript `пиши вася пупкин завтра`, context `Recipient: Вася Пупкин` → saves `Вася Пупкин`
-- transcript `check GitHub releases page`, context `Tab: GitHub releases` → saves `GitHub releases`
-- transcript `browsing GitHub features today`, context `Window: GitHub home` → 2-span `GitHub features` not in context, falls back to 1-span `GitHub`
-- transcript `shipping to anthropic`, context `Slack: Anthropic Inc` → 1-span match, saves `Anthropic` (case from context)
+The harvester returns BOTH net-new phrases AND exact-existing matches; the caller distinguishes via membership in `existingLower` and calls add-or-refresh accordingly.
+
+**Cross-language matrix.** The first-cap-mid-sentence tier is the part that depends on language semantics. The harvester uses Apple's `NLLanguageRecognizer` (zero-dep, built into macOS) on the transcript to detect noun-capitalizing languages and disable the tier for those automatically:
+
+| Script family | Behaviour | Notes |
+|---|---|---|
+| Latin (EN/FR/IT/ES/PT/PL/…) | ✓ First-cap tier ON | `.!?` ends sentences. Spanish `¿¡` are walked through as non-boundary chars — preceded by a real sentence-ender or BOS, the next token still marks as sentence-start correctly. |
+| Cyrillic (RU/UK/BG/SR/MK/…) | ✓ First-cap tier ON | Same punctuation conventions. The user-reported `Вот`/`Так`/`Для` noise rejects via the "sentence-start in both" filter. |
+| Greek / Armenian / Georgian | ✓ First-cap tier ON | Latin-style punctuation. |
+| **German** | ✓ First-cap tier **OFF** (auto-detected) | German capitalizes ALL nouns, not just proper nouns. `isNounCapitalizingLanguage(transcript)` returns `true` via `NLLanguageRecognizer.dominantLanguage == .german` and the tier is suppressed for that harvest call. German users get strict tier only — they lose unmarked brand names like `Anthropic`/`Slack` as auto-entries (addable manually via the textfield) but keep `iPhone`, `h264`, `Apple iPhone`, `Anthropic Inc` via internal-cap / digit / multi-word rules. |
+| CJK (中文 / 日本語 / 한국어) | ✓ First-cap tier no-op | No upper/lower case at all → `isFirstCapPlainShape` always rejects the leading char. CJK tokens still flow through strict tier rules (b)/(c)/(d) — digits, binders, dot-domain. Newline + CJK fullwidth `。！？` are recognised as sentence-enders. |
+| Arabic / Hebrew | ✓ First-cap tier no-op | No case. Same as CJK. |
+| Hindi / Thai / Bengali / Tamil / … | ✓ First-cap tier no-op | No case. Same as CJK. |
+
+**Why NLLanguageRecognizer over character heuristics.** Detecting German by the presence of `ß`/`ä`/`ö`/`ü` would miss the long tail: Swiss German never writes `ß`, modern post-reform Germany often skips it, and `ä`/`ö`/`ü` are shared with Swedish, Finnish, Turkish, Estonian. NLLanguageRecognizer's statistical model uses word frequency + grammatical markers (article–noun ratios, capitalization rate) and generalises across both the Latinised and umlaut-rich variants. It's also extensible: add `.luxembourgish` or `.dutch` (if a noun-cap edge case is reported) by appending to `nounCapitalizingLanguages: Set<NLLanguage>`.
+
+**Adding a new noun-capitalizing language.** Edit `DictionaryHarvester.nounCapitalizingLanguages` (one line). The framework handles detection; no algorithm changes. Add a test in `DictionaryHarvesterTests` that the language classifies correctly + that the relevant common-noun pattern rejects under that language.
+
+Trigger examples (applied to transcript tokens):
+- `iPhone` / `gRPC` / `iCloud` / `macOS` / `MacBook` — internal upper → trigger
+- `NASA` / `JSON` / `OAuth` — internal upper at index ≥ 1 → trigger
+- `h264` / `mp4` / `version1` — has digit + letter → trigger
+- `bin/python` / `generate_keys` / `#engineering` — special binder → trigger
+- `claude.md` / `react.dev` / `app.notype` — dot + length ≥ 6 → trigger
+- `Anthropic` / `Slack` / `Apple` / `Vasya` — first-cap, length ≥ 5, MUST be mid-sentence → trigger
+- `Так` / `Вот` / `Для` — length < 5 → not a trigger
+- `Auto` / `Tool` / `Phone` — length < 5 → not a trigger
+- `Anthropic` at sentence-start → not a trigger (user pre-accepted this loss)
+- `10` / `2024` / `12345` — pure digits, no letter → not a trigger (but can serve as phrase boundary)
+- `что-то` / `state-of-the-art` — only hyphen, no other signal → not a trigger
+- `т.е.` / `T.e` — short dot tokens → not a trigger
+- `minutes` / `packages` / `framework` — lowercase prose → not a trigger (the new algorithm never promotes lowercase transcript tokens to capital canonical from context)
+
+Multi-word save examples (transcript casing, phrase verified in context, boundaries pass `hasInterestingSignal`):
+- transcript `купил iPhone 10 вчера`, context `Store: iPhone 10 Pro Max` → saves `iPhone 10` — 3-span `iPhone 10 вчера` rejected because `вчера` boundary is prose; 2-span first/last both pass and match context
+- transcript `пиши Вася Пупкин завтра`, context `Recipient: Вася Пупкин` → saves `Вася Пупкин` — trigger `Пупкин` (length 6 ≥ 5, mid-sentence), 2-span match
+- transcript `написал в Slack команде`, context `Tab: Slack channels` → saves `Slack` — 2-span `Slack команде` rejected (last `команде` is prose); 1-gram match
+- transcript `проверить на Actions artifacts`, context `общий пул на Actions artifacts` → saves `Actions` — `на Actions artifacts` and `на Actions` rejected (`на`/`artifacts` are prose boundaries); falls back to 1-gram
+- transcript `Вот купил новый`, context (whatever) → saves nothing — no trigger at all (`Вот` length 3, sentence-start)
+- transcript `iPhone 10 сохраняется всё`, context same → saves `iPhone 10` — 3-span rejected (`сохраняется` prose tail); 2-span passes
+- transcript `running iOS apps daily`, context `iOS market share` → saves `iOS` (transcript casing — note: if transcript said `ios` lowercase, it wouldn't be a trigger at all)
+- transcript `вчера запустил Actions`, existing `["GitHub Actions"]` → saves nothing — `Actions` is strict subset of existing `GitHub Actions`, the longer entry already covers it
+- transcript `вчера обсуждал Anthropic с командой`, existing `["Anthropic"]` → returns `["Anthropic"]` — exact match → caller refreshes timestamp (FIFO survives)
 
 ---
 
@@ -137,9 +185,12 @@ The whole harvest is client-side and synchronous on the main actor (the harveste
 
 `NoType/UI/Dictionary/DictionaryView.swift`:
 
-- Sticky header + scroll body, same layout as Instructions tab. Reuses `InstructionsPanel` for panel chrome.
+- Sticky header + scroll body, same layout as Instructions tab. Reuses `InstructionsPanel` for panel chrome (with its `trailing` slot now driving the dictionary panel's header controls).
 - **Auto-replacement panel**: list of pair rows + add-row footer. Each row is `from → to` with an inline delete button on hover.
 - **Dictionary panel**: counter `(N/100)` + add field with live 30-char cap + tag-cloud via local `FlowLayout` Layout protocol. Chips use `DSWordChip` (filled accent for `.user`, bordered neutral for `.auto`). Per-chip X-button on hover.
+- **Panel header trailing controls**:
+  - **Master toggle (`Toggle(.switch, controlSize: .mini)`)** flipping `appState.dictionaryEnabled`. Always visible. When off, the panel body fades to 45 % opacity but stays interactive — the user can still curate entries while the feature is paused.
+  - **Two-stage `Clear all` button** (visible when `totalCount > 0`). Same label both stages. Stage 1 (auto entries exist) wipes only `.auto`; stage 2 (only `.user` left) styles the button destructively (`dangerFg` + `dangerSoft` hover fill) and wipes `.user` on click. No confirmation dialog — the destructive tint on stage 2 is the only safeguard. Hidden entirely when the dictionary is empty.
 - **Full state**: when `userCount >= 100`, an in-panel hint explains the dictionary is full and auto-harvest can't add new words until the user removes some.
 
 `DSWordChip` lives in `NoType/UI/DSComponents.swift` alongside the other DS primitives.

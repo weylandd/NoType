@@ -43,12 +43,21 @@ xcodebuild -project NoType.xcodeproj -scheme NoType -configuration Debug build
 Hard rules:
 
 - **Don't build when you don't need to.** Prompt-text edits, doc edits, comment-only changes — no build required. Only build when Swift source has changed and you actually need to verify it compiles. This is the simplest way to avoid the LaunchServices duplicate described in the next rule.
-- **After every required build, unregister the DerivedData bundle from LaunchServices.** `xcodebuild` runs a `RegisterWithLaunchServices` step on the freshly-signed `NoType.app` in DerivedData; macOS then surfaces that bundle in Launchpad / "Apps" alongside the real installed `/Applications/NoType.app`, giving the user two indistinguishable entries. Suppression flags don't exist for the registration; the only reliable cleanup is to call `lsregister -u` right after the build:
+- **After every required build, delete the freshly-built bundle from DerivedData.** `xcodebuild` runs a `RegisterWithLaunchServices` step on the freshly-signed `NoType.app` and `lsd` (the LaunchServices daemon) **continually re-scans `~/Library/Developer/Xcode/DerivedData/` on a few-second interval** and re-registers anything it finds. This means **`lsregister -u` alone does not work** — within 3 seconds of running it, `lsd` re-discovers the on-disk bundle and brings the registration back. We learned this the hard way after ten failed cleanup rounds.
+  The only durable fix is to delete the bundle itself so `lsd` has nothing to find:
   ```bash
-  /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister \
-      -u "$HOME/Library/Developer/Xcode/DerivedData/NoType-"*"/Build/Products/Debug/NoType.app"
+  # Run after EVERY xcodebuild build / test (archive is the exception — see below).
+  # Glob covers all DerivedData hashes; Debug + Release both register.
+  find "$HOME/Library/Developer/Xcode/DerivedData" \
+       -maxdepth 6 \
+       -path "*/NoType-*/Build/Products/*/NoType.app" \
+       -type d -prune -exec rm -rf {} +
   ```
-  Idempotent; the bundle stays on disk (next build re-registers it, which you also clean up right after). This rule also applies after `xcodebuild test` — running tests includes a build that registers.
+  Xcode's intermediate object/archive caching lives under `Build/Intermediates.noindex/` (which `lsd` ignores by name), not in the `.app` bundle, so deleting the bundle does NOT trigger a full rebuild — the next build re-links from cached objects in seconds.
+  Cross-check with `mdfind "kMDItemCFBundleIdentifier == 'app.notype'"` — only `/Applications/NoType.app` should appear.
+  Spotlight UI keeps a short-lived render cache; if a phantom entry still shows after the sweep, `killall Dock` forces an immediate refresh.
+- **One-time `.metadata_never_index` markers.** Drop empty `.metadata_never_index` files at `~/Library/Developer/Xcode/DerivedData/` and `<repo>/build/` (already done — keep them there). They tell Spotlight to skip metadata indexing of these trees so a stray bundle that survives the rm sweep doesn't surface via `mdfind`. The marker does NOT stop `lsd` registration — only deletion does — but it's a useful belt-and-braces for Spotlight's separate index. Don't commit the marker in `<repo>/build/` (the path is already in `.gitignore`).
+- **`xcodebuild archive` is an exception.** The release script (`scripts/release.sh`) writes a `NoType.xcarchive` to `<repo>/build/NoType.xcarchive/` deliberately — the archive's inner `NoType.app` is the input to notarization. Do NOT delete it; the script needs it. The repo's `build/` marker keeps it out of Spotlight, and `lsd` registers it as `<repo>/build/NoType.xcarchive/Products/Applications/NoType.app` which is benign (`.app` inside `.xcarchive` — Finder treats the parent as a document, not an app, so Launchpad usually doesn't surface it). After a successful release flow, the user is free to `rm -rf build/NoType.xcarchive` when they don't need the archive anymore.
 - **Never** pass `-derivedDataPath` (or any flag that redirects build output into the repo, e.g. `./build/`). Output landing inside the working tree creates a duplicate `NoType.app` that macOS Spotlight indexes alongside the real one — the user ends up with multiple "NoType" entries in Launchpad / app pickers and can't tell which build they're launching. The repo `.gitignore` covers `build/`, so it won't reach a commit, but the on-disk duplicate is still confusing.
 - **Never** open / `open NoType.app` / launch the built bundle. The app installs a CGEventTap, mic recorder, and menu-bar UI — launching it from an agent surprises the user. Building is enough to verify the change compiles.
 - If you ever need to locate the freshly built bundle (e.g. to inspect Info.plist, sign-state, or resource layout), it's always at `~/Library/Developer/Xcode/DerivedData/NoType-*/Build/Products/Debug/NoType.app`.
