@@ -44,16 +44,13 @@ final class UpdateUserDriver: NSObject, SPUUserDriver {
         reply: @escaping (SPUUserUpdateChoice) -> Void
     ) {
         let update = UpdateController.AvailableUpdate(
-            // Sparkle 2 surfaces both as non-optional Strings. Use
-            // displayVersionString for the human-facing "1.2.3" and keep
-            // versionString as the CFBundleVersion-style tiebreaker.
-            versionString: appcastItem.displayVersionString,
-            buildString: appcastItem.versionString,
-            releaseNotesText: appcastItem.itemDescription
+            // Sparkle 2 surfaces displayVersionString as a non-optional String —
+            // the human-facing "1.2.3" the banner shows.
+            versionString: appcastItem.displayVersionString
         )
         controller?.pendingUpdateReply = reply
         controller?.setPhase(.available(update))
-        log.info("update found: \(update.versionString, privacy: .public) (build \(update.buildString, privacy: .public))")
+        log.info("update found: \(update.versionString, privacy: .public) (build \(appcastItem.versionString, privacy: .public))")
     }
 
     func showUpdateReleaseNotes(with downloadData: SPUDownloadData) {

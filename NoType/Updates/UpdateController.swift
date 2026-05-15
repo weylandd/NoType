@@ -40,13 +40,6 @@ final class UpdateController {
         /// `displayVersionString` from the appcast item — usually
         /// `CFBundleShortVersionString` like `"0.1.2"`.
         let versionString: String
-        /// `versionString` from the appcast item — usually `CFBundleVersion`
-        /// like `"12"`. Used as the tiebreaker by Sparkle when comparing.
-        let buildString: String
-        /// Inline `<description>` from the appcast `<item>`, if present.
-        /// Banner only shows the first line; a future Details view could
-        /// show the full text.
-        let releaseNotesText: String?
     }
 
     private(set) var phase: Phase = .idle
@@ -133,14 +126,6 @@ final class UpdateController {
         pendingInstallReply = nil
         phase = .idle
     }
-
-    /// DEBUG helper — force an immediate update check. Useful for QA without
-    /// waiting 24 hours for the scheduler. Not exposed in release builds.
-    #if DEBUG
-    func checkNow() {
-        updater.checkForUpdates()
-    }
-    #endif
 
     // MARK: - Driver callbacks (called from UpdateUserDriver; see access note above)
 
