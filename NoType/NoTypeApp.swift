@@ -11,6 +11,27 @@ final class NoTypeAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
+
+    /// First-launch window-open path. Onboarding lives in the main window
+    /// (`MainWindowView` swaps to `OnboardingFlow` while pending). The
+    /// menu-bar tray is suppressed during onboarding (see `NoTypeApp.body`'s
+    /// `MenuBarExtra(isInserted:)` gate), and SwiftUI's `Window` scene
+    /// does not auto-present without `defaultLaunchBehavior(.presented)`
+    /// — which we can't use because it requires macOS 15+ and our floor
+    /// is 14. So without this hook, a fresh install never surfaces any UI.
+    /// We dispatch one runloop tick later so SwiftUI has built the scene
+    /// graph and the `Window`'s backing `NSWindow` is reachable through
+    /// `NSApp.windows`.
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard !OnboardingState.hasCompletedOnboarding else { return }
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            let mainWindow = NSApp.windows.first { window in
+                (window.identifier?.rawValue ?? "").contains("main")
+            }
+            mainWindow?.makeKeyAndOrderFront(nil)
+        }
+    }
 }
 
 @main
@@ -87,12 +108,14 @@ struct NoTypeApp: App {
         // `.regular` (open) and `.accessory` (closed) so NoType only
         // appears in the Dock while the window is up.
         //
-        // First-launch window opening is handled by `MenuBarIcon`'s
-        // `.task` — when the wizard is still pending it calls
-        // `openWindow(id: "main")` so the user lands directly in
-        // onboarding. We don't use SwiftUI's `Scene.defaultLaunchBehavior`
-        // here because it requires macOS 15+ (`@available(macOS 15.0, *)`)
-        // and our minimum is macOS 14.
+        // First-launch window opening is handled by
+        // `NoTypeAppDelegate.applicationDidFinishLaunching` — when the
+        // wizard is still pending it activates the app and orders the
+        // main window front. We don't use SwiftUI's
+        // `Scene.defaultLaunchBehavior` here because it requires macOS
+        // 15+ (`@available(macOS 15.0, *)`) and our minimum is macOS 14;
+        // the `MenuBarExtra` is also suppressed during onboarding so
+        // no view-layer `.task` is reliably alive at launch to handle it.
         Window("NoType", id: "main") {
             MainWindowView()
                 .environment(appState)

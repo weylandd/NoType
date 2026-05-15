@@ -10,7 +10,7 @@ Files:
 - `DSIcon.swift` — typed enum (`DSIconName`) wrapping the line-icon assets in `Assets.xcassets`.
 
 **Surfaces:**
-- `MenuBarIcon.swift` — label for `MenuBarExtra`. Idle/recording/sending/error states; recording state shows the `tray-aura` pill (accent capsule + mic + mm:ss timer + pulsing dot). On launch, runs a one-shot `.task` that opens the main window when `OnboardingState.isOnboarding == true`.
+- `MenuBarIcon.swift` — label for `MenuBarExtra`. Idle/recording/sending/error states; recording state shows the `tray-aura` pill (accent capsule + mic + mm:ss timer + pulsing dot). First-launch window opening is **not** done here (the tray is suppressed during onboarding via `NoTypeApp.body`'s `MenuBarExtra(isInserted:)` gate) — see `NoTypeAppDelegate.applicationDidFinishLaunching`.
 - `HistoryPopover.swift` — popover content + footer mic-input picker + `[Open NoType]` button that opens the main window.
 - `MicInputPicker.swift` — shared input-device dropdown (the 30 pt pill that opens an `NSMenu`). Used by the popover footer and the onboarding mic-check screen.
 - `HistoryRowView.swift` — single history entry. Real macOS app icon via `AppIconCache` (delegated to `AppIconView`).
@@ -87,7 +87,7 @@ Contract:
 - **`MainWindowView`** swaps in `OnboardingFlow` while `isOnboarding`, otherwise the normal sidebar + `HomeView`.
 - **Permission HUDs are suppressed during onboarding.** `AppState`'s launch auto-show and `handleMenuBarOpened` both gate on `onboarding.isComplete`. The wizard's permissions step drives its own prompts via `PermissionsViewModel.requestMicrophone()` / `requestAccessibility()`.
 - **Hotkey-test isolation.** The hotkey-check step sets `appState.onboardingHotkeyPressObserver` (and the release sibling) on appear. While set, `handleHotkeyPress` short-circuits before starting a `RecordingSession` — the press flips the keycap visual instead. Cleared on disappear.
-- **Auto-open on first launch.** `MenuBarIcon` runs a one-shot `.task` that calls `openWindow(id: "main")` when onboarding is pending — the only SwiftUI hook reliably alive at launch is the menu-bar label.
+- **Auto-open on first launch.** Handled by `NoTypeAppDelegate.applicationDidFinishLaunching` — when `OnboardingState.hasCompletedOnboarding == false` it activates the app and calls `makeKeyAndOrderFront(_:)` on the `Window` scene's NSWindow (looked up via `NSApp.windows`). Earlier we relied on `Scene.defaultLaunchBehavior(.presented)`, but that needs macOS 15+ and our floor is 14; the `MenuBarExtra` is also suppressed during onboarding, so a view-layer `.task` is not reliably alive at launch.
 - **API key resume state.** Step 1.1 reads `appState.currentAPIKey`; if a key already exists it shows `AIzaSy••••••••` with an Edit link. Editing clears the field. Continue revalidates on edit, otherwise advances directly. The validated key is persisted to `SecretStore` immediately, before the user advances.
 - **Mic check.** Uses `MicProbe` (`NoType/Onboarding/MicProbe.swift`) — its own `AVAudioEngine` instance, no VAD, no `RecordingSession`. The recording HUD's spectrum renderer is duplicated as a step-local `OnboardingSpectrumMeter` because it's sized differently (360 × 80 vs the HUD's 36 pt strip).
 
