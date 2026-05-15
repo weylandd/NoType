@@ -44,6 +44,9 @@ secrets/
 # Claude Code — personal harness overrides (settings.json itself is shared)
 .claude/settings.local.json
 
+# Compound Engineering — machine-local config (example file IS checked in)
+.compound-engineering/*.local.yaml
+
 # Local Sparkle CLI binaries (sign_update etc.) — used by scripts/publish_release.sh.
 # Not checked in because binaries don't belong in git and Sparkle ships MIT releases
 # anyone can re-download. See tools/sparkle/README.md for the obtain-and-place steps.
