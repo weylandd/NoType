@@ -45,8 +45,9 @@ Storage: `~/Library/Application Support/NoType/history.json`, top-level array of
 
 ```swift
 @MainActor
-final class AppState: ObservableObject {
-    @Published var history: [HistoryEntry] = []
+@Observable
+final class AppState {
+    var history: [HistoryEntry] = []
     private let historyStore: HistoryStore
     ...
     func refreshHistory() async {
@@ -55,7 +56,7 @@ final class AppState: ObservableObject {
 }
 ```
 
-`RecordingSession.stop()` calls `await store.append(entry)` directly. The returned `HistoryEntry` is then appended to `AppState.history` on the main actor, with a defensive trim to 10 entries. The popover and `HomeView` observe `AppState.history` via `@EnvironmentObject` / `@Published`.
+`RecordingSession.stop()` calls `await store.append(entry)` directly. The returned `HistoryEntry` is then appended to `AppState.history` on the main actor, with a defensive trim to 10 entries. The popover and `HomeView` observe `AppState.history` via `@Environment(AppState.self)`.
 
 Per-row delete: the popover's trash button calls `AppState.deleteHistoryEntry(id:)`, which optimistically removes from the in-memory array and then fires a detached `Task` to persist via `store.remove(id:)`. The disk write is fire-and-forget — on disk-write failure (logged), the in-memory state still reflects the deletion until the next launch.
 

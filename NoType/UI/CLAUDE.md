@@ -200,8 +200,6 @@ Tracked here so contributors don't accidentally re-introduce the original deviat
 
 - **Type tokens** — `DS.Font` is short of the spec's full scale (missing `fs-16/18/20/24/32/44/64`) and lacks paired line-heights. Add as needed.
 - **Light theme** — not implemented; spec defines it. Acceptable for v1.
-- **Average WPM is fixed** — `HomeStats.averageWPM` is hardcoded at 140 (the dictation reference). `HistoryEntry` doesn't store recording duration, so we can't compute true WPM yet. When duration lands on the schema, swap to a real average. Time saved on the same panel uses the same fixed dictation rate vs a 47 WPM typing reference.
-- **Range tabs (7D / 30D / 90D / All) on Home** — design includes them above the stats; code omits because the store only retains the last 10 entries, so all ranges would yield the same numbers. Add when history capacity grows.
 
 Resolved in the 2026-05-10 sweep (here for archaeology):
 

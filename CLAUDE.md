@@ -26,9 +26,9 @@ User holds **Right Option** anywhere in macOS → NoType starts recording from t
 | Text injection | Pasteboard + `CGEvent` ⌘V |
 | History storage | JSON in `~/Library/Application Support/NoType/history.json` |
 | Secrets | macOS Keychain (via `SecretStore` → `KeychainStore`; ADR-011) |
-| Distribution | Direct download, notarized .dmg (Sparkle planned for v0.1.0 RC) |
+| Distribution | Direct download, notarized .dmg + Sparkle 2 auto-updates (ADR-017) |
 
-External SPM dependencies: **none yet**. Sparkle is planned for v0.1.0 RC; `onnxruntime-swift` is a fallback if CoreML conversion fidelity ever becomes a problem — see `NoType/Recording/CLAUDE.md`.
+External SPM dependencies: **Sparkle 2** (auto-updates, see ADR-017 and `NoType/Updates/CLAUDE.md`). `onnxruntime-swift` is a planned fallback if Silero CoreML conversion fidelity ever becomes a problem — see `NoType/Recording/CLAUDE.md`.
 
 ---
 

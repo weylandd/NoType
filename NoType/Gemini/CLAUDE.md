@@ -233,16 +233,16 @@ The actor holds a session-scoped `URLSession` configured with:
 
 ## Retry policy
 
-**Target policy** (planned, not yet implemented in `GeminiClient.sendRequest`):
+Implemented in `GeminiClient.sendRequest` via the `retryDecision(for:attempt:)` classifier (`GeminiClient.swift:618`):
 
-- **Network errors / timeout:** 1 retry with 500 ms delay. Then fail the session.
-- **HTTP 429 (rate limit):** exponential backoff, 2 retries (500 ms, 2 s). Then fail.
+- **Network errors / timeout (`URLError`):** 1 retry with 500 ms delay. Then fail the session.
+- **HTTP 429 (rate limit):** 2 retries with 500 ms then 2 s backoff. Then fail.
 - **HTTP 5xx:** 1 retry with 500 ms delay. Then fail.
-- **HTTP 4xx (auth, bad request):** no retry. Fail immediately, surface in UI.
+- **HTTP 4xx other than 429 (auth, bad request, not found):** no retry. Fail immediately, surface in UI.
 
-**Current behaviour:** no retries at all — any non-200 response or network error fails the session immediately. This is a known regression vs the policy above and is tracked as a high-priority code fix.
+The retry loop is shared by both `transcribe` and `transcribeBatch` — single-chunk and batched paths see the same behaviour. Each attempt is logged with `attempt=N` so retry storms are visible at the log level.
 
-Whichever path is in force, when a session fails partway through we do **not** paste a partial transcript. Better to lose work than to paste something incomplete.
+When a session fails partway through we do **not** paste a partial transcript. Better to lose work than to paste something incomplete.
 
 ---
 
