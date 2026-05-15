@@ -5,8 +5,9 @@ Wraps the OS permission request APIs and exposes a single `@Observable` view-mod
 ## Files
 
 - `PermissionStatus.swift` — the shared enum (`unknown`, `notDetermined`, `denied`, `granted`).
-- `MicrophonePermission.swift` — `AVCaptureDevice` + Privacy_Microphone deep link.
-- `AccessibilityPermission.swift` — `AXIsProcessTrustedWithOptions` + Privacy_Accessibility deep link.
+- `SystemSettingsPane.swift` — shared deep-link helper. `x-apple.systempreferences:` URL pattern + `Privacy_*` enum; each permission file delegates `openSystemSettings()` here.
+- `MicrophonePermission.swift` — `AVCaptureDevice` + delegates to `SystemSettingsPane.microphone`.
+- `AccessibilityPermission.swift` — `AXIsProcessTrustedWithOptions` + delegates to `SystemSettingsPane.accessibility`.
 - `ScreenRecordingPermission.swift` — **optional**; gates the OCR fallback (`NoType/Context/ScreenCapture/`).
 - `PermissionsViewModel.swift` — `@MainActor @Observable` aggregate.
 
