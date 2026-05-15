@@ -16,7 +16,7 @@ User holds **Right Option** anywhere in macOS → NoType starts recording from t
 
 | Layer | Choice |
 |---|---|
-| Min macOS | **14 (Sonoma)** |
+| Min macOS | **15 (Sequoia)** |
 | Language | Swift 6, strict concurrency |
 | UI | SwiftUI (`MenuBarExtra` + `Popover`) |
 | Architecture | MVVM with `@Observable`; `actor` for shared state |

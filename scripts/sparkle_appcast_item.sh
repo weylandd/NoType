@@ -37,7 +37,7 @@ OUTPUT_APPCAST="docs/appcast.xml"
 DOWNLOAD_URL_BASE="https://github.com/weylandd/NoType/releases/download"
 # Defaults to the current MACOSX_DEPLOYMENT_TARGET (see ADR-001).
 # Pass --minimum-system-version to override.
-MIN_SYSTEM_VERSION="14.0"
+MIN_SYSTEM_VERSION="15.0"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

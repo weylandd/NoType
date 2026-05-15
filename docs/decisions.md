@@ -6,24 +6,15 @@ Format: short, blunt, with the alternative considered.
 
 ---
 
-## ADR-001 — macOS 14 (Sonoma) minimum
+## ADR-001 — macOS 15 (Sequoia) minimum
 
-**Decision:** NoType requires macOS 14 (Sonoma) or later. The supported floor covers the two most recent macOS releases prior to the current one (14 Sonoma + 15 Sequoia + 26 Tahoe).
+**Decision:** NoType requires macOS 15 (Sequoia) or later.
 
-**Why:** A full audit of every native Apple API the project actually calls (Accessibility, ScreenCaptureKit, Vision, NaturalLanguage, AVFoundation, CoreML, CGEvent, AppKit, Security, SwiftUI) shows the **real** technical floor is macOS 14 — driven by:
-- `@Observable` + `@Environment(Type.self)` + `@Bindable` (the Observation framework, macOS 14.0+) — used in `AppState`, `AppearanceController`, `AudioDeviceManager`, `UpdateController`, `PermissionsViewModel`, `OnboardingState`.
-- `ScreenCaptureKit` (macOS 14.0+) — used by the optional OCR fallback (ADR-014). Permission-gated at runtime, but linking against the framework still requires the SDK floor.
+**Why:** The real technical floor is `Scene.defaultLaunchBehavior(_:)` (macOS 15+, used in `NoTypeApp.swift` to force-present the main window on a fresh install while the onboarding wizard is pending — the `MenuBarExtra` is suppressed during onboarding by design, so without this modifier the user sees no UI at all on first launch). Other 14+ APIs in active use: `@Observable` + `@Environment(Type.self)` + `@Bindable` (Observation framework, 14.0+) and `ScreenCaptureKit` (14.0+, ADR-014). New APIs above 15 should be `@available`-gated rather than forcing the floor up.
 
-Everything else (`MenuBarExtra`, `Window`/`openWindow`, `windowResizability`, `Layout` protocol, `TimelineView`, `task`, AX APIs, `CGEventTap`, Sparkle 2.9, Vision OCR including `automaticallyDetectsLanguage`, etc.) is available on macOS 13 or earlier. There are **no** macOS 15+ or 26+ APIs in the codebase. We previously kept `Scene.defaultLaunchBehavior(_:)` (macOS 15+) in `NoTypeApp.swift`, but it duplicated a fallback already present in `MenuBarIcon`'s `.task` (which calls `openWindow(id: "main")` while onboarding is pending), so we removed it.
+**History (don't repeat this mistake):** PR #7 dropped the floor from macOS 26 to 14, claiming the API audit showed nothing above 14 was needed. The audit missed `Scene.defaultLaunchBehavior(_:)` — it had been removed in the same PR with a "fallback exists in `MenuBarIcon`'s `.task`" justification, but no such `.task` existed in the codebase, and the `MenuBarExtra` is suppressed during onboarding anyway so a view-layer hook couldn't help. The result was that fresh installs on **every** supported macOS surfaced no UI on first launch — process alive, no menu-bar icon (gated), no main window (`SwiftUI.Window` creates its `NSWindow` lazily, never triggered). v0.1.4 shipped with this regression; floor bumped to 15 to fix it cleanly via the modifier that was already designed for this case.
 
-**Why not 26 (previous minimum):** The original ADR justified 26 on the basis of "modern SwiftUI APIs (`MenuBarExtra`, `@Observable`)". That reasoning was overstated — `MenuBarExtra` is macOS 13+ and `@Observable` is macOS 14+, neither requires 26. Holding the floor at 26 was costing us essentially the entire macOS 14–15 audience (~95 % of active Macs) with no technical justification, since we use zero macOS 26-only APIs.
-
-**Alternatives considered:**
-- **macOS 13 (Ventura).** Rejected — would require replacing `@Observable` with `ObservableObject` + `@Published` across 6 files (and migrating every `@Environment(Type.self)` to `@EnvironmentObject` with knock-on rewrites at every callsite), plus wrapping the entire ScreenCaptureKit OCR fallback in `@available(macOS 14, *)`. Real code churn for marginal additional reach.
-- **macOS 15 (Sequoia).** Rejected as too conservative — would skip the Sonoma audience without any technical gain. Sonoma users can run `@Observable` and ScreenCaptureKit just fine.
-- **macOS 26 (status quo).** Rejected as documented above.
-
-**Policy going forward:** track a "current major + two previous majors" support window. When macOS 27 ships, the floor moves to 15. When macOS 28 ships, to 16. Any change requiring a newer API should be gated with `@available` rather than forcing the floor up early.
+**Alternatives:** macOS 14 with WindowGroup-instead-of-Window — works but breaks the menu-bar-utility behaviour (window auto-opens on every launch, state restoration may open multiples). macOS 14 with AppKit `NSHostingController` + raw `NSWindow` — large refactor for a small Sonoma audience.
 
 ---
 
