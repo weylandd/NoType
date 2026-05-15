@@ -249,18 +249,18 @@ struct InsertionTarget: Sendable, Equatable {
         // Refuse to read password fields outright — mirrors the
         // SecureFieldMasker skip rule used by the AX walker. The
         // focused-field path must never be a way around that guarantee.
-        if let role = stringAttr(element, kAXRoleAttribute as String),
+        if let role = AXAttr.string(element, kAXRoleAttribute as String),
            role == "AXSecureTextField" {
             log.info("ax capture: focused element is AXSecureTextField, skipping")
             return .empty
         }
-        if let subrole = stringAttr(element, kAXSubroleAttribute as String),
+        if let subrole = AXAttr.string(element, kAXSubroleAttribute as String),
            subrole == "AXSecureTextField" {
             log.info("ax capture: focused subrole is AXSecureTextField, skipping")
             return .empty
         }
 
-        let role = stringAttr(element, kAXRoleAttribute as String) ?? "?"
+        let role = AXAttr.string(element, kAXRoleAttribute as String) ?? "?"
 
         // Terminal emulators (Ghostty, iTerm, Apple Terminal, Warp, kitty,
         // alacritty, hyper, wezterm) expose their visible scrollback as the
@@ -277,7 +277,7 @@ struct InsertionTarget: Sendable, Equatable {
             return .empty
         }
 
-        guard let value = stringAttr(element, kAXValueAttribute as String) else {
+        guard let value = AXAttr.string(element, kAXValueAttribute as String) else {
             // Many Electron / web-view text fields don't expose AXValue.
             // Without `value` we can't slice — but we can still
             // distinguish "field is empty" from "field has content we
@@ -480,13 +480,6 @@ struct InsertionTarget: Sendable, Equatable {
         let textAfter  = SecureFieldMasker.scrubContent(rawAfter)
 
         return InsertionTarget(textBefore: textBefore, textAfter: textAfter, isKnown: true)
-    }
-
-    private static func stringAttr(_ element: AXUIElement, _ key: String) -> String? {
-        var raw: CFTypeRef?
-        let err = AXUIElementCopyAttributeValue(element, key as CFString, &raw)
-        guard err == .success, let raw else { return nil }
-        return raw as? String
     }
 
     /// Read an integer AX attribute (e.g. `kAXNumberOfCharactersAttribute`).

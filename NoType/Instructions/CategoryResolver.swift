@@ -69,10 +69,10 @@ enum CategoryResolver {
         }
         let element = focusedRaw as! AXUIElement
         return FocusedFieldSnapshot(
-            role:       stringAttr(element, kAXRoleAttribute as String),
-            subrole:    stringAttr(element, kAXSubroleAttribute as String),
-            identifier: stringAttr(element, kAXIdentifierAttribute as String),
-            title:      stringAttr(element, kAXTitleAttribute as String)
+            role:       AXAttr.string(element, kAXRoleAttribute as String),
+            subrole:    AXAttr.string(element, kAXSubroleAttribute as String),
+            identifier: AXAttr.string(element, kAXIdentifierAttribute as String),
+            title:      AXAttr.string(element, kAXTitleAttribute as String)
         )
     }
 
@@ -104,10 +104,4 @@ enum CategoryResolver {
         return false
     }
 
-    private static func stringAttr(_ element: AXUIElement, _ key: String) -> String? {
-        var raw: CFTypeRef?
-        let err = AXUIElementCopyAttributeValue(element, key as CFString, &raw)
-        guard err == .success, let raw else { return nil }
-        return raw as? String
-    }
 }
