@@ -12,6 +12,36 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
 
 ---
 
+## [0.1.5] — 2026-05-15
+
+Single-fix release. v0.1.4 fresh installs on every supported macOS
+launched into an invisible process — no menu-bar icon (suppressed
+during onboarding by design), no main window (SwiftUI `Window` is
+lazy without `Scene.defaultLaunchBehavior`). Reported on macOS
+Sequoia 15.0; reproduced via `lsappinfo info -only windows
+app.notype` returning `[ NULL ]` while the process kept running.
+
+### Fixed
+- **Onboarding window auto-opens on first launch again** (#17).
+  PR #7 dropped the floor to macOS 14 and in the same commit
+  removed `Scene.defaultLaunchBehavior(_:)` from `NoTypeApp.swift`
+  on the false premise that `MenuBarIcon`'s `.task` was a fallback.
+  No such `.task` existed (and the `MenuBarExtra` is gated suppressed
+  during onboarding anyway), so every fresh install since the PR #7
+  merge surfaced zero UI on first launch. Modifier restored.
+
+### Changed
+- **Minimum macOS bumped to 15 (Sequoia)** (#17). The fix above
+  requires `Scene.defaultLaunchBehavior(_:)`, which is macOS 15+
+  only. `@SceneBuilder` doesn't support `if #available`, so the
+  modifier can't be conditionally applied — the floor moves up.
+  ADR-001 rewritten with the new floor + a history paragraph
+  documenting why PR #7's audit was wrong so it doesn't happen
+  again. Sonoma users will stay on 0.1.4 (which is broken there
+  too — same regression as everywhere else).
+
+---
+
 ## [0.1.4] — 2026-05-14
 
 First release of the macOS 14+ era. NoType now installs and runs
@@ -193,7 +223,8 @@ banner.
 
 Internal pre-public release.
 
-[Unreleased]: https://github.com/weylandd/NoType/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/weylandd/NoType/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/weylandd/NoType/releases/tag/v0.1.5
 [0.1.4]: https://github.com/weylandd/NoType/releases/tag/v0.1.4
 [0.1.4-rc1]: https://github.com/weylandd/NoType/releases/tag/v0.1.4-rc1
 [0.1.3]: https://github.com/weylandd/NoType/releases/tag/v0.1.3
