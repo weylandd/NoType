@@ -1,5 +1,9 @@
 # Architecture Decision Records
 
+> **Migration in progress.** Per the compound-engineering framework, decisions / rationale / rejected alternatives belong in **per-decision files** under `docs/solutions/<category>/`, not in this monolith. ADRs that have moved link to their new home below; the rest still live in this file and will be migrated PR-by-PR.
+>
+> **Adding a new decision?** Skip this file — write directly into `docs/solutions/<category>/<slug>-<YYYY-MM-DD>.md` using the knowledge-track shape (`## Context → ## Guidance → ## Why This Matters → ## When to Apply → ## Examples → ## Related`). See `docs/solutions/README.md` for the frontmatter contract and category list.
+
 These are the load-bearing decisions for NoType. **Do not relitigate without explicit discussion.** If you think one of these is wrong, open an issue first.
 
 Format: short, blunt, with the alternative considered.
@@ -8,13 +12,7 @@ Format: short, blunt, with the alternative considered.
 
 ## ADR-001 — macOS 15 (Sequoia) minimum
 
-**Decision:** NoType requires macOS 15 (Sequoia) or later.
-
-**Why:** The real technical floor is `Scene.defaultLaunchBehavior(_:)` (macOS 15+, used in `NoTypeApp.swift` to force-present the main window on a fresh install while the onboarding wizard is pending — the `MenuBarExtra` is suppressed during onboarding by design, so without this modifier the user sees no UI at all on first launch). Other 14+ APIs in active use: `@Observable` + `@Environment(Type.self)` + `@Bindable` (Observation framework, 14.0+) and `ScreenCaptureKit` (14.0+, ADR-014). New APIs above 15 should be `@available`-gated rather than forcing the floor up.
-
-**History (don't repeat this mistake):** PR #7 dropped the floor from macOS 26 to 14, claiming the API audit showed nothing above 14 was needed. The audit missed `Scene.defaultLaunchBehavior(_:)` — it had been removed in the same PR with a "fallback exists in `MenuBarIcon`'s `.task`" justification, but no such `.task` existed in the codebase, and the `MenuBarExtra` is suppressed during onboarding anyway so a view-layer hook couldn't help. The result was that fresh installs on **every** supported macOS surfaced no UI on first launch — process alive, no menu-bar icon (gated), no main window (`SwiftUI.Window` creates its `NSWindow` lazily, never triggered). v0.1.4 shipped with this regression; floor bumped to 15 to fix it cleanly via the modifier that was already designed for this case.
-
-**Alternatives:** macOS 14 with WindowGroup-instead-of-Window — works but breaks the menu-bar-utility behaviour (window auto-opens on every launch, state restoration may open multiples). macOS 14 with AppKit `NSHostingController` + raw `NSWindow` — large refactor for a small Sonoma audience.
+**Migrated to:** [`solutions/tooling-decisions/macos-15-deployment-target-2026-05-15.md`](solutions/tooling-decisions/macos-15-deployment-target-2026-05-15.md)
 
 ---
 
