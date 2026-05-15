@@ -18,116 +18,49 @@ Format: short, blunt, with the alternative considered.
 
 ## ADR-002 — Silero VAD instead of Apple SpeechDetector
 
-**Decision:** Use Silero VAD via CoreML for pause detection. Do not use Apple's `SpeechDetector`.
-
-**Why:** Apple's `SpeechDetector` is acoustically locale-free in its own initializer, but it cannot run standalone — Apple explicitly requires it be paired with a transcriber module in the same `SpeechAnalyzer`. The only available transcriber, `SpeechTranscriber`, is `LocaleDependentSpeechModule` and requires a locale from `SpeechTranscriber.supportedLocales` (~38 locales). Plus:
-- Language model assets must be downloaded via `AssetInventory` — another failure mode.
-- As of macOS 26.0/26.1 SDK, `SpeechDetector` doesn't formally conform to `SpeechModule`, requiring `as!` workarounds (Apple Forums threads 794510, 797544).
-- `SpeechDetector.results` stream has been observed to silently not emit events in some configurations.
-
-Silero VAD:
-- Trained on 6000+ languages, language-agnostic (matches NoType's "any language Gemini supports" stance).
-- Differentiates speech from music/noise (ML model, not amplitude threshold).
-- ~2 MB model, ~1–2 ms per 256 ms window on Apple Silicon (unified-256 ms variant).
-- MIT-licensed, mature, broadly used in production.
-
-**Alternatives considered:**
-- **RMS-energy VAD** — rejected. Cannot distinguish speech from music or sustained background noise (café, open office); would falsely classify ambient sound as voice and never detect pauses.
-- **Apple SpeechDetector + transcriber for VAD only** — rejected as above (locale lock-in, asset download, SDK bugs).
+**Migrated to:** [`solutions/tooling-decisions/silero-vad-coreml-2026-05-15.md`](solutions/tooling-decisions/silero-vad-coreml-2026-05-15.md)
 
 ---
 
 ## ADR-003 — Gemini 3.1 Flash-Lite
 
-**Decision:** Transcription is done by Gemini 3.1 Flash-Lite (model ID `gemini-3.1-flash-lite`, post-GA).
-
-**Why:**
-- Multimodal: accepts audio directly, no separate ASR pipeline.
-- Cheap: $0.25/1M input tokens, $1.50/1M output. Audio = 25 tokens/sec.
-- Supports thinking levels — we use `minimal` for transcription latency.
-- Implicit caching gives ~90% discount on cached prefix tokens automatically.
-- Context window is 1M tokens — far more than we need.
-
-**Alternatives considered:**
-- **Whisper (local)** — rejected. We need the AX-tree-context-aware reformatting that an LLM provides; Whisper is just transcription. Also, we explicitly accept the internet dependency.
-- **Gemini 3 Flash** — overkill. We don't need its reasoning power for dictation; cost would be ~3× higher.
-- **OpenAI Realtime API** — viable alternative; revisit if Gemini quality disappoints. Higher cost.
+**Migrated to:** [`solutions/tooling-decisions/gemini-3-1-flash-lite-2026-05-15.md`](solutions/tooling-decisions/gemini-3-1-flash-lite-2026-05-15.md)
 
 ---
 
 ## ADR-004 — Clipboard-based paste (not AX text injection)
 
-**Decision:** To inject text at the cursor, copy to `NSPasteboard.general`, synthesize ⌘V via `CGEvent`, then restore the prior clipboard contents after a delay.
-
-**Why:** Universal compatibility. AX-based text setting (`AXValue`) doesn't work on many apps (Electron, Terminal, native NSText views with custom field editors). `CGEvent.keyboardEventSource` typing every character is too slow and visible. Clipboard + ⌘V is what Wispr Flow uses, and it works everywhere ⌘V works.
-
-**Trade-off accepted:** Brief clipboard pollution. Mitigated by save/restore around the paste.
-
-**Alternatives considered:**
-- **AX text injection** — rejected (compatibility).
-- **Synthetic key events for each character** — rejected (slow, breaks IME, autocorrect interference).
+**Migrated to:** [`solutions/architecture-patterns/clipboard-cmd-v-paste-2026-05-15.md`](solutions/architecture-patterns/clipboard-cmd-v-paste-2026-05-15.md)
 
 ---
 
 ## ADR-005 — Right Option as default hotkey, via CGEventTap
 
-**Decision:** Default push-to-talk binding is **Right Option**. Detection is via `CGEventTap` on `flagsChanged` events, distinguishing left vs. right Option by the per-side modifier bit in `event.flags.rawValue` (right = `0x40`, left = `0x20` — the IOKit `NX_DEVICER*ALTKEYMASK` bits).
-
-**Why:** Modifier-only hotkeys cannot be reliably caught with `NSEvent.addGlobalMonitorForEvents`. `CGEventTap` is the only stable mechanism. Right Option is rarely bound and unobtrusive.
-
-**Trade-off accepted:** Right Option is used by macOS to type special characters (e.g. `™`, `©`). When held for push-to-talk, those keystrokes are suppressed during the press. Acceptable — users who rely on these characters can rebind (post-v1).
-
-**Alternatives considered:**
-- **Custom keyboard shortcut (e.g. ⌃⇧Space)** — viable, but worse UX (two-hand combo). Will be made configurable post-v1.
-- **`NSEvent` global monitor** — rejected (does not reliably emit for modifier-only).
+**Migrated to:** [`solutions/design-patterns/right-option-cgeventtap-2026-05-15.md`](solutions/design-patterns/right-option-cgeventtap-2026-05-15.md)
 
 ---
 
 ## ADR-006 — One Gemini request in flight at a time
 
-**Decision:** `GeminiClient` is a serial actor. At most one `generateContent` request is outstanding at any moment within a session. New chunk boundaries that fire during a request queue behind it.
-
-**Why:**
-- Eliminates response ordering bugs.
-- Keeps the implicit-cache prefix deterministic — chunk N's prefix is exactly chunk_1...chunk_{N-1} transcripts. With concurrent requests, chunk 3 might race chunk 2 and miss the cache hit.
-- Simplifies error handling — there is always exactly one in-flight thing to cancel.
-
-**Trade-off accepted:** Worst-case latency on the final chunk equals (round-trip of last in-flight chunk) + (round-trip of final chunk). Measured in practice this is fine; if it becomes a complaint, revisit with streaming.
+**Migrated to:** [`solutions/architecture-patterns/serial-gemini-actor-2026-05-15.md`](solutions/architecture-patterns/serial-gemini-actor-2026-05-15.md)
 
 ---
 
 ## ADR-007 — No streaming responses from Gemini in v1
 
-**Decision:** We use `generateContent`, not `streamGenerateContent`. We wait for full responses.
-
-**Why:** The latency win from streaming would be on intermediate chunks — but we don't display intermediate transcripts to the user (they only see the menu-bar timer). The final chunk *is* user-visible latency, and streaming there would help by ~100-300 ms, but it adds complexity (mid-response reconciliation, partial-paste UX, etc.). Not worth it for v1.
-
-**Reconsider when:** users complain about perceived latency between releasing the hotkey and seeing pasted text.
+**Migrated to:** [`solutions/design-patterns/no-streaming-gemini-2026-05-15.md`](solutions/design-patterns/no-streaming-gemini-2026-05-15.md)
 
 ---
 
 ## ADR-008 — Local concatenation of chunk transcripts
 
-**Decision:** Each Gemini call returns only the text for the current chunk. The full transcript is assembled client-side as `chunk_1.text + chunk_2.text + … + chunk_N.text`.
-
-**Why:** Asking the model to re-emit the full transcript on every chunk would inflate output tokens (which are 6× the price of input tokens) and defeat the caching strategy. The model is told via prompt that prior chunks are "already transcribed" and shown their text in the prefix — it only needs to produce the new chunk's text.
-
-**Trade-off accepted:** Slight risk of seam artifacts at chunk boundaries (capitalization, punctuation). The system prompt instructs the model to handle these consistently. We may need to tune the prompt to reduce seams; that's prompt work, not architecture.
+**Migrated to:** [`solutions/design-patterns/local-chunk-concatenation-2026-05-15.md`](solutions/design-patterns/local-chunk-concatenation-2026-05-15.md)
 
 ---
 
 ## ADR-009 — Full-screen accessibility tree, not just focused window
 
-**Decision:** When building the context snapshot, walk the accessibility tree of **all on-screen windows** (across all running apps), not just the focused window.
-
-**Why:** Richer context for Gemini — names of people in the chat sidebar, the document open next to the email, the issue tracker title, etc. — meaningfully improves transcription of names, jargon, and proper nouns.
-
-**Trade-off accepted:**
-- Larger payload (~5–15K tokens vs. ~1–3K for focused window only).
-- Stricter requirement on `SecureFieldMasker` — secure fields can be in any window, not just the one being typed into.
-- Slight increase in per-session cost — recovered by caching after chunk 1.
-
-**Alternative considered:** Focused window only. Smaller, simpler, but loses cross-window context that's valuable for natural-language dictation.
+**Migrated to:** [`solutions/design-patterns/full-screen-ax-tree-2026-05-15.md`](solutions/design-patterns/full-screen-ax-tree-2026-05-15.md)
 
 ---
 
