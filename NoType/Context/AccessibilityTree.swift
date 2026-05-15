@@ -162,13 +162,13 @@ enum AccessibilityTree {
             if let minimized: Bool = boolAttribute(of: window, key: kAXMinimizedAttribute as String), minimized {
                 continue
             }
-            let title: String? = stringAttribute(of: window, key: kAXTitleAttribute as String)
+            let title: String? = AXAttr.stringDescribing(window,kAXTitleAttribute as String)
 
             var lines: [String] = []
             walk(
                 node: window,
                 depth: 0,
-                parentRole: stringAttribute(of: window, key: kAXRoleAttribute as String),
+                parentRole: AXAttr.stringDescribing(window,kAXRoleAttribute as String),
                 parentTitle: title,
                 lines: &lines,
                 budget: &nodesRemaining
@@ -197,12 +197,12 @@ enum AccessibilityTree {
         // deadline fires.
         if Task.isCancelled { return }
 
-        let role: String?            = stringAttribute(of: node, key: kAXRoleAttribute as String)
-        let subrole: String?         = stringAttribute(of: node, key: kAXSubroleAttribute as String)
-        let roleDescription: String? = stringAttribute(of: node, key: kAXRoleDescriptionAttribute as String)
-        let title: String?           = stringAttribute(of: node, key: kAXTitleAttribute as String)
-        let identifier: String?      = stringAttribute(of: node, key: kAXIdentifierAttribute as String)
-        let rawValue: String?        = stringAttribute(of: node, key: kAXValueAttribute as String)
+        let role: String?            = AXAttr.stringDescribing(node,kAXRoleAttribute as String)
+        let subrole: String?         = AXAttr.stringDescribing(node,kAXSubroleAttribute as String)
+        let roleDescription: String? = AXAttr.stringDescribing(node,kAXRoleDescriptionAttribute as String)
+        let title: String?           = AXAttr.stringDescribing(node,kAXTitleAttribute as String)
+        let identifier: String?      = AXAttr.stringDescribing(node,kAXIdentifierAttribute as String)
+        let rawValue: String?        = AXAttr.stringDescribing(node,kAXValueAttribute as String)
 
         // Skip the window root itself in the dump — its title is already on
         // the `Window:` header line.
@@ -307,17 +307,11 @@ enum AccessibilityTree {
     }
 
     // MARK: - AX attribute helpers
-
-    private static func stringAttribute(of element: AXUIElement, key: String) -> String? {
-        var raw: CFTypeRef?
-        let err = AXUIElementCopyAttributeValue(element, key as CFString, &raw)
-        guard err == .success, let raw else { return nil }
-        if let s = raw as? String { return s }
-        // AXValue or NSNumber etc. — describe as a fallback so we still get
-        // something useful (e.g. `1` for numeric value attributes).
-        if let n = raw as? NSNumber { return n.stringValue }
-        return nil
-    }
+    //
+    // String helpers (string / stringDescribing) live in
+    // `NoType/Context/AXAttr.swift` — shared with `CategoryResolver`
+    // and `ContextSnapshot`. The bool / array helpers below are
+    // walker-specific and stay here.
 
     private static func boolAttribute(of element: AXUIElement, key: String) -> Bool? {
         var raw: CFTypeRef?
