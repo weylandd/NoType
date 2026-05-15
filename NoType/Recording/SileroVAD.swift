@@ -120,8 +120,13 @@ actor SileroVAD {
             audioPtr[i] = carriedContext[i]
         }
         samples.withUnsafeBufferPointer { src in
+            // `baseAddress` is non-nil for any non-empty buffer; `samples`
+            // is `Self.chunkSize` elements per the caller's contract.
+            // The guard documents the invariant and makes the path safe
+            // under a future refactor that loosens it.
+            guard let base = src.baseAddress else { return }
             audioPtr.advanced(by: Self.contextSize)
-                .update(from: src.baseAddress!, count: Self.chunkSize)
+                .update(from: base, count: Self.chunkSize)
         }
 
         let input = try MLDictionaryFeatureProvider(dictionary: [

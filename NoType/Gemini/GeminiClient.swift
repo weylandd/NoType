@@ -15,6 +15,11 @@ actor GeminiClient {
     private static let modelID = "gemini-3.1-flash-lite"
     private static let endpoint = "https://generativelanguage.googleapis.com/v1beta/models"
 
+    /// File-scope `URL` for the models-listing endpoint. Used by
+    /// `validateKey(_:)`. Force-unwrap is a documented exception — the
+    /// base URL is a compile-time literal, malformed → programming error.
+    private static let modelsListURL = URL(string: endpoint)!
+
     enum GeminiError: Error, LocalizedError {
         case missingKey
         case http(status: Int, body: String)
@@ -206,7 +211,7 @@ actor GeminiClient {
         let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw GeminiError.missingKey }
 
-        var req = URLRequest(url: URL(string: Self.endpoint)!)
+        var req = URLRequest(url: Self.modelsListURL)
         req.httpMethod = "GET"
         req.timeoutInterval = 10
         req.setValue(trimmed, forHTTPHeaderField: "x-goog-api-key")
@@ -312,7 +317,10 @@ actor GeminiClient {
         precondition(audios.count == chunkIndices.count, "audios / indices mismatch")
         precondition(audios.count > 1, "use transcribe(audio:...) for single chunks")
         let instruction = Self.batchedChunkInstruction(indices: chunkIndices, isFinal: isFinal)
-        let logID = "chunks_\(chunkIndices.first!)..\(chunkIndices.last!)"
+        // `chunkIndices.count > 1` per precondition above — the `?? -1`
+        // fallbacks exist purely so the log line can't crash on a future
+        // refactor that loosens that contract.
+        let logID = "chunks_\(chunkIndices.first ?? -1)..\(chunkIndices.last ?? -1)"
         return try await sendRequest(
             audios: audios,
             context: context,

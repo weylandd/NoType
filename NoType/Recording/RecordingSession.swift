@@ -588,7 +588,7 @@ final class RecordingSession {
                     apiKey: snap.apiKey
                 )
             } else {
-                Self.log.info("batching \(encoded.count) chunks (\(encoded.first!.idx)..\(encoded.last!.idx)) final=\(containsFinal)")
+                Self.log.info("batching \(encoded.count) chunks (\(encoded.first?.idx ?? -1)..\(encoded.last?.idx ?? -1)) final=\(containsFinal)")
                 text = try await gemini.transcribeBatch(
                     audios: encoded.map { ($0.audio, "audio/mp4") },
                     context: snap.context,
@@ -612,7 +612,7 @@ final class RecordingSession {
         } catch {
             let label = encoded.count == 1
                 ? "chunk_\(encoded[0].idx)"
-                : "chunks_\(encoded.first!.idx)..\(encoded.last!.idx)"
+                : "chunks_\(encoded.first?.idx ?? -1)..\(encoded.last?.idx ?? -1)"
             Self.log.error("\(label) failed: \(error.localizedDescription, privacy: .public)")
             markFailure(error)
         }
