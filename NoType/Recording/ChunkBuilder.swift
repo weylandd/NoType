@@ -77,7 +77,12 @@ enum ChunkBuilder {
                 throw ChunkError.bufferAlloc
             }
             pcm.withUnsafeBufferPointer { src in
-                dst.update(from: src.baseAddress!, count: pcm.count)
+                // `baseAddress` is non-nil for any non-empty buffer; `pcm`
+                // is non-empty here (caller asserts ≥ 150 ms of samples).
+                // The guard documents the invariant and makes the path
+                // safe under a future refactor that loosens it.
+                guard let base = src.baseAddress else { return }
+                dst.update(from: base, count: pcm.count)
             }
 
             do {
