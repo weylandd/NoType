@@ -36,7 +36,8 @@ External SPM dependencies: **Sparkle 2** (auto-updates, see ADR-017 and `NoType/
 
 Read these in order when onboarding:
 
-- **@docs/architecture.md** — data flow diagram, sequence of one push-to-talk session, the cache-hit invariant.
+- **@docs/architecture/overview.md** — current-state snapshot (Mermaid data flow, module table, external integrations, threading model, invariants). Regenerate when drift appears, don't hand-edit for accuracy.
+- **@docs/architecture.md** — short index pointing at `architecture/overview.md` and the solutions store.
 - **@docs/decisions.md** — index of architecture decisions → per-decision files in `docs/solutions/`.
 - **@docs/conventions.md** — index of coding conventions → per-topic files in `docs/solutions/conventions/`.
 - **@docs/permissions.md** — required macOS permissions and onboarding flow.
