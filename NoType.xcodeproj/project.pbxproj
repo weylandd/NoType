@@ -89,6 +89,7 @@
 		CBF99B9484CEFA3BF8D060DC /* ScreenCaptureController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A010954B384540895ED8A6C0 /* ScreenCaptureController.swift */; };
 		CE28C7E9E21F7B52720C7648 /* PasteSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47154B6F331890C96DC4D118 /* PasteSettings.swift */; };
 		CEB4CDF40ABD4723539BF0B7 /* DesignTokens.swift in Sources */ = {isa = PBXBuildFile; fileRef = 791C1C8EDAC2599EA26456B5 /* DesignTokens.swift */; };
+		CF4FB82AE92685D1DD66A140 /* SystemSettingsPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9C9C5B22F1AB85A6765F910 /* SystemSettingsPane.swift */; };
 		D1408E25430A0E7020FE2CA1 /* StatsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B25C98EF83C699AF39731E7 /* StatsStore.swift */; };
 		D744B5F348C388C2CD5BD9E4 /* AudioSpectrum.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4E4B5E00C8DB6543B55825D /* AudioSpectrum.swift */; };
 		D8AC159F2AA736FD53516E42 /* AppearanceController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DBB46A82B340AA1A49A6923 /* AppearanceController.swift */; };
@@ -183,6 +184,7 @@
 		A0574BE73D6110C3D8FE8794 /* PasteboardSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasteboardSnapshot.swift; sourceTree = "<group>"; };
 		A0C8D42A3F9EB438B0D1EA2F /* UpdateBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateBanner.swift; sourceTree = "<group>"; };
 		A7C63BFE2471C89B7CA5960E /* PauseDetectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PauseDetectorTests.swift; sourceTree = "<group>"; };
+		A9C9C5B22F1AB85A6765F910 /* SystemSettingsPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemSettingsPane.swift; sourceTree = "<group>"; };
 		ACD3E7A6A4853D35D6422A1C /* AppIconCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppIconCache.swift; sourceTree = "<group>"; };
 		AE41B20F58A7DCFDBEFCBD86 /* HistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryStore.swift; sourceTree = "<group>"; };
 		B4931935034B10B8DE95A5B7 /* AudioDeviceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioDeviceManager.swift; sourceTree = "<group>"; };
@@ -251,6 +253,7 @@
 				467C43FEBD5D7C433CF08838 /* PermissionStatus.swift */,
 				4A17B31D07203EABD873911B /* PermissionsViewModel.swift */,
 				9C206C21C4A68543841DEFDD /* ScreenRecordingPermission.swift */,
+				A9C9C5B22F1AB85A6765F910 /* SystemSettingsPane.swift */,
 			);
 			path = Permissions;
 			sourceTree = "<group>";
@@ -676,6 +679,7 @@
 				12C7C8B6FC41A210D9391FB9 /* SettingsView.swift in Sources */,
 				4640032E8C9EDE6729F49FFD /* SileroVAD.swift in Sources */,
 				D1408E25430A0E7020FE2CA1 /* StatsStore.swift in Sources */,
+				CF4FB82AE92685D1DD66A140 /* SystemSettingsPane.swift in Sources */,
 				35B420BDBA4A559C00E9B857 /* TextInjector.swift in Sources */,
 				303E98F84E276A287506E159 /* TextRecognizer.swift in Sources */,
 				E20654C65BC11A56C0A0D68E /* TextReplacementEngine.swift in Sources */,
