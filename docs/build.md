@@ -3,8 +3,8 @@
 ## Local development
 
 Requirements:
-- macOS 14 (Sonoma) or later (deployment target — see ADR-001).
-- Xcode 26 or later (needed for the macOS 26 SDK we link against; the resulting binary still runs on 14+).
+- macOS 15 (Sequoia) or later (deployment target — see ADR-001).
+- Xcode 26 or later (needed for the macOS 26 SDK we link against; the resulting binary still runs on 15+).
 - [xcodegen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`). The Xcode project is regenerated from `project.yml` — do not edit `NoType.xcodeproj/project.pbxproj` by hand.
 - A Gemini API key for live testing (free tier is enough for development).
 

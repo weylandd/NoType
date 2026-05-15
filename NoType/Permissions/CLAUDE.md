@@ -11,7 +11,7 @@ Files:
 - `ScreenRecordingPermission.swift` — **optional**, gates the screenshot + OCR fallback in `NoType/Context/ScreenCapture/` (ADR-014).
 - `PermissionsViewModel.swift` — the aggregate observable.
 
-There is **no** `SpeechRecognitionPermission.swift` — NoType uses Silero (CoreML) for VAD, not Apple's speech stack, and `AVAudioEngine` does not trigger that TCC prompt on the supported macOS versions (14+) with our entitlements. The key is not in `Info.plist`. If a future change re-introduces the need, restore the file and the `Info.plist` key together.
+There is **no** `SpeechRecognitionPermission.swift` — NoType uses Silero (CoreML) for VAD, not Apple's speech stack, and `AVAudioEngine` does not trigger that TCC prompt on the supported macOS versions (15+) with our entitlements. The key is not in `Info.plist`. If a future change re-introduces the need, restore the file and the `Info.plist` key together.
 
 Screen Recording is the only permission that is **not** part of `allGranted` / `recordingReady`. Skipping it doesn't prevent recording — it just turns off the OCR limb of the context snapshot. The polling tick (`tick()`) refreshes it alongside the other two; the `needsPolling` predicate keeps polling alive while screenRecording is unresolved even if mic + ax are granted, so the user can grant it later from System Settings and have it picked up without restart.
 
