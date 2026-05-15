@@ -17,7 +17,7 @@ final class PCMRingBufferTests: XCTestCase {
         let r = PCMRingBuffer(capacity: 100)
         XCTAssertEqual(r.head, 0)
         XCTAssertEqual(r.count, 0)
-        XCTAssertEqual(r.tail, 0)
+        XCTAssertEqual(r.totalSamples, 0)
         XCTAssertEqual(r.totalSamples, 0)
         XCTAssertEqual(r.samples(from: 0, to: 0), [])
     }
@@ -27,7 +27,7 @@ final class PCMRingBufferTests: XCTestCase {
         r.append(seq(0, 50))
         XCTAssertEqual(r.head, 0)
         XCTAssertEqual(r.count, 50)
-        XCTAssertEqual(r.tail, 50)
+        XCTAssertEqual(r.totalSamples, 50)
         XCTAssertEqual(r.samples(from: 0, to: 50), seq(0, 50))
         XCTAssertEqual(r.samples(from: 10, to: 20), seq(10, 10))
     }
@@ -71,7 +71,7 @@ final class PCMRingBufferTests: XCTestCase {
 
         XCTAssertEqual(r.head, 30)
         XCTAssertEqual(r.count, 20)
-        XCTAssertEqual(r.tail, 50)
+        XCTAssertEqual(r.totalSamples, 50)
         // The absolute indices 30..<50 still address the same samples.
         XCTAssertEqual(r.samples(from: 30, to: 50), seq(30, 20))
         // Indices below `head` resolve to whatever still overlaps the
@@ -104,7 +104,7 @@ final class PCMRingBufferTests: XCTestCase {
         r.append(seq(8, 6))  // 8+6 = 14 > 10 → drop oldest 4
         XCTAssertEqual(r.head, 4, "head should advance past dropped samples")
         XCTAssertEqual(r.count, 10)
-        XCTAssertEqual(r.tail, 14)
+        XCTAssertEqual(r.totalSamples, 14)
         XCTAssertEqual(r.samples(from: 4, to: 14), seq(4, 10))
     }
 
@@ -114,7 +114,7 @@ final class PCMRingBufferTests: XCTestCase {
         // We expect the trailing 5 samples (indices 12..<17 absolute).
         XCTAssertEqual(r.head, 12)
         XCTAssertEqual(r.count, 5)
-        XCTAssertEqual(r.tail, 17)
+        XCTAssertEqual(r.totalSamples, 17)
         XCTAssertEqual(r.samples(from: 12, to: 17), seq(12, 5))
     }
 
@@ -125,7 +125,7 @@ final class PCMRingBufferTests: XCTestCase {
         r.append(seq(7, 6))  // tail becomes 13. Storage wraps: slots 3..<10 hold 3..<10, slots 0..<3 hold 10..<13.
         XCTAssertEqual(r.head, 3)
         XCTAssertEqual(r.count, 10)
-        XCTAssertEqual(r.tail, 13)
+        XCTAssertEqual(r.totalSamples, 13)
         // Range that straddles the wrap.
         XCTAssertEqual(r.samples(from: 8, to: 13), seq(8, 5))
         // Full retained window.
@@ -162,7 +162,7 @@ final class PCMRingBufferTests: XCTestCase {
         r.reset()
         XCTAssertEqual(r.head, 0)
         XCTAssertEqual(r.count, 0)
-        XCTAssertEqual(r.tail, 0)
+        XCTAssertEqual(r.totalSamples, 0)
         // Round-trip: new session starts fresh from absolute 0.
         r.append(seq(0, 5))
         XCTAssertEqual(r.samples(from: 0, to: 5), seq(0, 5))

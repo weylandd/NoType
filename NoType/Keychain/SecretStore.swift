@@ -29,12 +29,10 @@ enum SecretStore {
 
     enum SecretError: Error, LocalizedError {
         case write(Error)
-        case read(Error)
 
         var errorDescription: String? {
             switch self {
             case .write(let e): "Couldn't save the key: \(e.localizedDescription)"
-            case .read(let e):  "Couldn't read the key: \(e.localizedDescription)"
             }
         }
     }
@@ -52,13 +50,14 @@ enum SecretStore {
         legacyFile.removeIfPresent()
     }
 
-    static func loadGeminiKey() throws -> String? {
+    private static func loadGeminiKey() -> String? {
         do {
             if let kc = try KeychainStore.load() {
                 return kc
             }
         } catch {
-            throw SecretError.read(error)
+            Self.log.error("keychain read failed: \(error.localizedDescription, privacy: .public)")
+            return nil
         }
         // Keychain miss → check the legacy file once. If it has a key,
         // migrate it into the Keychain and clean the file up.
@@ -94,7 +93,7 @@ enum SecretStore {
         if let env = ProcessInfo.processInfo.environment[envVar], !env.isEmpty {
             return env
         }
-        return try? loadGeminiKey()
+        return loadGeminiKey()
     }
 
     // MARK: - Legacy file (one-shot migration)

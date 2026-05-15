@@ -33,11 +33,12 @@ enum KeychainStore {
 
 enum SecretStore {
     static func saveGeminiKey(_ key: String) throws
-    static func loadGeminiKey() throws -> String?
     static func deleteGeminiKey() throws
 
     /// `NOTYPE_GEMINI_KEY` env var wins over Keychain (handy for ephemeral
     /// CI or local-only runs). Never persisted from env into the Keychain.
+    /// Falls back to the Keychain (and, on first launch, the one-shot
+    /// legacy `settings.json` migration) when the env var is unset.
     static func loadFromEnvOrFile() -> String?
 }
 ```
@@ -64,7 +65,7 @@ If you suddenly see Keychain password prompts on launch, check that:
 
 ## Legacy `settings.json` migration
 
-Earlier builds stored the key in `~/Library/Application Support/NoType/settings.json` as a 0600 JSON file (`{"geminiKey": "..."}`). `SecretStore.loadGeminiKey()` performs a one-shot migration on first launch of a Keychain-backed build:
+Earlier builds stored the key in `~/Library/Application Support/NoType/settings.json` as a 0600 JSON file (`{"geminiKey": "..."}`). `SecretStore.loadFromEnvOrFile()` (and the private Keychain read it wraps) performs a one-shot migration on first launch of a Keychain-backed build:
 
 1. Read the Keychain.
 2. If it has a key, return it (legacy file, if any, is left in place — see step 4).

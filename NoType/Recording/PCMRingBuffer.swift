@@ -41,10 +41,12 @@ final class PCMRingBuffer: @unchecked Sendable {
     private(set) var count: Int = 0
 
     /// `[head + count)` — absolute index past the last valid sample.
-    var tail: Int { head + count }
+    /// Private — call sites and tests use `totalSamples` (same value, more
+    /// legible at the read site: "how many samples has this session
+    /// captured so far"). Internal uses still read `tail` for brevity.
+    private var tail: Int { head + count }
 
-    /// Same as `tail` — provided for legibility at call sites that read
-    /// "how many samples has this session captured so far".
+    /// Same as `tail` — the public accessor.
     var totalSamples: Int { tail }
 
     /// Underlying storage. We use `ContiguousArray` for predictable

@@ -4,7 +4,8 @@ Detects the global push-to-talk hotkey. Default binding: **Right Option** (held)
 
 Files:
 - `HotkeyMonitor.swift` — `CGEventTap`, runloop, press/release dispatch.
-- `HotkeyConfig.swift` — placeholder for v2 customization. In v1, hard-coded.
+
+The v1 binding is hard-coded to Right Option inside `HotkeyMonitor`. The "v2 customization" section below sketches the planned `HotkeyConfig` / `HotkeyBinding` shape but those types don't exist yet — introduce them when the feature lands, not earlier.
 
 ---
 

@@ -84,7 +84,7 @@ The protocol `SPUUserDriver` is `@MainActor` in Sparkle 2.6+, so `UpdateUserDriv
 
 The product call (2026-05-12): for v1, automatic daily checks are the only update path. No manual trigger surface in `SettingsView`, no toggle to disable auto-checks. The banner is the only thing the user ever sees; if they ignore it, the next daily check will surface it again. This keeps the UX minimal — like Claude Desktop's update pill — and avoids cluttering Settings with options the v1 audience doesn't need.
 
-`#if DEBUG` exposes `UpdateController.checkNow()` for QA — wire it from a temporary debug menu if you need to force-trigger a check during development. Don't ship a non-debug entry point without a discussion (it would also require a "skip this version" surface, which we don't have).
+If you need to force-trigger a check during QA, add a temporary `#if DEBUG` wrapper around an `updater.checkForUpdates()` call inside `UpdateController`; don't commit it. Don't ship a non-debug entry point without a product discussion — it would also require a "skip this version" surface, which we don't have.
 
 ---
 
