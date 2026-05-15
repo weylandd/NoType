@@ -22,6 +22,43 @@
     <description>NoType release feed for Sparkle 2 auto-updates.</description>
     <language>en</language>
     <item>
+      <title>Version 0.1.5</title>
+      <pubDate>Fri, 15 May 2026 15:55:38 +0000</pubDate>
+      <sparkle:version>7</sparkle:version>
+      <sparkle:shortVersionString>0.1.5</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+Single-fix release. v0.1.4 fresh installs on every supported macOS
+launched into an invisible process — no menu-bar icon (suppressed
+during onboarding by design), no main window (SwiftUI `Window` is
+lazy without `Scene.defaultLaunchBehavior`). Reported on macOS
+Sequoia 15.0; reproduced via `lsappinfo info -only windows
+app.notype` returning `[ NULL ]` while the process kept running.
+
+### Fixed
+- **Onboarding window auto-opens on first launch again** (#17).
+  PR #7 dropped the floor to macOS 14 and in the same commit
+  removed `Scene.defaultLaunchBehavior(_:)` from `NoTypeApp.swift`
+  on the false premise that `MenuBarIcon`'s `.task` was a fallback.
+  No such `.task` existed (and the `MenuBarExtra` is gated suppressed
+  during onboarding anyway), so every fresh install since the PR #7
+  merge surfaced zero UI on first launch. Modifier restored.
+
+### Changed
+- **Minimum macOS bumped to 15 (Sequoia)** (#17). The fix above
+  requires `Scene.defaultLaunchBehavior(_:)`, which is macOS 15+
+  only. `@SceneBuilder` doesn't support `if #available`, so the
+  modifier can't be conditionally applied — the floor moves up.
+  ADR-001 rewritten with the new floor + a history paragraph
+  documenting why PR #7's audit was wrong so it doesn't happen
+  again. Sonoma users will stay on 0.1.4 (which is broken there
+  too — same regression as everywhere else).
+      ]]></description>
+      <enclosure url="https://github.com/weylandd/NoType/releases/download/v0.1.5/NoType-0.1.5.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="GPyWkcM5hY5hJ3IWaT+mToh8nJzvxN69LlowXeydJKEcNWwhhJgSjNozqeMBBkJZTSMX6usZLKusoU596cD/Cg==" length="5971591" />
+    </item>
+    <item>
       <title>Version 0.1.4</title>
       <pubDate>Thu, 14 May 2026 13:27:49 +0000</pubDate>
       <sparkle:version>6</sparkle:version>
