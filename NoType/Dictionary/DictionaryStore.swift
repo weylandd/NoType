@@ -41,32 +41,11 @@ actor DictionaryStore {
     private var cached: DictionarySnapshot?
     private var loaded = false
 
-    private let encoder: JSONEncoder = {
-        let e = JSONEncoder()
-        e.dateEncodingStrategy = .iso8601
-        e.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return e
-    }()
-    private let decoder: JSONDecoder = {
-        let d = JSONDecoder()
-        d.dateDecodingStrategy = .iso8601
-        return d
-    }()
+    private let encoder = JSONFileStorage.makeEncoder()
+    private let decoder = JSONFileStorage.makeDecoder()
 
     init(url: URL? = nil) {
-        if let url {
-            self.url = url
-        } else {
-            let appSupport = (try? FileManager.default.url(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask,
-                appropriateFor: nil,
-                create: true
-            )) ?? FileManager.default.temporaryDirectory
-            let dir = appSupport.appendingPathComponent("NoType", isDirectory: true)
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            self.url = dir.appendingPathComponent("dictionary.json")
-        }
+        self.url = url ?? JSONFileStorage.appSupportURL(filename: "dictionary.json")
     }
 
     // MARK: - Read
@@ -80,20 +59,14 @@ actor DictionaryStore {
     }
 
     private func loadFromDisk() -> DictionarySnapshot {
-        guard
-            FileManager.default.fileExists(atPath: url.path),
-            let data = try? Data(contentsOf: url)
-        else { return .empty }
-
-        do {
-            let envelope = try decoder.decode(Envelope.self, from: data)
-            return envelope.toSnapshot()
-        } catch {
-            let backup = url.appendingPathExtension("corrupt-\(Int(Date().timeIntervalSince1970))")
-            try? FileManager.default.moveItem(at: url, to: backup)
-            Self.log.error("dictionary corrupted, backed up to \(backup.lastPathComponent, privacy: .public) (\(error.localizedDescription, privacy: .public))")
-            return .empty
-        }
+        let envelope: Envelope? = JSONFileStorage.read(
+            from: url,
+            as: Envelope.self,
+            decoder: decoder,
+            log: Self.log,
+            storeName: "dictionary"
+        )
+        return envelope?.toSnapshot() ?? .empty
     }
 
     // MARK: - Entry mutations
@@ -282,12 +255,7 @@ actor DictionaryStore {
     private func write(_ snap: DictionarySnapshot) {
         cached = snap
         let envelope = Envelope(from: snap, version: Self.currentVersion)
-        do {
-            let data = try encoder.encode(envelope)
-            try data.write(to: url, options: [.atomic])
-        } catch {
-            Self.log.error("dictionary write failed: \(error.localizedDescription, privacy: .public)")
-        }
+        JSONFileStorage.write(envelope, to: url, encoder: encoder, log: Self.log, storeName: "dictionary")
     }
 
     // MARK: - Trim helper
