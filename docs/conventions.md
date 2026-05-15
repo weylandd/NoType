@@ -90,8 +90,8 @@ Living rules for NoType's code. Update this file in PRs that change conventions.
 ## SPM dependencies
 
 - Justify new dependencies in the PR description.
-- Currently zero SPM dependencies — the app builds against system frameworks only (`AVFoundation`, `CoreML`, `CoreAudio`, `AppKit`, `SwiftUI`, `Security`).
-- Planned acceptable: `Sparkle` (auto-updates). Maybe `onnxruntime-swift` for Silero fallback if CoreML conversion fidelity becomes a problem — see `NoType/Recording/CLAUDE.md`.
+- Current SPM dependencies: **Sparkle 2** (`from: 2.6.0`) for auto-updates — see ADR-017. Otherwise the app builds against system frameworks only (`AVFoundation`, `CoreML`, `CoreAudio`, `AppKit`, `SwiftUI`, `Security`).
+- Planned acceptable: `onnxruntime-swift` for Silero fallback if CoreML conversion fidelity becomes a problem — see `NoType/Recording/CLAUDE.md`.
 - Avoid: HTTP libraries (we use `URLSession`), JSON libraries (`Codable` is enough), DI containers, reactive frameworks.
 
 ---

@@ -165,9 +165,11 @@ Silero VAD:
 
 ## ADR-013 — No telemetry in v1
 
-**Decision:** Zero telemetry, zero analytics, zero crash reporting in v1.
+**Decision:** Zero telemetry, zero analytics, zero crash reporting in v1. No data about the user or their dictation behavior leaves the device.
 
 **Why:** Open-source, privacy-respecting positioning. Crash reports can be added later as opt-in via Sentry-like service. For now, users report issues on GitHub.
+
+**Local-only carve-out:** `StatsStore` (`~/Library/Application Support/NoType/stats.json`) keeps lifetime aggregates that drive the Home tab — total words, session count, per-day buckets, per-app totals. **It never leaves the device.** No network call ever touches this file. It's derived counts only — no transcripts, no audio, no PII. See `NoType/History/CLAUDE.md` "Lifetime stats" for the schema and `ADR-010` for the related history-store decision.
 
 **Reconsider when:** actual stability complaints arrive that we can't reproduce. Then add opt-in crash reporting only.
 
@@ -220,6 +222,8 @@ The feature is **opt-in via the Screen Recording TCC permission** and has **no s
 2. **`User instruction:` and `Category instruction:` prompt sections** — new optional cache-prefix parts that ship alongside `App: ... / Category:`. User instruction is a free-form textarea (global, applies to every session). Category instruction is per-category and defaults to a developer-supplied prompt, with a Settings-side override per category.
 
 The cached prefix grows from 5 to up to 7 textual parts. The two new sections are conditionally omitted (`User instruction:` when empty, `Category instruction:` when nil — typical for `.uncategorized`); both decisions are frozen at session start and remain stable for every chunk of that session, so implicit caching still hits chunk-to-chunk inside a session.
+
+> **Update (ADR-016):** the personal-dictionary feature added a `User dictionary:` part (always present, body `(empty)` when no entries), shifting the actual cached-prefix shape to **6/7/8** parts. The User-/Category-instruction omission rules described above are unchanged. See ADR-016 and `NoType/Gemini/CLAUDE.md` for the post-dictionary part order.
 
 **Why:**
 - The old `appStyleHints` dictionary covered 8 bundle ids and gave the model exactly one of 5 register hints. It was strictly worse than per-app categorization that adapts behavior per channel (line breaks in email, no terminal punctuation in search, hashtag handling in social) AND lets the user tune both their global style and per-category formatting.
