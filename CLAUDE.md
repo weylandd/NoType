@@ -37,11 +37,12 @@ External SPM dependencies: **Sparkle 2** (auto-updates, see ADR-017 and `NoType/
 Read these in order when onboarding:
 
 - **@docs/architecture.md** — data flow diagram, sequence of one push-to-talk session, the cache-hit invariant.
-- **@docs/decisions.md** — architecture decisions and *why* (do not relitigate without discussion).
-- **@docs/conventions.md** — Swift 6 concurrency rules, logging policy, error model, testing conventions.
+- **@docs/decisions.md** — index of architecture decisions → per-decision files in `docs/solutions/`.
+- **@docs/conventions.md** — index of coding conventions → per-topic files in `docs/solutions/conventions/`.
 - **@docs/permissions.md** — required macOS permissions and onboarding flow.
 - **@docs/build.md** — build, run, test, notarize.
-- **@docs/TECHDEBT.md** — running list of known improvements that aren't shipped yet. Pick from here when you have spare cycles.
+- **@docs/TECHDEBT.md** — index of known improvements → per-item files in `docs/solutions/documentation-gaps/`.
+- **@docs/solutions/** — per-decision / per-learning store (compound-engineering knowledge & bug tracks). See `docs/solutions/README.md`.
 
 Per-module guides (Claude Code auto-loads the relevant one when working in that folder):
 
