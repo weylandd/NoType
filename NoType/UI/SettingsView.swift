@@ -13,6 +13,15 @@ struct SettingsView: View {
     /// Initialised in `.onAppear`, written back via `onChange`.
     @State private var pasteDelayMs: Double = Double(PasteSettings.defaultRestoreDelayMs)
 
+    /// Mirror of `AudioDeviceManager.shared.preferBuiltInOverBluetooth`
+    /// for the toggle control. The default is read from the singleton
+    /// (which itself reads `UserDefaults` at init time) so the Toggle
+    /// renders the correct state on the very first frame — initialising
+    /// to a hardcoded `true` would flicker for users who have opted out.
+    /// `.onChange` writes back through the singleton; `.onAppear` keeps
+    /// the mirror in sync if the singleton was mutated after view init.
+    @State private var btAvoidance: Bool = AudioDeviceManager.shared.preferBuiltInOverBluetooth
+
     var body: some View {
         // Shadow the @Environment value with @Bindable so we can pass
         // `$appearance.mode` into the Picker as a SwiftUI Binding.
@@ -105,6 +114,32 @@ struct SettingsView: View {
                     .foregroundStyle(DS.Color.textTertiary)
             }
 
+            DSSeparator()
+
+            // Bluetooth-input avoidance. When ON and the user hasn't
+            // pinned a device, NoType records from the built-in mic
+            // even if the system default is a BT headset — keeps the
+            // headphones in A2DP (hi-fi, output-only) instead of
+            // forcing macOS into HFP/SCO (telephony codec, ducking
+            // broken). Pinning a BT device in the picker always wins
+            // over this fallback, so power users can still dictate
+            // into the BT mic on purpose.
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle(isOn: $btAvoidance) {
+                    Text("Prefer built-in mic with Bluetooth headphones")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(DS.Color.textSecondary)
+                }
+                .toggleStyle(.switch)
+                .onChange(of: btAvoidance) { _, new in
+                    AudioDeviceManager.shared.preferBuiltInOverBluetooth = new
+                }
+                Text("Avoids switching your headphones to telephony mode (loses ducking, music gets louder, lower audio quality). Pin a Bluetooth mic in the picker to override.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(DS.Color.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             HStack {
                 Spacer()
                 Button("Save") {
@@ -121,6 +156,7 @@ struct SettingsView: View {
             dirty = false
             saveError = nil
             pasteDelayMs = Double(PasteSettings.restoreDelayMs)
+            btAvoidance = AudioDeviceManager.shared.preferBuiltInOverBluetooth
         }
     }
 

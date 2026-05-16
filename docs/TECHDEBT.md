@@ -12,6 +12,8 @@ See `docs/solutions/README.md` for the frontmatter contract and body structure.
 - [SileroVAD CoreML vs ONNX reference test](solutions/documentation-gaps/silero-vad-reference-test-2026-05-15.md) — **M**; no `SileroVADTests.swift`.
 - [AccessibilityTree fixture-driven tests](solutions/documentation-gaps/accessibility-tree-fixture-tests-2026-05-15.md) — **M**; walker has subtle invariants without a regression net.
 - [Settings section for screen-capture fallback](solutions/documentation-gaps/screen-capture-settings-section-2026-05-15.md) — **S**; no in-app way to disable OCR without revoking TCC.
+- [Aggregate-device handling in the BT-input-avoidance policy](solutions/documentation-gaps/bluetooth-aggregate-device-handling-2026-05-16.md) — **M**; aggregate devices wrapping a BT mic bypass the avoidance.
+- [Narrow BT-input avoidance to classic BT once LE Audio is reliably HFP-free](solutions/documentation-gaps/bt-le-audio-airpods-pro-2-narrowing-2026-05-16.md) — **M**; AirPods Pro 2 + LE Audio is in the fallback unnecessarily.
 
 ## Closing an entry
 
