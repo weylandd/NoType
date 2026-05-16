@@ -119,12 +119,15 @@ actor SileroVAD {
         for i in 0..<Self.contextSize {
             audioPtr[i] = carriedContext[i]
         }
-        samples.withUnsafeBufferPointer { src in
-            // `baseAddress` is non-nil for any non-empty buffer; `samples`
-            // is `Self.chunkSize` elements per the caller's contract.
-            // The guard documents the invariant and makes the path safe
-            // under a future refactor that loosens it.
-            guard let base = src.baseAddress else { return }
+        // Throws from inside the closure if `baseAddress` is ever nil
+        // (only reachable if a future refactor loosens the count guard
+        // above). A bare `return` would only escape the closure and
+        // leave the trailing 4096 floats of `audio_input` uninitialised
+        // — CoreML would happily classify garbage as speech.
+        try samples.withUnsafeBufferPointer { src in
+            guard let base = src.baseAddress else {
+                throw VADError.inputShapeMismatch(expected: Self.chunkSize, got: 0)
+            }
             audioPtr.advanced(by: Self.contextSize)
                 .update(from: base, count: Self.chunkSize)
         }

@@ -56,11 +56,15 @@ enum SecretStore {
                 return kc
             }
         } catch {
-            Self.log.error("keychain read failed: \(error.localizedDescription, privacy: .public)")
-            return nil
+            // Don't bail yet — a transient Keychain read failure on a
+            // fresh first-launch (locked keychain, ACL hiccup) must
+            // still fall through to the legacy-file migration. ADR-011
+            // guarantees no re-paste for upgrading users.
+            Self.log.error("keychain read failed, falling through to legacy file: \(error.localizedDescription, privacy: .public)")
         }
-        // Keychain miss → check the legacy file once. If it has a key,
-        // migrate it into the Keychain and clean the file up.
+        // Keychain miss (or transient throw) → check the legacy file
+        // once. If it has a key, migrate it into the Keychain and clean
+        // the file up.
         if let migrated = legacyFile.consumeForMigration() {
             do {
                 try KeychainStore.save(migrated)

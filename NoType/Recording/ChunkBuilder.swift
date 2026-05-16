@@ -76,12 +76,16 @@ enum ChunkBuilder {
             guard let dst = buffer.floatChannelData?[0] else {
                 throw ChunkError.bufferAlloc
             }
-            pcm.withUnsafeBufferPointer { src in
-                // `baseAddress` is non-nil for any non-empty buffer; `pcm`
-                // is non-empty here (caller asserts ≥ 150 ms of samples).
-                // The guard documents the invariant and makes the path
-                // safe under a future refactor that loosens it.
-                guard let base = src.baseAddress else { return }
+            // Throws from inside the closure if `baseAddress` is ever
+            // nil (only reachable if a future refactor lets empty PCM
+            // through the caller's ≥ 150 ms guard). A bare `return`
+            // would only escape the closure and leave `buffer.frameLength
+            // = frames` set against uninitialised memory — `file.write`
+            // would then ship an m4a of silence to Gemini.
+            try pcm.withUnsafeBufferPointer { src in
+                guard let base = src.baseAddress else {
+                    throw ChunkError.bufferAlloc
+                }
                 dst.update(from: base, count: pcm.count)
             }
 
