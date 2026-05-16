@@ -64,6 +64,7 @@
 		92C6EFA50258684603E84877 /* AppCategorizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D749893C072285E1878CDD41 /* AppCategorizer.swift */; };
 		9D488883F836082882A9E4F1 /* InsertionTargetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D624F204BA5E595DA435E35F /* InsertionTargetTests.swift */; };
 		A061BF35363B946A2F739D9B /* HUDController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9FA5AFDC5821D5F1A2B8E52 /* HUDController.swift */; };
+		A5072A54F4D421C5F9CCBE9F /* RecordingSessionPartialRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7C5885A541739566B893CCF /* RecordingSessionPartialRecoveryTests.swift */; };
 		A72C852026675713CB5FC432 /* PCMRingBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 079ADE1E74BB0F977B832D4B /* PCMRingBuffer.swift */; };
 		A8608E980331AC61CFAC31BE /* HistoryEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38B9D623D9D9F7934E636F65 /* HistoryEntry.swift */; };
 		A9F3A76C32704061F568529D /* OnboardingPermissionsStep.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDDC2E31C9C8C874761E6350 /* OnboardingPermissionsStep.swift */; };
@@ -190,6 +191,7 @@
 		ACD3E7A6A4853D35D6422A1C /* AppIconCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppIconCache.swift; sourceTree = "<group>"; };
 		AE41B20F58A7DCFDBEFCBD86 /* HistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryStore.swift; sourceTree = "<group>"; };
 		B4931935034B10B8DE95A5B7 /* AudioDeviceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioDeviceManager.swift; sourceTree = "<group>"; };
+		B7C5885A541739566B893CCF /* RecordingSessionPartialRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingSessionPartialRecoveryTests.swift; sourceTree = "<group>"; };
 		B9FA5AFDC5821D5F1A2B8E52 /* HUDController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HUDController.swift; sourceTree = "<group>"; };
 		BF63CF893691C7C9ED9A4745 /* InstructionsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstructionsStore.swift; sourceTree = "<group>"; };
 		BF64DF751173D1C9DE2854C3 /* AccessibilityPermission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityPermission.swift; sourceTree = "<group>"; };
@@ -440,6 +442,7 @@
 				C35B4CE5FD1FCE754F5BFE87 /* InstructionsStoreTests.swift */,
 				A7C63BFE2471C89B7CA5960E /* PauseDetectorTests.swift */,
 				3DB3A3F97F363A200F24DBC0 /* PCMRingBufferTests.swift */,
+				B7C5885A541739566B893CCF /* RecordingSessionPartialRecoveryTests.swift */,
 				754517E2F911319E11AC0570 /* RecordingSessionShortPathTests.swift */,
 				770E18D42907F91130DCDFBE /* ScreenCaptureContextTests.swift */,
 				CC97BFC72BC891EA30EFB9EB /* SecureFieldMaskerTests.swift */,
@@ -716,6 +719,7 @@
 				CBB0276C6F5B4917D458AFA0 /* InstructionsStoreTests.swift in Sources */,
 				BE4E130977C6AE7B5FC6CE0E /* PCMRingBufferTests.swift in Sources */,
 				5C8B981FF1A1BD6F8C9D456D /* PauseDetectorTests.swift in Sources */,
+				A5072A54F4D421C5F9CCBE9F /* RecordingSessionPartialRecoveryTests.swift in Sources */,
 				C5EE47F24004A2A9CC98854D /* RecordingSessionShortPathTests.swift in Sources */,
 				B33CB5AD3E3E83E924EC8887 /* ScreenCaptureContextTests.swift in Sources */,
 				2CC092759B9C7CF021F676CA /* SecureFieldMaskerTests.swift in Sources */,

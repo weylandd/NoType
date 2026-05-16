@@ -572,6 +572,11 @@ final class AppState {
             guard let self else { return }
             do {
                 let entry = try await session.stop()
+                // Capture the session's outcome summary BEFORE we
+                // potentially drop the reference — used below to
+                // surface a neutral "some parts didn't transcribe"
+                // HUD when the pasted text contains `[…]` markers.
+                let sessionSummary = session.summary
                 // If Escape (or some other path) intervened while we were
                 // awaiting stop(), state/HUD have already been reset and
                 // `currentSession` either is nil or points to a *new*
@@ -584,6 +589,12 @@ final class AppState {
                 }
                 self.recordingState = .idle
                 self.hud.hideTranscribingHUD()
+                if sessionSummary.hasFailures {
+                    Self.log.warning(
+                        "session paste contains \(sessionSummary.failedChunkCount) failure marker(s) of \(sessionSummary.dispatchedChunkCount) chunk(s)"
+                    )
+                    self.surfaceError(.partialTranscription(summary: sessionSummary))
+                }
                 // Fold into lifetime stats — survives the history cap so
                 // the Home tab's totals / top-apps / heatmap keep
                 // accumulating beyond the rolling 10-entry window.
@@ -1046,6 +1057,12 @@ private enum NoTypeErrorKind {
     case vadLoadFailed
     case sessionStartFailed(Error)
     case sessionFailure(Error)
+    /// Session finished and pasted, but one or more chunks' Gemini
+    /// calls failed recoverably and were replaced with the marker
+    /// (`RecordingSession.failureMarker`) in the pasted text. Neutral
+    /// severity — this is a heads-up, not a failure, and the user
+    /// already has most of their transcription.
+    case partialTranscription(summary: RecordingSession.SessionSummary)
 
     var payload: ErrorPayload {
         switch self {
@@ -1077,6 +1094,22 @@ private enum NoTypeErrorKind {
             )
         case .sessionFailure(let err):
             return Self.payloadForSessionFailure(err)
+        case .partialTranscription(let summary):
+            let failed = summary.failedChunkCount
+            let total = summary.dispatchedChunkCount
+            let body: String
+            if failed == 1 {
+                body = "1 of \(total) chunks didn't transcribe — \(RecordingSession.failureMarker) was inserted in its place. Re-dictate just that part if you need it."
+            } else {
+                body = "\(failed) of \(total) chunks didn't transcribe — \(RecordingSession.failureMarker) was inserted in their place. Re-dictate the missing parts if you need them."
+            }
+            return ErrorPayload(
+                title: "Pasted with gaps",
+                description: body,
+                code: "INFO_PARTIAL",
+                severity: .neutral,
+                iconSymbol: "ellipsis.bubble"
+            )
         }
     }
 

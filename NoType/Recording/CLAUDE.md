@@ -25,7 +25,8 @@
 8. **Silero is stateful.** `hiddenState`, `cellState`, and a 64-sample `carriedContext` look-back persist across calls. Reset all three at session start via `vad.reset()`.
 9. **First chunk waits for context snapshot.** Sender `await`s `contextTask.value` before issuing the first Gemini call. Audio capture itself starts immediately on hotkey press.
 10. **`RecordingSession` is a value, not a global.** Created on press, dropped on release. There is no "current session" singleton.
-11. **Lite-path discriminator:** `isFinalBatch && transcripts.isEmpty && totalAudio < 32 000 samples (2.0 s)`. Pure function `shouldUseLitePath`, pinned by `RecordingSessionShortPathTests`.
+11. **Lite-path discriminator:** `isFinalBatch && currentPriors().isEmpty && totalAudio < 32 000 samples (2.0 s)`. Pure function `shouldUseLitePath`, pinned by `RecordingSessionShortPathTests`. `currentPriors()` returns only chunks whose Gemini call succeeded — recoverable failures (markers) don't disqualify the lite path because the prior section would render `(none yet)` either way.
+12. **Partial recovery.** A recoverable Gemini failure on one chunk (network blip, 5xx, decoding, mid-session empty) appends a `text: nil` response and `failureMarker` ("[…]") appears in its slot at stitch time. The session aborts only on terminal errors (auth, blocked, encode, cancellation — see `RecordingSession.isTerminal(_:)`). A batched call that fails recoverably is split into N independent `transcribe` calls; one bad chunk no longer poisons the others. When every dispatched chunk fails, `stop()` throws `lastRecoverableError` so the AppState error catalog surfaces the real cause (offline / 5xx / …) rather than the generic `noSpeech`.
 
 ## Hard rules
 
@@ -38,6 +39,26 @@
 ## VAD threshold
 
 `voicedFrameThreshold = 0.5`. Lower (0.3) is more sensitive in noisy environments; higher (0.7) reduces false starts on coughs. **Not exposed in Settings yet.** Bump `minVoicedRunForChunkStart` from 1 to 2 if false starts on coughs / sniffs become a problem.
+
+## Partial recovery
+
+The session stitches `responses: [ChunkResponse]` rather than the old `transcripts: [String]`. Each `ChunkResponse` carries the chunk indices it covers, whether it's the final chunk, and a `text: String?` — `nil` when the Gemini call failed recoverably. At `stop()` we map `text ?? failureMarker` per response and stitch the result, giving the user a complete transcript with `[…]` placeholders where chunks dropped.
+
+Error classification lives in `RecordingSession.isTerminal(_:)`:
+
+| Error | Class | Behaviour |
+|---|---|---|
+| `CancellationError` | terminal | abort, no paste |
+| `GeminiError.missingKey` | terminal | abort, surface "add API key" |
+| `GeminiError.blocked(_)` | terminal | abort, surface block reason |
+| Any other `Error` (e.g. encoder, `AVFAudio`) | terminal | abort, surface as-is |
+| `GeminiError.http(_, _)` (any status) | recoverable | marker, continue |
+| `GeminiError.empty` | recoverable | marker, continue |
+| `GeminiError.decoding(_)` | recoverable | marker, continue |
+
+A batched call (`transcribeBatch`) failing recoverably triggers `splitRetry` — each chunk re-issued as an independent `transcribe`. Each independent call has its own retry budget inside `GeminiClient.sendRequest` (HTTP-class-based, see "Retry policy" in the Gemini module). Markers in the priors list are *not* sent back to Gemini — `currentPriors()` filters them out so the model never sees its own failure placeholders.
+
+`AppState.finalizeRecording` reads `session.summary` after `stop()` returns; when `hasFailures` is true it surfaces a neutral "Pasted with gaps" HUD telling the user how many chunks ended up as markers.
 
 ## Quick-release optimisation
 
