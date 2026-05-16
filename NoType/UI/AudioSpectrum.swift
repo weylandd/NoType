@@ -5,8 +5,11 @@ import Accelerate
 /// Takes a window of 16 kHz mono float32 PCM and returns N normalized
 /// magnitudes (one per visualized bar) covering the speech-relevant
 /// 100 Hz – 6.4 kHz range with logarithmic spacing. Intended to be called
-/// at ~30 fps from a `TimelineView`; per-call cost on Apple Silicon is
-/// well under a millisecond.
+/// at ~30 fps from a `.task { ... }` loop on a SwiftUI View — `TimelineView`
+/// is **banned** here on macOS 26 because the per-tick `@MainActor`
+/// instance-method check crashes (see
+/// `docs/solutions/runtime-errors/timelineview-mainactor-instance-method-crash-2026-05-16.md`).
+/// Per-call cost on Apple Silicon is well under a millisecond.
 ///
 /// `@MainActor` only because the HUD calls it on the main actor — the
 /// underlying `vDSP.DFT` setup itself is allocated lazily and reused

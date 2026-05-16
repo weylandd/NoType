@@ -45,7 +45,15 @@ struct RecordingHUD: View {
                 }
             }
 
-            LiveSpectrumMeter(samplesProvider: samplesProvider)
+            SpectrumMeter(
+                samplesProvider: samplesProvider,
+                barCount: 38,
+                barSpacing: 2,
+                padding: EdgeInsets(top: 6, leading: 4, bottom: 6, trailing: 4),
+                cornerRadius: DS.Radius.md,
+                maxBarHeight: 24
+            )
+            .frame(height: 36)
         }
         .padding(EdgeInsets(top: 10, leading: 12, bottom: 11, trailing: 12))
         .frame(width: 300)
@@ -100,160 +108,8 @@ private struct TimerPill: View {
     }
 }
 
-/// Live FFT spectrum analyzer. Pulls the trailing 1024 samples from the
-/// recorder on each tick (~30 fps), runs a windowed FFT via
-/// `AudioSpectrum`, and animates 38 log-spaced bars covering ~100 Hz to
-/// 6.4 kHz.
-///
-/// Each bar carries two animated values:
-/// - `level` — the live magnitude. Instant attack, exponential decay so
-///   the bar drops fluidly after a transient.
-/// - `peak`  — the highest recent magnitude. Same instant attack, but a
-///   *much* slower decay — the marker hangs visibly at the top before
-///   sliding down, giving the meter the classic "VU peak hold" feel.
-private struct LiveSpectrumMeter: View {
-    let samplesProvider: @MainActor () -> [Float]
-
-    private let barCount = 38
-    /// Bar decay per frame (~30 fps). 0.85 ≈ 12 frames from 1.0→0.15.
-    private let levelDecay: Float = 0.85
-    /// Peak marker decay. Much slower so the marker visibly lingers at
-    /// the bar's high-water mark for ~½ s before catching up.
-    private let peakDecay:  Float = 0.98
-    private let minBarHeight: CGFloat = 2
-    /// Max bar height inside the 36 pt container minus 6 pt vertical
-    /// padding (top + bottom = 12) → 24 pt.
-    private let maxBarHeight: CGFloat = 24
-
-    @State private var levels: [Float] = []
-    @State private var peaks:  [Float] = []
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { _ in
-            HStack(alignment: .bottom, spacing: 2) {
-                ForEach(0..<barCount, id: \.self) { i in
-                    barColumn(at: i)
-                        .frame(maxWidth: .infinity)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-            .padding(EdgeInsets(top: 6, leading: 4, bottom: 6, trailing: 4))
-            .onChange(of: tickKey) { _, _ in updateLevels() }
-        }
-        .frame(height: 36)
-        .background(meterBackground)
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(DS.Color.borderSubtle, lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .onAppear {
-            if levels.isEmpty {
-                levels = Array(repeating: 0, count: barCount)
-                peaks  = Array(repeating: 0, count: barCount)
-            }
-        }
-    }
-
-    /// Vertical gradient `bg-inset → bg-canvas` (each at ~70% opacity)
-    /// matches the spec — the meter reads as a recessed slot rather than
-    /// a flat tile, which the previous solid bg-inset fill no longer did
-    /// after the surrounding HUD glass got lighter.
-    private var meterBackground: some View {
-        LinearGradient(
-            colors: [
-                DS.Color.bgInset.opacity(0.8),
-                DS.Color.bgCanvas.opacity(0.6),
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-    }
-
-    /// Peak-hold marker geometry. Chubbier than the bar and inset on
-    /// both sides so it reads as a separate "puck" floating at the
-    /// bar's recent high rather than a stripe glued to the column.
-    private let peakHeight_:  CGFloat = 2
-    private let peakInset:    CGFloat = 0.5
-    private let peakRadius:   CGFloat = 1
-
-    private func barColumn(at index: Int) -> some View {
-        let level = barHeight(at: index)
-        let peak  = peakHeight(at: index)
-        return ZStack(alignment: .bottom) {
-            // Live bar: top corners 2 pt, bottom flat — sits firmly
-            // on the meter's baseline like a column rather than a pill.
-            UnevenRoundedRectangle(
-                topLeadingRadius: 2,
-                bottomLeadingRadius: 0,
-                bottomTrailingRadius: 0,
-                topTrailingRadius: 2,
-                style: .continuous
-            )
-            .fill(barGradient)
-            .frame(height: level)
-
-            // Peak-hold marker: 4 pt-tall rounded puck, narrower than
-            // the bar by `peakInset` on each side. Decays much slower
-            // than the bar → the puck hangs at the high-water mark
-            // while the column drops, then catches up.
-            RoundedRectangle(cornerRadius: peakRadius, style: .continuous)
-                .fill(DS.Color.accentFg)
-                .frame(height: peakHeight_)
-                .padding(.horizontal, peakInset)
-                .offset(y: -(peak - peakHeight_).clamped(to: 0...maxBarHeight))
-                .opacity(peak > minBarHeight ? 0.9 : 0)
-        }
-    }
-
-    private var barGradient: LinearGradient {
-        LinearGradient(
-            colors: [DS.Color.accentFg, DS.Color.accent],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-    }
-
-    /// Stable per-tick key so `.onChange` fires once per frame; using
-    /// `ctx.date` directly would re-fire on every body re-eval.
-    private var tickKey: Int {
-        Int(Date().timeIntervalSinceReferenceDate * 30)
-    }
-
-    private func updateLevels() {
-        let samples = samplesProvider()
-        let fresh = AudioSpectrum.bands(from: samples, bandCount: barCount)
-        if levels.count != barCount {
-            levels = Array(repeating: 0, count: barCount)
-        }
-        if peaks.count != barCount {
-            peaks = Array(repeating: 0, count: barCount)
-        }
-        for i in 0..<barCount {
-            let f = fresh[i]
-            // Bar: instant attack, exponential decay → snappy onsets,
-            // smooth falloff.
-            levels[i] = max(f, levels[i] * levelDecay)
-            // Peak: instant attack to the bar's value, then a much
-            // slower decay so the marker visibly hangs.
-            peaks[i]  = max(levels[i], peaks[i] * peakDecay)
-        }
-    }
-
-    private func barHeight(at index: Int) -> CGFloat {
-        guard index < levels.count else { return minBarHeight }
-        let v = CGFloat(levels[index])
-        return max(minBarHeight, v * maxBarHeight)
-    }
-
-    private func peakHeight(at index: Int) -> CGFloat {
-        guard index < peaks.count else { return 0 }
-        return CGFloat(peaks[index]) * maxBarHeight
-    }
-}
-
-private extension Comparable {
-    func clamped(to range: ClosedRange<Self>) -> Self {
-        min(max(self, range.lowerBound), range.upperBound)
-    }
-}
+// The live FFT spectrum meter is the shared `SpectrumMeter` view
+// (`NoType/UI/SpectrumMeter.swift`). The HUD instantiates it inside its
+// `body` with HUD-specific geometry (38 bars, tighter padding, 36 pt
+// fixed height); the onboarding mic-check step uses the same component
+// at 44 bars + larger padding.

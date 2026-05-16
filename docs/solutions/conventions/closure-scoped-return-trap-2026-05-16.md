@@ -100,6 +100,8 @@ try samples.withUnsafeBufferPointer { src in
 ## Related
 
 - `solutions/conventions/force-unwrap-error-and-logging-2026-05-15.md` — the broader convention this trap is a sub-case of (force-unwrap removal + error model).
+- `solutions/runtime-errors/sender-respawn-race-2026-05-16.md` — sibling Swift-idiom-trap (point-in-time `await field?.value` across respawn).
+- `solutions/runtime-errors/timelineview-mainactor-instance-method-crash-2026-05-16.md` — third member of the family — a SwiftUI/concurrency call shape that silently inserts a runtime executor check the reader doesn't see.
 - `NoType/Recording/SileroVAD.swift` `probability(for:)` — the canonical example after the fix.
 - `NoType/Recording/ChunkBuilder.swift` `encodeAAC(_:)` — the second example.
 - PR #34 — the fix that surfaced the pattern; lives in git history.

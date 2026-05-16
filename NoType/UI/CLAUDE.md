@@ -23,6 +23,7 @@ SwiftUI surfaces: menu-bar icon, history popover, the main app window (Home tab 
 - `HUDController.swift` — owns and positions every floating panel.
 - `HUDPanel.swift` — `NSPanel` subclass with embedded `NSVisualEffectView` blur.
 - `AudioSpectrum.swift` — vDSP-backed FFT for the recording-HUD meter.
+- `SpectrumMeter.swift` — shared FFT spectrum meter view used by both the recording HUD (`RecordingHUD.swift`) and the onboarding mic-check step (`NoType/Onboarding/Steps/OnboardingMicCheckStep.swift`). Owns the `.task`-driven 30 fps frame loop + `@State` arrays; the two call sites only supply geometry (bar count, spacing, padding, corner radius, max height).
 - `SettingsView.swift` — opened from the popover header gear.
 
 ## Invariants
@@ -41,6 +42,7 @@ SwiftUI surfaces: menu-bar icon, history popover, the main app window (Home tab 
 - **Don't introduce new `ObservableObject` / `@Published` view-models.** `@Observable` + `@Environment(_:)` is the pattern (see `solutions/conventions/module-architecture-and-naming-2026-05-15.md`).
 - **Two icon sources only.** `DSIcon` (line icons in `Assets.xcassets`, ~60 glyphs) for primary use; `Image(systemName:)` only for system-only concepts (`mic.fill`, `key.fill`, `wifi.slash`, `figure.stand`, etc.). When in doubt, check `DSIconName` first.
 - **All buttons have `accessibilityLabel`.** The menu-bar icon's label reflects state ("NoType: idle", "NoType: recording, 5 seconds").
+- **`TimelineView` content closures may NOT call instance methods or read instance computed properties on the enclosing View.** On macOS 26 this crashes with `swift_task_isCurrentExecutorWithFlagsImpl` → `objc_opt_class` at a small faulting address — see `solutions/runtime-errors/timelineview-mainactor-instance-method-crash-2026-05-16.md`. Allowed inside the closure: `let` props on `self`, `Self.foo(...)` static helpers, `ctx.date`, SwiftUI view builders. For views with mutable state (spectrum meters, animated bars), use a `.task { while !Task.isCancelled { … assign @State … try? await Task.sleep(...) } }` driver instead of `TimelineView` — `@State` mutation triggers normal SwiftUI re-render without the TimelineView dispatch path.
 
 ## HUD slots & widths
 
