@@ -105,6 +105,20 @@ final class AudioRecorder: @unchecked Sendable {
         let device = MainActor.assumeIsolated { AudioDeviceManager.shared.effectiveDevice }
         if let device {
             _ = AudioDeviceManager.apply(device, to: engine)
+            // Per-session log of the BT-avoidance fallback so the
+            // user can correlate "music got louder" complaints with
+            // whether we actually opted out — visible via
+            // `log show --predicate 'subsystem == "app.notype"'`.
+            MainActor.assumeIsolated {
+                let mgr = AudioDeviceManager.shared
+                if mgr.preferBuiltInOverBluetooth,
+                   mgr.selectedUID == nil,
+                   let sysDef = mgr.systemDefault,
+                   sysDef.isBluetooth,
+                   device.isBuiltIn {
+                    Self.log.info("BT input avoidance: system default \"\(sysDef.name, privacy: .public)\" is Bluetooth — using built-in mic \"\(device.name, privacy: .public)\" to keep A2DP music quality / ducking")
+                }
+            }
         }
 
         lock.lock()

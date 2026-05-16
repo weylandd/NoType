@@ -20,6 +20,7 @@ import OSLog
 final class AudioDeviceManager {
     @ObservationIgnored nonisolated static let log = Logger(subsystem: "app.notype", category: "audio.devices")
     @ObservationIgnored private static let selectedUIDKey = "notype.selectedInputDeviceUID"
+    @ObservationIgnored fileprivate static let preferBuiltInOverBluetoothKey = "notype.preferBuiltInOverBluetooth"
 
     @ObservationIgnored static let shared = AudioDeviceManager()
 
@@ -27,6 +28,24 @@ final class AudioDeviceManager {
         let id: AudioDeviceID
         let uid: String
         let name: String
+        /// Core Audio transport type — `kAudioDeviceTransportType*`
+        /// constants. Powers `isBluetooth` / `isBuiltIn` so we can
+        /// auto-prefer the laptop mic over a connected BT headset
+        /// (whose mic forces the OS into HFP/SCO and downgrades
+        /// music output from A2DP to telephony quality).
+        let transportType: UInt32
+
+        /// True for both Classic BR/EDR (`Bluetooth`) and BLE Audio
+        /// (`BluetoothLE`) — both transports forcibly switch to a
+        /// telephony codec the moment a mic stream is opened.
+        var isBluetooth: Bool {
+            transportType == kAudioDeviceTransportTypeBluetooth
+                || transportType == kAudioDeviceTransportTypeBluetoothLE
+        }
+
+        var isBuiltIn: Bool {
+            transportType == kAudioDeviceTransportTypeBuiltIn
+        }
     }
 
     /// All available *input* devices, populated on init and refreshed
@@ -44,22 +63,52 @@ final class AudioDeviceManager {
         }
     }
 
+    /// When ON and the user hasn't explicitly pinned a device,
+    /// `effectiveDevice` falls back to the built-in mic instead of
+    /// the system default if that default is a Bluetooth headset.
+    /// Default ON — fixes the surprise where pressing the hotkey
+    /// while listening to music on BT headphones downgrades the
+    /// headphones from A2DP (high-fi, output-only) to HFP/SCO
+    /// (telephony, with mic) and breaks ducking. Users who actually
+    /// want the BT mic can either flip this off here or pin the BT
+    /// device explicitly in the picker (pinning always wins over
+    /// the fallback). Persisted to `UserDefaults`.
+    var preferBuiltInOverBluetooth: Bool {
+        didSet {
+            UserDefaults.standard.set(
+                preferBuiltInOverBluetooth,
+                forKey: Self.preferBuiltInOverBluetoothKey
+            )
+        }
+    }
+
     @ObservationIgnored private var listenerInstalled = false
 
     init() {
         self.selectedUID = UserDefaults.standard.string(forKey: Self.selectedUIDKey)
+        // Read with `object(forKey:) as? Bool` so the absent-key case
+        // resolves to the default ON, not the false default for
+        // `bool(forKey:)`. Same idiom as `AppState.dictionaryEnabled`.
+        let storedPref = UserDefaults.standard.object(forKey: Self.preferBuiltInOverBluetoothKey) as? Bool
+        self.preferBuiltInOverBluetooth = storedPref ?? true
         refresh()
         installDeviceListChangeListener()
     }
 
     /// The device the recorder should actually open. Returns the pinned
-    /// device if it's still present, otherwise the system default,
-    /// otherwise nil (which means "let the engine pick").
+    /// device if it's still present, otherwise — when
+    /// `preferBuiltInOverBluetooth` is on and the system default is a
+    /// BT headset — the built-in mic, otherwise the system default,
+    /// otherwise nil (which means "let the engine pick"). Delegates
+    /// to the pure static helper so the policy is unit-testable
+    /// without standing up a real HAL.
     var effectiveDevice: Device? {
-        if let uid = selectedUID, let pinned = inputs.first(where: { $0.uid == uid }) {
-            return pinned
-        }
-        return systemDefault
+        Self.pickEffectiveDevice(
+            inputs: inputs,
+            selectedUID: selectedUID,
+            systemDefault: systemDefault,
+            preferBuiltInOverBluetooth: preferBuiltInOverBluetooth
+        )
     }
 
     /// Human-readable label for the picker footer.
@@ -67,10 +116,49 @@ final class AudioDeviceManager {
         if let uid = selectedUID, let pinned = inputs.first(where: { $0.uid == uid }) {
             return pinned.name
         }
+        // Surface the BT-avoidance fallback explicitly so the user
+        // understands why the label doesn't match their System
+        // Settings default. "(System)" stays as the marker for the
+        // straight-pass-through case.
+        if preferBuiltInOverBluetooth,
+           let def = systemDefault,
+           def.isBluetooth,
+           let builtIn = inputs.first(where: { $0.isBuiltIn }) {
+            return "\(builtIn.name) (avoiding \(def.name))"
+        }
         if let def = systemDefault {
             return "\(def.name) (System)"
         }
         return "Default Input"
+    }
+
+    /// Pure: pick the input the recorder should open. Extracted so
+    /// `AudioDeviceManagerTests` can pin the BT-avoidance policy
+    /// against synthetic device fixtures without needing real HAL
+    /// hardware.
+    ///
+    /// Decision order:
+    /// 1. Explicit pin wins — the user picked this device on purpose.
+    /// 2. `preferBuiltInOverBluetooth` ON + system default is BT +
+    ///    a built-in mic exists → fall back to the built-in mic.
+    /// 3. System default.
+    /// 4. Nil (let `AVAudioEngine` pick).
+    nonisolated static func pickEffectiveDevice(
+        inputs: [Device],
+        selectedUID: String?,
+        systemDefault: Device?,
+        preferBuiltInOverBluetooth: Bool
+    ) -> Device? {
+        if let uid = selectedUID, let pinned = inputs.first(where: { $0.uid == uid }) {
+            return pinned
+        }
+        if preferBuiltInOverBluetooth,
+           let def = systemDefault,
+           def.isBluetooth,
+           let builtIn = inputs.first(where: { $0.isBuiltIn }) {
+            return builtIn
+        }
+        return systemDefault
     }
 
     func refresh() {
@@ -131,8 +219,32 @@ final class AudioDeviceManager {
                   let uid = stringProperty(id, selector: kAudioDevicePropertyDeviceUID, scope: kAudioObjectPropertyScopeGlobal),
                   let name = deviceName(id)
             else { return nil }
-            return Device(id: id, uid: uid, name: name)
+            return Device(
+                id: id,
+                uid: uid,
+                name: name,
+                transportType: transportType(id)
+            )
         }
+    }
+
+    /// Read the Core Audio transport type for a device. Returns 0
+    /// when the HAL refuses (aggregate devices, broken kexts) — that
+    /// value is `kAudioDeviceTransportTypeUnknown`, and the
+    /// `isBluetooth` / `isBuiltIn` helpers correctly treat unknown
+    /// devices as neither (so the BT fallback simply doesn't fire
+    /// for them).
+    private static func transportType(_ id: AudioDeviceID) -> UInt32 {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var transport: UInt32 = 0
+        var size: UInt32 = UInt32(MemoryLayout<UInt32>.size)
+        let status = AudioObjectGetPropertyData(id, &address, 0, nil, &size, &transport)
+        guard status == noErr else { return 0 }
+        return transport
     }
 
     private static func fetchSystemDefault() -> AudioDeviceID? {

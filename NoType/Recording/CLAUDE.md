@@ -31,6 +31,7 @@
 
 - **`AVAudioConverter` must return `.noDataNow`, not `.endOfStream`, when each input buffer is exhausted.** End-of-stream per buffer corrupts the filter state across taps. See `ConverterFeed` doc-comment in `AudioRecorder.swift`.
 - **Mid-session input-device swap is supported.** `AudioRecorder` observes `AVAudioEngineConfigurationChange`, tears down the tap, and rebuilds against the new input format without ending the session. PCM buffer is preserved; splice = a few ms of silence.
+- **Default-input picking avoids Bluetooth mics.** When `AudioDeviceManager.preferBuiltInOverBluetooth` is on (default ON) and the user hasn't pinned a device, the recorder falls back to the built-in mic if the system default is a BT headset — keeps the headphones in A2DP and stops the HFP/SCO profile switch from breaking music ducking. Explicit pin via the picker overrides. Policy lives in the pure `AudioDeviceManager.pickEffectiveDevice`; rationale in `solutions/architecture-patterns/bluetooth-input-avoidance-2026-05-16.md`.
 - **Lite path bypasses the full prompt entirely.** Different system prompt (`systemPromptLite`), different cache-prefix shape, different namespace at Gemini. By construction single-audio — `precondition(audios.count == 1)` in the Gemini client.
 - **`PCMRingBuffer` is `@unchecked Sendable` with NO internal lock.** Contract: only `AudioRecorder`'s lock-guarded tap path mutates in production; tests drive it single-threaded. If a multi-actor use ever appears, wrap it in a lock first.
 - **Don't write tests against live mic input.** Use fixtures. Unit tests must be deterministic.
@@ -60,4 +61,5 @@ Three sibling tasks run in the context phase: `AccessibilityTree.snapshot()`, `I
 - One Gemini request in flight (the sender contract) → `solutions/architecture-patterns/serial-gemini-actor-2026-05-15.md`.
 - Cache-prefix shape (what the sender ships) → `NoType/Gemini/CLAUDE.md`.
 - Context snapshot lifecycle → `NoType/Context/CLAUDE.md`.
+- Bluetooth input avoidance (built-in mic fallback) → `solutions/architecture-patterns/bluetooth-input-avoidance-2026-05-16.md`.
 - AAC encoding tech debt → `solutions/documentation-gaps/in-memory-aac-encoding-2026-05-15.md`.
