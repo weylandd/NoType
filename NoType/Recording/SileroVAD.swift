@@ -43,6 +43,7 @@ actor SileroVAD {
         case modelNotFound
         case modelLoadFailed(Error)
         case inputShapeMismatch(expected: Int, got: Int)
+        case inputBufferUnavailable
         case predictionFailed(Error)
         case missingOutput(String)
 
@@ -54,6 +55,8 @@ actor SileroVAD {
                 "Couldn't load SileroVAD: \(e.localizedDescription)"
             case .inputShapeMismatch(let expected, let got):
                 "VAD frame size mismatch: expected \(expected) samples, got \(got)."
+            case .inputBufferUnavailable:
+                "VAD input buffer had no addressable base pointer (invariant violation)."
             case .predictionFailed(let e):
                 "VAD prediction failed: \(e.localizedDescription)"
             case .missingOutput(let name):
@@ -119,14 +122,19 @@ actor SileroVAD {
         for i in 0..<Self.contextSize {
             audioPtr[i] = carriedContext[i]
         }
-        // Throws from inside the closure if `baseAddress` is ever nil
-        // (only reachable if a future refactor loosens the count guard
-        // above). A bare `return` would only escape the closure and
-        // leave the trailing 4096 floats of `audio_input` uninitialised
-        // — CoreML would happily classify garbage as speech.
+        // The count guard at line 111 already proves `samples` has
+        // `chunkSize` elements, so `baseAddress` will be non-nil on
+        // every real call. The `try`-from-closure shape exists as
+        // defence-in-depth: if a future refactor loosens that guard,
+        // a bare `return` would only escape the closure, leaving the
+        // trailing 4096 floats of `audio_input` uninitialised and
+        // CoreML would classify garbage as speech. Throw a dedicated
+        // case rather than `inputShapeMismatch(got: 0)` — the count
+        // is known-correct here; nil-baseAddress is a buffer-pointer
+        // invariant violation, not a shape problem.
         try samples.withUnsafeBufferPointer { src in
             guard let base = src.baseAddress else {
-                throw VADError.inputShapeMismatch(expected: Self.chunkSize, got: 0)
+                throw VADError.inputBufferUnavailable
             }
             audioPtr.advanced(by: Self.contextSize)
                 .update(from: base, count: Self.chunkSize)
