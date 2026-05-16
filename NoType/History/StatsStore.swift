@@ -356,13 +356,12 @@ actor StatsStore {
             from: url,
             as: StatsSnapshot.self,
             decoder: decoder,
-            log: Self.log,
-            storeName: "stats"
+            log: Self.log
         ) ?? .empty
     }
 
     private func write(_ snap: StatsSnapshot) {
-        JSONFileStorage.write(snap, to: url, encoder: encoder, log: Self.log, storeName: "stats")
+        JSONFileStorage.write(snap, to: url, encoder: encoder, log: Self.log)
     }
 
     // MARK: - Word count

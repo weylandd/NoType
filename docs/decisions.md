@@ -6,8 +6,6 @@
 
 These are the load-bearing decisions for NoType. **Do not relitigate without explicit discussion.** If you think one of these is wrong, open an issue first.
 
-Format: short, blunt, with the alternative considered.
-
 ---
 
 ## ADR-001 — macOS 15 (Sequoia) minimum

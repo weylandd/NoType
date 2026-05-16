@@ -48,21 +48,21 @@ enum JSONFileStorage {
     /// `<name>.corrupt-<unix-ts>` and returns `nil` — caller substitutes
     /// its own "empty" snapshot.
     ///
+    /// Log lines are emitted on the caller-supplied `Logger`; that
+    /// logger's `category:` already identifies the store in Console.app,
+    /// so the messages here don't repeat it.
+    ///
     /// - Parameters:
     ///   - url: file to read.
     ///   - type: decoded type.
     ///   - decoder: caller's pre-configured decoder (so iso8601 /
     ///     custom strategies survive).
-    ///   - log: caller's logger — corruption-rename log line is emitted
-    ///     under the calling module's category.
-    ///   - storeName: short tag for the log line (e.g. `"history"`,
-    ///     `"stats"`, `"instructions"`, `"dictionary"`).
+    ///   - log: caller's logger.
     static func read<T: Decodable>(
         from url: URL,
         as type: T.Type,
         decoder: JSONDecoder,
-        log: Logger,
-        storeName: String
+        log: Logger
     ) -> T? {
         guard
             FileManager.default.fileExists(atPath: url.path),
@@ -74,7 +74,7 @@ enum JSONFileStorage {
         } catch {
             let backup = url.appendingPathExtension("corrupt-\(Int(Date().timeIntervalSince1970))")
             try? FileManager.default.moveItem(at: url, to: backup)
-            log.error("\(storeName, privacy: .public) corrupted, backed up to \(backup.lastPathComponent, privacy: .public) (\(error.localizedDescription, privacy: .public))")
+            log.error("corrupted, backed up to \(backup.lastPathComponent, privacy: .public) (\(error.localizedDescription, privacy: .public))")
             return nil
         }
     }
@@ -83,21 +83,17 @@ enum JSONFileStorage {
     /// swallowed (matches the pattern in all four stores) — disk-full /
     /// permission errors leave the in-memory state authoritative until
     /// next launch.
-    ///
-    /// `storeName` flows through to the log line: `"<storeName> write
-    /// failed: <error>"`.
     static func write<T: Encodable>(
         _ value: T,
         to url: URL,
         encoder: JSONEncoder,
-        log: Logger,
-        storeName: String
+        log: Logger
     ) {
         do {
             let data = try encoder.encode(value)
             try data.write(to: url, options: [.atomic])
         } catch {
-            log.error("\(storeName, privacy: .public) write failed: \(error.localizedDescription, privacy: .public)")
+            log.error("write failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 }

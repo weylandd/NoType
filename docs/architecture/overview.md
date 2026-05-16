@@ -62,6 +62,7 @@ Solid arrows = audio / text path. Dotted arrows = control / async signal.
 | `NoType/Gemini/` | API client (transcription + classifier), request shape, retry policy | `Gemini/CLAUDE.md` |
 | `NoType/Injection/` | Clipboard save / restore + ⌘V paste; `stitchChunks` + `finalizeForInsertion` | `Injection/CLAUDE.md` |
 | `NoType/History/` | Last-10 transcript JSON; lifetime `StatsStore` aggregate | `History/CLAUDE.md` |
+| `NoType/Storage/` | `JSONFileStorage` — shared file-IO plumbing for the four actor stores | `Storage/CLAUDE.md` |
 | `NoType/Keychain/` | Gemini API key storage (`SecretStore` → `KeychainStore`) | `Keychain/CLAUDE.md` |
 | `NoType/Updates/` | Sparkle 2 controller + custom `SPUUserDriver` (in-sidebar banner) | `Updates/CLAUDE.md` |
 | `NoType/Permissions/` | Microphone / Accessibility / Screen Recording TCC state | `Permissions/CLAUDE.md` |

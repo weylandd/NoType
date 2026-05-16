@@ -18,8 +18,7 @@ actor HistoryStore {
             from: url,
             as: [HistoryEntry].self,
             decoder: decoder,
-            log: Self.log,
-            storeName: "history"
+            log: Self.log
         ) ?? []
     }
 
@@ -47,6 +46,6 @@ actor HistoryStore {
     }
 
     private func write(_ entries: [HistoryEntry]) {
-        JSONFileStorage.write(entries, to: url, encoder: encoder, log: Self.log, storeName: "history")
+        JSONFileStorage.write(entries, to: url, encoder: encoder, log: Self.log)
     }
 }
