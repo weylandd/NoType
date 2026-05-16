@@ -88,12 +88,16 @@ Re-reading the field in a loop converts "await the current Task ref once" into "
 - **Treat "field captured once at evaluation" as a Swift concurrency footgun.** Same trap shows up with `await observers.first?.callback`, `await pool.head?.complete`, anywhere a field is mutated under us while we suspend.
 - **The serial-actor invariant doesn't enforce itself by construction.** [serial-gemini-actor](../architecture-patterns/serial-gemini-actor-2026-05-15.md) describes the rule ("one Gemini request in flight"); the implementation must defend the invariant at every Task lifecycle handoff. The respawn-race fix is implementation enforcement, not a pattern change.
 
-Sister learning: [closure-scoped-return-trap](../conventions/closure-scoped-return-trap-2026-05-16.md) — both are cases where a Swift idiom (`return` inside `withUnsafe*`; `await field?.value` across respawn) silently does less than the reader expects.
+Sister learnings — both are cases where a Swift idiom silently does less than the reader expects:
+
+- [closure-scoped-return-trap](../conventions/closure-scoped-return-trap-2026-05-16.md) — `return` inside `withUnsafe*` only escapes the closure; `await field?.value` across respawn captures the field once.
+- [timelineview-mainactor-instance-method-crash](timelineview-mainactor-instance-method-crash-2026-05-16.md) — calling a `@MainActor` instance method from inside a TimelineView content closure inserts a runtime executor check that crashes on macOS 26.
 
 ## Related Issues
 
 - PR #38 — both commits (initial respawn-in-finalizer, then the stop() drain-loop)
 - [conventions/closure-scoped-return-trap-2026-05-16.md](../conventions/closure-scoped-return-trap-2026-05-16.md) — sibling Swift-idiom-trap learning
+- [runtime-errors/timelineview-mainactor-instance-method-crash-2026-05-16.md](timelineview-mainactor-instance-method-crash-2026-05-16.md) — sibling macOS 26 Swift concurrency runtime failure from the same discovery window
 - [architecture-patterns/serial-gemini-actor-2026-05-15.md](../architecture-patterns/serial-gemini-actor-2026-05-15.md) — the "one in flight" invariant whose implementation had the leak
 - [conventions/swift-6-concurrency-and-async-2026-05-15.md](../conventions/swift-6-concurrency-and-async-2026-05-15.md) — the broader strict-concurrency conventions this falls under
 - `NoType/Recording/RecordingSession.swift` `stop()` + `markSenderFinished()` — canonical fix sites

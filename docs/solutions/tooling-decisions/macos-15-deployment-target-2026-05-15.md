@@ -86,5 +86,6 @@ v0.1.4 shipped with this regression. v0.1.5 bumped the floor to 15 and restored 
 - `docs/decisions.md` ADR-001 — the legacy index entry, now a redirect to this file.
 - `NoType/UI/CLAUDE.md` "Onboarding wizard" — describes the auto-open hook on the consumer side.
 - `NoType/Onboarding/` — wizard implementation that depends on the present-on-first-launch contract.
+- `solutions/runtime-errors/timelineview-mainactor-instance-method-crash-2026-05-16.md` — macOS-26-specific SwiftUI runtime bug surfaced in PR #41. Relevant context when revisiting the floor (the same binary behaves on 15 and crashes on 26 with the broken pattern); a macOS 26 "known issues" catalog hangs off this entry.
 - PR #14 in NoType — "docs: sweep stale macOS 26 references after the floor drop to 14" (the cleanup PR following the regression).
 - PR #17 in NoType — "fix(onboarding): bump floor to macOS 15, restore defaultLaunchBehavior" (the fix).

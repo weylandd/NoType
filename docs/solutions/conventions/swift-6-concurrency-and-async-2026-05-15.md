@@ -26,7 +26,7 @@ NoType builds with `SWIFT_STRICT_CONCURRENCY: complete` enabled in `project.yml`
 - **No `@unchecked Sendable` without a doc-comment** explaining the lock or thread-confinement that makes it safe. Documented exceptions: `AudioRecorder`, `HotkeyMonitor`, `MicProbe`.
 - **Cross-actor communication via `await`, `AsyncStream`, or `AsyncChannel`.** No callbacks, no completion handlers in new code.
 - **`async`/`await` everywhere.** No `DispatchQueue` in new code (legacy callsites can stay until they're touched).
-- **For periodic work:** `Task { while !Task.isCancelled { try await Task.sleep(...); … } }`.
+- **For periodic work:** `Task { while !Task.isCancelled { try await Task.sleep(...); … } }`. Inside SwiftUI views, prefer `.task { while !Task.isCancelled { … } }` — `TimelineView`-driven periodic work is **banned** when the content closure would need to call `@MainActor` instance methods on the view: on macOS 26 the inserted executor check crashes during layout. See [timelineview-mainactor-instance-method-crash](../runtime-errors/timelineview-mainactor-instance-method-crash-2026-05-16.md).
 - **For producer/consumer:** `AsyncStream` or `AsyncChannel`.
 - **`withTaskGroup` for fan-out is rare in this codebase** — most things are serial by design. The load-bearing example is `AccessibilityTree.snapshot()`, which parallelises per-app walks.
 - **Cancellation:** every long-running task must either check `Task.isCancelled` or be cancelled by deinit of its owner.
@@ -76,4 +76,7 @@ Task {
 ## Related
 
 - `solutions/architecture-patterns/serial-gemini-actor-2026-05-15.md` — the most load-bearing actor.
+- `solutions/runtime-errors/timelineview-mainactor-instance-method-crash-2026-05-16.md` — concrete macOS 26 anti-pattern the "periodic work" rule's `.task` form sidesteps inside SwiftUI views.
+- `solutions/runtime-errors/sender-respawn-race-2026-05-16.md` — sibling Swift concurrency footgun (point-in-time await across respawn).
+- `solutions/conventions/closure-scoped-return-trap-2026-05-16.md` — sibling Swift-idiom-trap learning (`return` inside `withUnsafe*`).
 - `docs/conventions.md` — legacy index, redirects here.
