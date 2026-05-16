@@ -572,6 +572,11 @@ final class AppState {
             guard let self else { return }
             do {
                 let entry = try await session.stop()
+                // Capture the session's outcome summary BEFORE we
+                // potentially drop the reference — used below to
+                // surface a neutral "some parts didn't transcribe"
+                // HUD when the pasted text contains `[…]` markers.
+                let sessionSummary = session.summary
                 // If Escape (or some other path) intervened while we were
                 // awaiting stop(), state/HUD have already been reset and
                 // `currentSession` either is nil or points to a *new*
@@ -584,6 +589,12 @@ final class AppState {
                 }
                 self.recordingState = .idle
                 self.hud.hideTranscribingHUD()
+                if sessionSummary.hasFailures {
+                    Self.log.warning(
+                        "session paste contains \(sessionSummary.failedChunkCount) failure marker(s) of \(sessionSummary.dispatchedChunkCount) chunk(s)"
+                    )
+                    self.surfaceError(.partialTranscription(summary: sessionSummary))
+                }
                 // Fold into lifetime stats — survives the history cap so
                 // the Home tab's totals / top-apps / heatmap keep
                 // accumulating beyond the rolling 10-entry window.
@@ -1046,6 +1057,12 @@ private enum NoTypeErrorKind {
     case vadLoadFailed
     case sessionStartFailed(Error)
     case sessionFailure(Error)
+    /// Session finished and pasted, but one or more chunks' Gemini
+    /// calls failed recoverably and were replaced with the marker
+    /// (`RecordingSession.failureMarker`) in the pasted text. Neutral
+    /// severity — this is a heads-up, not a failure, and the user
+    /// already has most of their transcription.
+    case partialTranscription(summary: RecordingSession.SessionSummary)
 
     var payload: ErrorPayload {
         switch self {
@@ -1077,6 +1094,22 @@ private enum NoTypeErrorKind {
             )
         case .sessionFailure(let err):
             return Self.payloadForSessionFailure(err)
+        case .partialTranscription(let summary):
+            let failed = summary.failedChunkCount
+            let total = summary.dispatchedChunkCount
+            let body: String
+            if failed == 1 {
+                body = "1 of \(total) chunks didn't transcribe — \(RecordingSession.failureMarker) was inserted in its place. Re-dictate just that part if you need it."
+            } else {
+                body = "\(failed) of \(total) chunks didn't transcribe — \(RecordingSession.failureMarker) was inserted in their place. Re-dictate the missing parts if you need them."
+            }
+            return ErrorPayload(
+                title: "Pasted with gaps",
+                description: body,
+                code: "INFO_PARTIAL",
+                severity: .neutral,
+                iconSymbol: "ellipsis.bubble"
+            )
         }
     }
 
@@ -1096,32 +1129,19 @@ private enum NoTypeErrorKind {
     /// HTTP error codes — they're the most common and most actionable.
     private static func payloadForSessionFailure(_ err: Error) -> ErrorPayload {
         if let urlError = err as? URLError {
-            switch urlError.code {
-            case .notConnectedToInternet, .networkConnectionLost:
-                return ErrorPayload(
-                    title: "No internet connection",
-                    description: "NoType needs internet to transcribe. Reconnect and try again — your audio wasn't saved.",
-                    code: "ERR_OFFLINE",
-                    severity: .danger,
-                    iconSymbol: "wifi.slash"
-                )
-            case .timedOut:
-                return ErrorPayload(
-                    title: "Couldn't reach Gemini",
-                    description: "The transcription request timed out. Check your connection and try again.",
-                    code: "ERR_NET_TIMEOUT",
-                    severity: .danger,
-                    iconSymbol: "exclamationmark.triangle.fill"
-                )
-            default:
-                return ErrorPayload(
-                    title: "Network error",
-                    description: urlError.localizedDescription,
-                    code: "ERR_NET_\(urlError.code.rawValue)",
-                    severity: .danger,
-                    iconSymbol: "wifi.exclamationmark"
-                )
-            }
+            return payloadForURLErrorCode(urlError.code.rawValue, fallbackDescription: urlError.localizedDescription)
+        }
+        // `GeminiClient.performOnce` wraps unhandled URLErrors as
+        // `GeminiError.http(0, "URLError code=N: …")`. Pre-PR-#39
+        // sessions threw the wrapped form here and rendered as
+        // "Gemini rejected the request (HTTP 0)" — wrong for
+        // offline / timeout. The partial-recovery rethrow in
+        // `RecordingSession.stop()` makes this path far more common,
+        // so peel the code back out and route through the same
+        // URLError-class HUDs as the native-URLError branch above.
+        if let g = err as? GeminiClient.GeminiError, case let .http(0, body) = g,
+           let code = NetworkErrorTranslator.extractURLErrorCode(from: body) {
+            return payloadForURLErrorCode(code, fallbackDescription: body)
         }
         if let g = err as? GeminiClient.GeminiError {
             switch g {
@@ -1206,5 +1226,58 @@ private enum NoTypeErrorKind {
             severity: .danger,
             iconSymbol: "exclamationmark.triangle.fill"
         )
+    }
+
+    /// Build the right network-class HUD payload for a raw URLError
+    /// code value. Shared between the native-`URLError` branch and the
+    /// `GeminiError.http(0, "URLError code=N: …")` re-extraction
+    /// branch so both paths render the same offline / timeout HUDs.
+    private static func payloadForURLErrorCode(_ rawCode: Int, fallbackDescription: String) -> ErrorPayload {
+        let code = URLError.Code(rawValue: rawCode)
+        switch code {
+        case .notConnectedToInternet, .networkConnectionLost:
+            return ErrorPayload(
+                title: "No internet connection",
+                description: "NoType needs internet to transcribe. Reconnect and try again — your audio wasn't saved.",
+                code: "ERR_OFFLINE",
+                severity: .danger,
+                iconSymbol: "wifi.slash"
+            )
+        case .timedOut:
+            return ErrorPayload(
+                title: "Couldn't reach Gemini",
+                description: "The transcription request timed out. Check your connection and try again.",
+                code: "ERR_NET_TIMEOUT",
+                severity: .danger,
+                iconSymbol: "exclamationmark.triangle.fill"
+            )
+        default:
+            return ErrorPayload(
+                title: "Network error",
+                description: fallbackDescription,
+                code: "ERR_NET_\(rawCode)",
+                severity: .danger,
+                iconSymbol: "wifi.exclamationmark"
+            )
+        }
+    }
+
+}
+
+/// Pull the URLError code out of a `GeminiError.http(0, body)`
+/// body string of the form `"URLError code=-1009: not connected"`.
+/// Returns `nil` when the body isn't a wrapped URLError. Internal so
+/// `AppStateNetworkErrorRoutingTests` can pin the parser against
+/// `GeminiClient.performOnce`'s wrapping format — drift between the
+/// two would silently re-break the offline / timeout HUD routing.
+enum NetworkErrorTranslator {
+    static func extractURLErrorCode(from body: String) -> Int? {
+        let prefix = "URLError code="
+        guard body.hasPrefix(prefix) else { return nil }
+        let rest = body.dropFirst(prefix.count)
+        guard let colon = rest.firstIndex(of: ":") else {
+            return Int(rest.trimmingCharacters(in: .whitespaces))
+        }
+        return Int(rest[..<colon].trimmingCharacters(in: .whitespaces))
     }
 }

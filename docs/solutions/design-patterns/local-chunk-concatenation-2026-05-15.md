@@ -49,7 +49,12 @@ The seam-handling rules then live in two layers downstream:
 **The pattern in code** (`NoType/Recording/RecordingSession.swift::stop`):
 
 ```swift
-let stitched = TextInjector.stitchChunks(transcripts)
+// `responses` is the per-call outcome list — each entry is either a
+// successful transcript or `text: nil` (recoverable failure). Failed
+// entries are substituted with `failureMarker` ("[…]") at stitch time
+// so the user sees a visible gap where Gemini dropped a chunk.
+let pieces   = responses.map { $0.text ?? Self.failureMarker }
+let stitched = TextInjector.stitchChunks(pieces)
 let final    = TextInjector.finalizeForInsertion(
     stitched,
     textBeforeCursor: target.textBefore,
@@ -61,6 +66,7 @@ let final    = TextInjector.finalizeForInsertion(
 
 - `NoType/Injection/CLAUDE.md` — `stitchChunks` + `finalizeForInsertion` shapes.
 - `NoType/Gemini/CLAUDE.md` "What you must NEVER do".
+- `solutions/architecture-patterns/partial-recovery-with-markers-2026-05-16.md` — partial-recovery layer that rides on this assembly contract (markers stitched in place of failed chunks, never sent as priors).
 - `docs/decisions.md` ADR-008 — legacy index entry, redirects here.
 - `solutions/architecture-patterns/serial-gemini-actor-2026-05-15.md` — the serial dispatch that makes "prior chunks are deterministic" true.
 - `architecture.md` invariant I2 — the "local concatenation, never re-emit" rule.

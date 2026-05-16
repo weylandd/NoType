@@ -8,7 +8,7 @@ component: tooling
 symptoms:
   - "`.noSpeech` error after a normal recording session"
   - "Final chunk's audio silently never reaches Gemini"
-  - "transcripts[] is empty in `stop()` even though the user clearly spoke"
+  - "responses[] is empty in `stop()` even though the user clearly spoke (was `transcripts[]` before PR #39)"
 root_cause: async_timing
 resolution_type: code_fix
 severity: high
@@ -26,7 +26,7 @@ The user-visible symptom: a session ends with `SessionError.noSpeech` even thoug
 ## Symptoms
 
 - `SessionError.noSpeech` thrown by `RecordingSession.stop()` after sessions that clearly contained speech
-- `transcripts: []` at the throw site, even though VAD enqueued chunks
+- `responses: []` at the throw site, even though VAD enqueued chunks (renamed from `transcripts: []` in PR #39's partial-recovery refactor; same field, different name)
 - Final chunk's PCM lingers in the recorder's ring buffer after the session ends
 - Only reproduces under a narrow timing window — most sessions look fine
 
@@ -52,7 +52,7 @@ await emitFinalChunkIfAny()       // adds final chunk to `pending`
 await senderTask?.value           // expression evaluates senderTask ONCE → captures TaskA
 ```
 
-If TaskA's wrapper is between "runSender returned" and "markSenderFinished runs," `senderTask` is still TaskA at expression-evaluation time. `stop()` awaits TaskA. TaskA's wrapper finishes via `markSenderFinished`, which respawns into TaskB and clears `senderTask` to TaskB. TaskA's `.value` resolves immediately. `stop()` resumes, finds `transcripts == []`, throws `.noSpeech`. TaskB hasn't even started yet — by the time it runs, the result is discarded.
+If TaskA's wrapper is between "runSender returned" and "markSenderFinished runs," `senderTask` is still TaskA at expression-evaluation time. `stop()` awaits TaskA. TaskA's wrapper finishes via `markSenderFinished`, which respawns into TaskB and clears `senderTask` to TaskB. TaskA's `.value` resolves immediately. `stop()` resumes, finds `responses == []` (named `transcripts` at the time of PR #38; renamed in PR #39's partial-recovery refactor), throws `.noSpeech`. TaskB hasn't even started yet — by the time it runs, the result is discarded.
 
 The respawn happened. The await missed it.
 

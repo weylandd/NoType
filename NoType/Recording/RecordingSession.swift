@@ -82,6 +82,63 @@ final class RecordingSession {
         }
     }
 
+    /// Marker substituted into the pasted text in place of a chunk
+    /// whose Gemini call failed recoverably (network, 5xx, decoding,
+    /// etc — see `isTerminal(_:)`). The user sees `[…]` where the gap
+    /// is, knows the surrounding text is intact, and can re-dictate
+    /// just the missing piece — vs the old all-or-nothing behaviour
+    /// which threw away a 3-minute monologue on a single dropped
+    /// chunk. See `NoType/Recording/CLAUDE.md` "Partial recovery".
+    nonisolated static let failureMarker = "[…]"
+
+    /// Outcome bookkeeping for a session — exposed to `AppState` so
+    /// the post-`stop()` HUD can nudge the user when the pasted text
+    /// contains `failureMarker` placeholders. The marker itself is
+    /// visible in the text; this struct gives the caller a count
+    /// without parsing.
+    struct SessionSummary: Sendable {
+        /// Count of chunks whose Gemini call failed recoverably and
+        /// were replaced with `failureMarker` in the pasted text.
+        let failedChunkCount: Int
+        /// Total chunks dispatched to Gemini (excludes sub-150 ms
+        /// drops). `failedChunkCount <= dispatchedChunkCount`.
+        let dispatchedChunkCount: Int
+
+        var hasFailures: Bool { failedChunkCount > 0 }
+    }
+
+    /// Classify a Gemini / system error as terminal (abort the
+    /// session, surface via Error HUD) or recoverable (insert
+    /// `failureMarker` and continue draining remaining chunks).
+    ///
+    /// Terminal errors are ones where continuing the session can't
+    /// help: a bad key won't authenticate the next chunk; a blocked
+    /// prompt won't unblock; an encode failure means PCM is corrupt
+    /// or AVFAudio is wedged; a user cancellation is, well, user-
+    /// initiated. Everything else (HTTP 4xx/5xx/network/decoding/
+    /// empty) is treated as a transient gap — paste what we have,
+    /// mark the gap, let the user decide whether to re-dictate.
+    nonisolated static func isTerminal(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let gerr = error as? GeminiClient.GeminiError {
+            switch gerr {
+            case .missingKey, .blocked:
+                return true
+            case .http(let status, _):
+                // 401 (bad key) / 403 (key not authorised for this
+                // model) are terminal — no point burning N×retries on
+                // every chunk of a session whose authentication is
+                // already broken. The user needs to fix the key in
+                // Settings. Other 4xx / 5xx / network (status=0) stay
+                // recoverable: gap marker, continue draining.
+                return status == 401 || status == 403
+            case .empty, .decoding:
+                return false
+            }
+        }
+        return true
+    }
+
     private let recorder: AudioRecorder
     private let vad:      SileroVAD
     private let gemini:   GeminiClient
@@ -140,14 +197,36 @@ final class RecordingSession {
     /// chunks at once).
     private var senderTask: Task<Void, Never>?
 
-    /// Outputs of completed Gemini calls, in dispatch order. A single
-    /// call may have transcribed one chunk or several (batched) — we
-    /// don't split the response back out into per-chunk strings here,
-    /// because the model's contract is "produce one contiguous text".
-    /// Concatenated at session end.
-    private var transcripts: [String] = []
+    /// Outcome of one Gemini call. A single `transcribe` produces
+    /// one response covering a single chunk; a `transcribeBatch`
+    /// produces one response covering several chunks (the model
+    /// returns one contiguous text — we don't try to split it back
+    /// out per-chunk). On a recoverable failure, `text == nil` and
+    /// the stitched session output substitutes `failureMarker` for
+    /// this entry's slot. See `runSender` / `processBatch` / `stop()`
+    /// + `NoType/Recording/CLAUDE.md` "Partial recovery".
+    private struct ChunkResponse: Sendable {
+        let chunkIndices: [Int]
+        let text: String?
+    }
+
+    /// Outputs of completed Gemini calls, in dispatch order (also
+    /// chunk-index order: the sender drains serially and we never
+    /// dispatch out-of-order). Stitched at `stop()` — each entry's
+    /// `text ?? Self.failureMarker` becomes one piece of the output.
+    private var responses: [ChunkResponse] = []
     private var chunkCounter: Int = 0
+    /// Set when a terminal error aborts the session (auth, blocked,
+    /// encode failure, cancellation). `stop()` rethrows this — the
+    /// recoverable-failure path leaves this nil and falls back to
+    /// `lastRecoverableError` only when *every* response failed.
     private var failure: Error?
+    /// Most recent recoverable error captured during a marker
+    /// append. Used by `stop()` when every chunk's call failed —
+    /// throwing this instead of `SessionError.noSpeech` gives the
+    /// AppState error catalog the real cause (offline, 5xx, etc) to
+    /// surface in the Error HUD.
+    private var lastRecoverableError: Error?
     private var apiKey: String = ""
 
     init(recorder: AudioRecorder, vad: SileroVAD, gemini: GeminiClient, history: HistoryStore) {
@@ -300,20 +379,44 @@ final class RecordingSession {
     }
 
     /// Best-effort cancel: stop capturing, drop any in-flight sender,
-    /// and discard accumulated transcripts. Pasting is skipped.
+    /// and discard accumulated responses. Pasting is skipped.
     func cancel() async {
         recorder.stop()
         senderTask?.cancel()
         vadTask?.cancel()
         await senderTask?.value
         await vadTask?.value
-        transcripts.removeAll()
+        responses.removeAll()
         pending.removeAll()
+        // Reset the companion fields together so a partial-recovery
+        // state from a previous cancellation can't leak into the next
+        // session via a re-used `RecordingSession` (the class is one-
+        // session-per-instance today, but keeping these in lockstep
+        // prevents a future refactor from introducing a subtle stale-
+        // state bug).
+        lastRecoverableError = nil
         // Mark a synthetic failure so `stop()` (if it's racing this
         // call) sees a cancelled state rather than trying to paste.
         if failure == nil {
             failure = CancellationError()
         }
+    }
+
+    /// Post-session diagnostics — read by `AppState.finalizeRecording`
+    /// after `stop()` returns to decide whether to nudge the user with
+    /// a "some parts didn't transcribe" HUD. Cheap to compute (loops
+    /// over `responses` once); safe to call from the main actor.
+    var summary: SessionSummary {
+        var failed = 0
+        var total = 0
+        for r in responses {
+            total += r.chunkIndices.count
+            if r.text == nil { failed += r.chunkIndices.count }
+        }
+        return SessionSummary(
+            failedChunkCount: failed,
+            dispatchedChunkCount: total
+        )
     }
 
     /// Stops capture, awaits the sender draining the pending queue,
@@ -346,6 +449,18 @@ final class RecordingSession {
             throw err
         }
 
+        // If every dispatched response failed (text == nil), there's
+        // nothing user-meaningful to paste — only a string of `[…]`
+        // markers. Surface the real cause (offline / 5xx / decoding /
+        // …) so the AppState error catalog can render the right Error
+        // HUD instead of "pasted N gaps". `lastRecoverableError` was
+        // set every time we appended a `text: nil` response; falling
+        // back to `.noSpeech` is defensive (a successful append should
+        // always set the field, but the guard keeps `stop()` total).
+        if !responses.isEmpty && responses.allSatisfy({ $0.text == nil }) {
+            throw lastRecoverableError ?? SessionError.noSpeech
+        }
+
         // The model is supposed to emit a leading space when its chunk
         // starts a new word after the prior chunk ended non-whitespace,
         // but with `thinkingLevel: .minimal` it occasionally forgets and
@@ -354,7 +469,12 @@ final class RecordingSession {
         // between a sentence-internal terminal (`.`, `!`, `?`, `,`, `:`,
         // `;`, `…`) and a word-starter on the next chunk. Trim outer
         // whitespace so a fully blank session returns "".
-        let stitched = TextInjector.stitchChunks(transcripts)
+        //
+        // Failed chunks contribute `failureMarker` ("[…]") in place
+        // of their text — the user sees a visible gap surrounded by
+        // intact transcription and can re-dictate just that piece.
+        let pieces = responses.map { $0.text ?? Self.failureMarker }
+        let stitched = TextInjector.stitchChunks(pieces)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !stitched.isEmpty else {
             throw SessionError.noSpeech
@@ -568,8 +688,17 @@ final class RecordingSession {
     }
 
     /// Encode every chunk in `batch`, then issue either a single or
-    /// batched Gemini request. One transcripts entry per request — we
-    /// don't try to split a batched response back into per-chunk strings.
+    /// batched Gemini request. One `ChunkResponse` is appended per
+    /// request — we don't try to split a batched response back into
+    /// per-chunk strings.
+    ///
+    /// Partial recovery: when a batched call fails with a recoverable
+    /// error (network, 5xx, etc — see `isTerminal(_:)`), we split it
+    /// into N single-chunk `transcribe` calls. Each independent call
+    /// either succeeds (text appended) or fails (`nil` text →
+    /// `failureMarker` at stitch time). The session only aborts on
+    /// terminal errors (auth, blocked, encode); recoverable failures
+    /// leave gaps and continue draining.
     private func processBatch(_ batch: [PendingChunk]) async {
         // Batches containing the **final** chunk come from a user release.
         // For those we don't wait on the context task — if AX / OCR
@@ -586,9 +715,16 @@ final class RecordingSession {
         // single-word sessions where context never helps anyway.
         let isFinalBatch = batch.contains { $0.isFinal }
         let totalBatchSamples = batch.reduce(0) { $0 + ($1.pcmEnd - $1.pcmStart) }
+        // Lite path requires no prior transcript text to ship in the
+        // `Prior chunks (this session):` section. Recoverable failures
+        // (markers) don't produce text, so they don't disqualify the
+        // lite path — if every prior call failed, the prompt's prior
+        // section would be `(none yet)` anyway and the trimmed shape
+        // still fits. Use `currentPriors().count` rather than
+        // `responses.count` for this reason.
         let isShortFinalOnly = Self.shouldUseLitePath(
             isFinalBatch: isFinalBatch,
-            priorTranscriptCount: transcripts.count,
+            priorTranscriptCount: currentPriors().count,
             totalBatchSamples: totalBatchSamples
         )
         guard let snap = await snapshotForChunk(
@@ -620,6 +756,9 @@ final class RecordingSession {
         if encoded.isEmpty { return }
 
         let containsFinal = encoded.contains { $0.isFinal }
+        let label = encoded.count == 1
+            ? "chunk_\(encoded[0].idx)"
+            : "chunks_\(encoded.first?.idx ?? -1)..\(encoded.last?.idx ?? -1)"
 
         do {
             let text: String
@@ -627,7 +766,7 @@ final class RecordingSession {
                 // Lite path is reachable only via the discriminator in
                 // `processBatch` — guaranteed `encoded.count == 1` and
                 // `containsFinal == true` by construction (final-only
-                // batch, transcripts empty, audio < 2 s).
+                // batch, no successful priors, audio < 2 s).
                 let one = encoded[0]
                 text = try await gemini.transcribeShort(
                     audio: one.audio,
@@ -657,23 +796,128 @@ final class RecordingSession {
                     apiKey: snap.apiKey
                 )
             }
-            appendTranscript(text)
+            responses.append(ChunkResponse(
+                chunkIndices: encoded.map { $0.idx },
+                text: text
+            ))
+        } catch {
+            if Self.isTerminal(error) {
+                Self.log.error("\(label) failed terminally: \(error.localizedDescription, privacy: .public)")
+                markFailure(error)
+                discardProcessedPCM(batch: batch, containsFinal: containsFinal)
+                return
+            }
 
-            // Free PCM that's no longer needed. Anything before the last
-            // non-final chunk's `end` is safe to drop. If the batch
-            // contained the final chunk we leave the buffer alone — the
-            // recorder is about to be torn down anyway.
-            if !containsFinal {
-                if let lastEnd = batch.last(where: { !$0.isFinal })?.pcmEnd {
-                    recorder.discardSamples(beforeAbsolute: lastEnd)
+            // Recoverable failure. For a batched call, split-retry per
+            // chunk — each independent call has its own retry budget in
+            // `GeminiClient` and one bad chunk shouldn't poison the
+            // others. For a single-chunk call, there's nothing to
+            // split; record a marker. The lite path falls here too —
+            // it's single-chunk by construction, so the user gets a
+            // `[…]` for a 1–2 word session, which `stop()`'s "all
+            // chunks failed" branch then translates into the proper
+            // Error HUD.
+            if encoded.count > 1 {
+                Self.log.warning("\(label) failed (\(error.localizedDescription, privacy: .public)) — splitting into \(encoded.count) single calls")
+                await splitRetry(encoded: encoded, snap: snap)
+            } else {
+                let c = encoded[0]
+                Self.log.error("\(label) failed: \(error.localizedDescription, privacy: .public) — inserting marker")
+                recordRecoverableFailure(error: error, indices: [c.idx])
+            }
+        }
+
+        discardProcessedPCM(batch: batch, containsFinal: containsFinal)
+    }
+
+    /// Inter-iteration backoff for `splitRetry` after a recoverable
+    /// failure. The batched call has already exhausted its
+    /// HTTP-class retries inside `GeminiClient.sendRequest` (3 attempts
+    /// under 429), and now each split sub-call also has its own
+    /// retry budget. Without a gap, a 6-chunk batch under sustained
+    /// 429 / 5xx fires up to N×3 requests back-to-back — amplifying
+    /// the very condition we're trying to recover from. 250 ms isn't
+    /// a rate-limit-aware exponential backoff; it just caps the burst
+    /// rate at 4 sub-calls per second so we surface a few markers and
+    /// fail visibly rather than burning the user's quota.
+    nonisolated static let splitRetryBackoff: Duration = .milliseconds(250)
+
+    /// Fallback for a batched Gemini call that failed recoverably:
+    /// re-issue each chunk as an independent `transcribe`. Successful
+    /// chunks become priors for the next ones (network blip recovered
+    /// → chunk 3 sees chunk 2's text). A terminal error in any
+    /// sub-call aborts the rest of the split — the session-level
+    /// `markFailure` is already set; `stop()` will rethrow.
+    private func splitRetry(
+        encoded: [(idx: Int, isFinal: Bool, audio: Data)],
+        snap: ChunkSnapshot
+    ) async {
+        for (offset, chunk) in encoded.enumerated() {
+            if didFail { return }
+            // Re-query priors each iteration so a chunk that just
+            // succeeded becomes context for the next one.
+            let priors = currentPriors()
+            do {
+                let text = try await gemini.transcribe(
+                    audio: chunk.audio,
+                    mimeType: "audio/mp4",
+                    context: snap.context,
+                    priorTranscripts: priors,
+                    chunkIndex: chunk.idx,
+                    isFinal: chunk.isFinal,
+                    apiKey: snap.apiKey
+                )
+                responses.append(ChunkResponse(
+                    chunkIndices: [chunk.idx],
+                    text: text
+                ))
+            } catch {
+                if Self.isTerminal(error) {
+                    Self.log.error("chunk_\(chunk.idx) split-retry failed terminally: \(error.localizedDescription, privacy: .public)")
+                    markFailure(error)
+                    return
+                }
+                Self.log.error("chunk_\(chunk.idx) split-retry failed: \(error.localizedDescription, privacy: .public) — inserting marker")
+                recordRecoverableFailure(error: error, indices: [chunk.idx])
+                // Brief pause before the next sub-call so we don't
+                // burst-fire against a rate-limited API. Skip the
+                // sleep when we're already on the last chunk —
+                // nothing comes after.
+                if offset < encoded.count - 1 {
+                    try? await Task.sleep(for: Self.splitRetryBackoff)
                 }
             }
-        } catch {
-            let label = encoded.count == 1
-                ? "chunk_\(encoded[0].idx)"
-                : "chunks_\(encoded.first?.idx ?? -1)..\(encoded.last?.idx ?? -1)"
-            Self.log.error("\(label) failed: \(error.localizedDescription, privacy: .public)")
-            markFailure(error)
+        }
+    }
+
+    /// Append a `text: nil` response for a chunk (or batched group)
+    /// whose Gemini call failed recoverably. Also stashes the error
+    /// so `stop()` can rethrow it as the session-level failure when
+    /// *every* dispatched call failed — gives the AppState error
+    /// catalog the real cause (offline, 5xx, …) to surface rather
+    /// than the generic `.noSpeech`.
+    private func recordRecoverableFailure(
+        error: Error,
+        indices: [Int]
+    ) {
+        lastRecoverableError = error
+        responses.append(ChunkResponse(
+            chunkIndices: indices,
+            text: nil
+        ))
+    }
+
+    /// Free PCM for non-final chunks once their AAC blobs have been
+    /// dispatched (successfully or not). PCM is the largest in-memory
+    /// thing in a session; holding it past the dispatch point inflates
+    /// memory for nothing — the AAC blob is already encoded and the
+    /// only consumer of the PCM was `ChunkBuilder.encodeAAC`. If the
+    /// batch contained the final chunk we leave the buffer alone —
+    /// the recorder is about to be torn down anyway.
+    private func discardProcessedPCM(batch: [PendingChunk], containsFinal: Bool) {
+        guard !containsFinal else { return }
+        if let lastEnd = batch.last(where: { !$0.isFinal })?.pcmEnd {
+            recorder.discardSamples(beforeAbsolute: lastEnd)
         }
     }
 
@@ -731,7 +975,18 @@ final class RecordingSession {
             ))
             isLite = false
         }
-        return ChunkSnapshot(context: context, priors: transcripts, apiKey: apiKey, isLite: isLite)
+        return ChunkSnapshot(context: context, priors: currentPriors(), apiKey: apiKey, isLite: isLite)
+    }
+
+    /// Successful transcript texts from completed Gemini calls, in
+    /// dispatch order. Used as the `priorTranscripts` argument to the
+    /// next request and for the lite-path discriminator. Failed
+    /// chunks (`text == nil`) contribute nothing — they exist as
+    /// `failureMarker` placeholders only in the final pasted text,
+    /// never in the Gemini-facing prior list. Sending markers as
+    /// priors would teach the model to emit them.
+    private func currentPriors() -> [String] {
+        responses.compactMap { $0.text }
     }
 
     /// Synchronously assemble a small `ContextSnapshot` for short
@@ -771,10 +1026,6 @@ final class RecordingSession {
             insertionTarget: target,
             screenText: nil
         )
-    }
-
-    private func appendTranscript(_ text: String) {
-        transcripts.append(text)
     }
 
     private func markFailure(_ error: Error) {

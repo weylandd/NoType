@@ -32,9 +32,9 @@ The unit of work is a **batch** — but the global rule is still "one in-flight 
 
 ## Why This Matters
 
-- **Eliminates response-ordering bugs.** With concurrent dispatch, chunk 3's response can race chunk 2's; we'd need explicit ordering hooks to keep the local `transcripts[]` in dispatch order. Serial scheduling makes that impossible by construction.
+- **Eliminates response-ordering bugs.** With concurrent dispatch, chunk 3's response can race chunk 2's; we'd need explicit ordering hooks to keep the local `responses[]` (renamed from `transcripts[]` in PR #39's partial-recovery refactor) in dispatch order. Serial scheduling makes that impossible by construction.
 - **Keeps the implicit-cache prefix deterministic.** Chunk N's cached prefix is exactly `chunk_1...chunk_{N-1}` transcripts. With concurrent requests, chunk 3 might race chunk 2 and miss the cache hit. The cache discount is ~90% on prefix tokens (see `solutions/tooling-decisions/gemini-3-1-flash-lite-2026-05-15.md`), so cache misses are real money.
-- **Simplifies error handling.** There is always exactly one in-flight thing to cancel; on failure we know precisely which chunk was lost.
+- **Simplifies error handling.** There is always exactly one in-flight thing to cancel; on failure we know precisely which chunk was lost. The partial-recovery layer in `RecordingSession` builds on this — when a batched call fails recoverably, the sender splits it into N sequential `transcribe` calls (still serial; still one in-flight) and the surviving chunks become priors for the rest. See `NoType/Recording/CLAUDE.md` "Partial recovery".
 - **Batching recovers throughput.** When Gemini is slow (or the user has talked through several VAD pauses), the queued chunks coalesce into one batched call. The release path benefits most: any non-final chunks queued behind the in-flight request get drained alongside the final chunk in one call.
 
 ## When to Apply

@@ -59,7 +59,7 @@ Implemented via `retryDecision(for:attempt:)`:
 - HTTP 5xx → 1 retry after 500 ms.
 - HTTP 4xx other than 429 → no retry.
 
-Each attempt logs `attempt=N`. When a session fails partway through, **don't paste a partial transcript** — better to lose work than to insert incomplete text.
+Each attempt logs `attempt=N`. These retries are the HTTP-level safety net inside one Gemini call. **Session-level resilience lives one layer up** in `RecordingSession`: if a call still fails after exhausting its retries, the session classifies the error as terminal (auth, blocked, encode, cancellation) or recoverable (everything else). Recoverable failures become `RecordingSession.failureMarker` ("[…]") at stitch time and a batched call gets split into N independent `transcribe` retries first. The session aborts only on terminal errors or when every dispatched chunk failed. See `NoType/Recording/CLAUDE.md` "Partial recovery".
 
 ## Endpoint URLs
 
