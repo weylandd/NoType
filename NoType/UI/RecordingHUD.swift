@@ -111,6 +111,17 @@ private struct TimerPill: View {
 /// - `peak`  — the highest recent magnitude. Same instant attack, but a
 ///   *much* slower decay — the marker hangs visibly at the top before
 ///   sliding down, giving the meter the classic "VU peak hold" feel.
+///
+/// Frame updates are driven by a `.task` async loop, **not** by
+/// `TimelineView`. On macOS 26 the per-tick re-entry into a
+/// `@MainActor`-isolated View instance method (here: `barColumn(at:)`,
+/// `updateLevels()`, the `tickKey` computed property) from inside the
+/// `TimelineView` content closure triggered a runtime executor check
+/// (`swift_task_isCurrentExecutorWithFlagsImpl` → `objc_opt_class`)
+/// that crashed during layout — same pattern that broke
+/// `HistoryRowView.TimestampDisplay` (incident 4838DA5B-…) and crashed
+/// the tester during onboarding mic-check. A `.task` async loop driving
+/// `@State` mutation directly side-steps the TimelineView dispatch path.
 private struct LiveSpectrumMeter: View {
     let samplesProvider: @MainActor () -> [Float]
 
@@ -124,63 +135,85 @@ private struct LiveSpectrumMeter: View {
     /// Max bar height inside the 36 pt container minus 6 pt vertical
     /// padding (top + bottom = 12) → 24 pt.
     private let maxBarHeight: CGFloat = 24
+    /// ~30 fps frame interval. Matches the prior `TimelineView` cadence.
+    private let frameInterval: Duration = .milliseconds(33)
 
-    @State private var levels: [Float] = []
-    @State private var peaks:  [Float] = []
+    @State private var levels: [Float] = Array(repeating: 0, count: 38)
+    @State private var peaks:  [Float] = Array(repeating: 0, count: 38)
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { _ in
-            HStack(alignment: .bottom, spacing: 2) {
-                ForEach(0..<barCount, id: \.self) { i in
-                    barColumn(at: i)
-                        .frame(maxWidth: .infinity)
-                }
+        HStack(alignment: .bottom, spacing: 2) {
+            ForEach(0..<barCount, id: \.self) { i in
+                LiveSpectrumBar(
+                    level: max(minBarHeight, CGFloat(levels.indices.contains(i) ? levels[i] : 0) * maxBarHeight),
+                    peak:  CGFloat(peaks.indices.contains(i) ? peaks[i] : 0) * maxBarHeight,
+                    minBarHeight: minBarHeight,
+                    maxBarHeight: maxBarHeight
+                )
+                .frame(maxWidth: .infinity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-            .padding(EdgeInsets(top: 6, leading: 4, bottom: 6, trailing: 4))
-            .onChange(of: tickKey) { _, _ in updateLevels() }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .padding(EdgeInsets(top: 6, leading: 4, bottom: 6, trailing: 4))
         .frame(height: 36)
-        .background(meterBackground)
+        .background(
+            LinearGradient(
+                colors: [
+                    DS.Color.bgInset.opacity(0.8),
+                    DS.Color.bgCanvas.opacity(0.6),
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
         .overlay(
             RoundedRectangle(cornerRadius: 8)
                 .strokeBorder(DS.Color.borderSubtle, lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .onAppear {
-            if levels.isEmpty {
-                levels = Array(repeating: 0, count: barCount)
-                peaks  = Array(repeating: 0, count: barCount)
+        .task {
+            // `.task` auto-cancels when the HUD goes away. No
+            // TimelineView, no .onChange — just sample + decay + assign
+            // to @State, which triggers normal SwiftUI re-render.
+            while !Task.isCancelled {
+                let samples = samplesProvider()
+                let fresh = AudioSpectrum.bands(from: samples, bandCount: barCount)
+                var nextLevels = levels
+                var nextPeaks  = peaks
+                if nextLevels.count != barCount {
+                    nextLevels = Array(repeating: 0, count: barCount)
+                }
+                if nextPeaks.count != barCount {
+                    nextPeaks = Array(repeating: 0, count: barCount)
+                }
+                for i in 0..<barCount {
+                    let f = fresh[i]
+                    nextLevels[i] = max(f, nextLevels[i] * levelDecay)
+                    nextPeaks[i]  = max(nextLevels[i], nextPeaks[i] * peakDecay)
+                }
+                levels = nextLevels
+                peaks  = nextPeaks
+                try? await Task.sleep(for: frameInterval)
             }
         }
     }
+}
 
-    /// Vertical gradient `bg-inset → bg-canvas` (each at ~70% opacity)
-    /// matches the spec — the meter reads as a recessed slot rather than
-    /// a flat tile, which the previous solid bg-inset fill no longer did
-    /// after the surrounding HUD glass got lighter.
-    private var meterBackground: some View {
-        LinearGradient(
-            colors: [
-                DS.Color.bgInset.opacity(0.8),
-                DS.Color.bgCanvas.opacity(0.6),
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-    }
+/// Pure-presentation bar with peak-hold marker. Takes geometry as inputs
+/// so the parent can drive it from a frozen snapshot of `@State` without
+/// the bar reaching back into `self`.
+private struct LiveSpectrumBar: View {
+    let level: CGFloat
+    let peak: CGFloat
+    let minBarHeight: CGFloat
+    let maxBarHeight: CGFloat
 
-    /// Peak-hold marker geometry. Chubbier than the bar and inset on
-    /// both sides so it reads as a separate "puck" floating at the
-    /// bar's recent high rather than a stripe glued to the column.
-    private let peakHeight_:  CGFloat = 2
-    private let peakInset:    CGFloat = 0.5
-    private let peakRadius:   CGFloat = 1
+    private let peakThickness: CGFloat = 2
+    private let peakInset: CGFloat = 0.5
+    private let peakRadius: CGFloat = 1
 
-    private func barColumn(at index: Int) -> some View {
-        let level = barHeight(at: index)
-        let peak  = peakHeight(at: index)
-        return ZStack(alignment: .bottom) {
+    var body: some View {
+        ZStack(alignment: .bottom) {
             // Live bar: top corners 2 pt, bottom flat — sits firmly
             // on the meter's baseline like a column rather than a pill.
             UnevenRoundedRectangle(
@@ -190,70 +223,25 @@ private struct LiveSpectrumMeter: View {
                 topTrailingRadius: 2,
                 style: .continuous
             )
-            .fill(barGradient)
+            .fill(
+                LinearGradient(
+                    colors: [DS.Color.accentFg, DS.Color.accent],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
             .frame(height: level)
 
-            // Peak-hold marker: 4 pt-tall rounded puck, narrower than
+            // Peak-hold marker: 2 pt-tall rounded puck, narrower than
             // the bar by `peakInset` on each side. Decays much slower
             // than the bar → the puck hangs at the high-water mark
             // while the column drops, then catches up.
             RoundedRectangle(cornerRadius: peakRadius, style: .continuous)
                 .fill(DS.Color.accentFg)
-                .frame(height: peakHeight_)
+                .frame(height: peakThickness)
                 .padding(.horizontal, peakInset)
-                .offset(y: -(peak - peakHeight_).clamped(to: 0...maxBarHeight))
+                .offset(y: -min(max(peak - peakThickness, 0), maxBarHeight))
                 .opacity(peak > minBarHeight ? 0.9 : 0)
         }
-    }
-
-    private var barGradient: LinearGradient {
-        LinearGradient(
-            colors: [DS.Color.accentFg, DS.Color.accent],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-    }
-
-    /// Stable per-tick key so `.onChange` fires once per frame; using
-    /// `ctx.date` directly would re-fire on every body re-eval.
-    private var tickKey: Int {
-        Int(Date().timeIntervalSinceReferenceDate * 30)
-    }
-
-    private func updateLevels() {
-        let samples = samplesProvider()
-        let fresh = AudioSpectrum.bands(from: samples, bandCount: barCount)
-        if levels.count != barCount {
-            levels = Array(repeating: 0, count: barCount)
-        }
-        if peaks.count != barCount {
-            peaks = Array(repeating: 0, count: barCount)
-        }
-        for i in 0..<barCount {
-            let f = fresh[i]
-            // Bar: instant attack, exponential decay → snappy onsets,
-            // smooth falloff.
-            levels[i] = max(f, levels[i] * levelDecay)
-            // Peak: instant attack to the bar's value, then a much
-            // slower decay so the marker visibly hangs.
-            peaks[i]  = max(levels[i], peaks[i] * peakDecay)
-        }
-    }
-
-    private func barHeight(at index: Int) -> CGFloat {
-        guard index < levels.count else { return minBarHeight }
-        let v = CGFloat(levels[index])
-        return max(minBarHeight, v * maxBarHeight)
-    }
-
-    private func peakHeight(at index: Int) -> CGFloat {
-        guard index < peaks.count else { return 0 }
-        return CGFloat(peaks[index]) * maxBarHeight
-    }
-}
-
-private extension Comparable {
-    func clamped(to range: ClosedRange<Self>) -> Self {
-        min(max(self, range.lowerBound), range.upperBound)
     }
 }

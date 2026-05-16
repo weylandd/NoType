@@ -54,6 +54,20 @@ struct OnboardingMicCheckStep: View {
 /// Slimmer port of `LiveSpectrumMeter` from the recording HUD. Same FFT,
 /// same animation envelope, sized for the centered 360 × 80 onboarding
 /// slot.
+///
+/// Frame updates are driven by a `.task` async loop, **not** by
+/// `TimelineView`. On macOS 26 the per-tick re-entry into a
+/// `@MainActor`-isolated View instance method (here: `bar(at:)`,
+/// `updateLevels()`, the `tickKey` computed property) from inside the
+/// `TimelineView` content closure triggered a runtime executor check
+/// (`swift_task_isCurrentExecutorWithFlagsImpl` → `objc_opt_class`)
+/// that crashed on launch — incident 4838DA5B-…
+/// (originally hit by `HistoryRowView.TimestampDisplay` and patched there
+/// by inlining + static helpers; this view shipped with the same broken
+/// pattern and crashed the tester on the mic-check step of onboarding).
+/// A `.task` async loop driving `@State` mutation directly side-steps the
+/// TimelineView dispatch path entirely, so no method-boundary executor
+/// check fires.
 private struct OnboardingSpectrumMeter: View {
     let samplesProvider: @MainActor () -> [Float]
 
@@ -62,51 +76,80 @@ private struct OnboardingSpectrumMeter: View {
     private let peakDecay:  Float = 0.98
     private let minBarHeight: CGFloat = 2
     private let maxBarHeight: CGFloat = 56
+    /// ~30 fps frame interval. Matches the prior `TimelineView` cadence.
+    private let frameInterval: Duration = .milliseconds(33)
 
-    @State private var levels: [Float] = []
-    @State private var peaks:  [Float] = []
+    @State private var levels: [Float] = Array(repeating: 0, count: 44)
+    @State private var peaks:  [Float] = Array(repeating: 0, count: 44)
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { _ in
-            HStack(alignment: .bottom, spacing: 3) {
-                ForEach(0..<barCount, id: \.self) { i in
-                    bar(at: i)
-                        .frame(maxWidth: .infinity)
-                }
+        HStack(alignment: .bottom, spacing: 3) {
+            ForEach(0..<barCount, id: \.self) { i in
+                OnboardingSpectrumBar(
+                    level: max(minBarHeight, CGFloat(levels.indices.contains(i) ? levels[i] : 0) * maxBarHeight),
+                    peak:  CGFloat(peaks.indices.contains(i) ? peaks[i] : 0) * maxBarHeight,
+                    minBarHeight: minBarHeight,
+                    maxBarHeight: maxBarHeight
+                )
+                .frame(maxWidth: .infinity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-            .padding(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12))
-            .onChange(of: tickKey) { _, _ in updateLevels() }
         }
-        .background(meterBackground)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .padding(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12))
+        .background(
+            LinearGradient(
+                colors: [
+                    DS.Color.bgInset.opacity(0.8),
+                    DS.Color.bgCanvas.opacity(0.6),
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
         .overlay(
             RoundedRectangle(cornerRadius: DS.Radius.md)
                 .strokeBorder(DS.Color.borderSubtle, lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: DS.Radius.md))
-        .onAppear {
-            if levels.isEmpty {
-                levels = Array(repeating: 0, count: barCount)
-                peaks  = Array(repeating: 0, count: barCount)
+        .task {
+            // `.task` auto-cancels when the view disappears (step
+            // navigation, window close). No TimelineView, no .onChange —
+            // just sample + decay + assign to @State, which re-renders.
+            while !Task.isCancelled {
+                let samples = samplesProvider()
+                let fresh = AudioSpectrum.bands(from: samples, bandCount: barCount)
+                var nextLevels = levels
+                var nextPeaks  = peaks
+                if nextLevels.count != barCount {
+                    nextLevels = Array(repeating: 0, count: barCount)
+                }
+                if nextPeaks.count != barCount {
+                    nextPeaks = Array(repeating: 0, count: barCount)
+                }
+                for i in 0..<barCount {
+                    let f = fresh[i]
+                    nextLevels[i] = max(f, nextLevels[i] * levelDecay)
+                    nextPeaks[i]  = max(nextLevels[i], nextPeaks[i] * peakDecay)
+                }
+                levels = nextLevels
+                peaks  = nextPeaks
+                try? await Task.sleep(for: frameInterval)
             }
         }
     }
+}
 
-    private var meterBackground: some View {
-        LinearGradient(
-            colors: [
-                DS.Color.bgInset.opacity(0.8),
-                DS.Color.bgCanvas.opacity(0.6),
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-    }
+/// Pure-presentation bar with peak-hold marker. Takes geometry as inputs
+/// so the parent can drive it from a frozen snapshot of `@State` without
+/// the bar reaching back into `self`.
+private struct OnboardingSpectrumBar: View {
+    let level: CGFloat
+    let peak: CGFloat
+    let minBarHeight: CGFloat
+    let maxBarHeight: CGFloat
 
-    private func bar(at index: Int) -> some View {
-        let level = barHeight(at: index)
-        let peak  = peakHeight(at: index)
-        return ZStack(alignment: .bottom) {
+    var body: some View {
+        ZStack(alignment: .bottom) {
             UnevenRoundedRectangle(
                 topLeadingRadius: 2,
                 bottomLeadingRadius: 0,
@@ -127,40 +170,8 @@ private struct OnboardingSpectrumMeter: View {
                 .fill(DS.Color.accentFg)
                 .frame(height: 2)
                 .padding(.horizontal, 0.5)
-                .offset(y: -(peak - 2).clamped(to: 0...maxBarHeight))
+                .offset(y: -min(max(peak - 2, 0), maxBarHeight))
                 .opacity(peak > minBarHeight ? 0.9 : 0)
         }
-    }
-
-    private var tickKey: Int {
-        Int(Date().timeIntervalSinceReferenceDate * 30)
-    }
-
-    private func updateLevels() {
-        let samples = samplesProvider()
-        let fresh = AudioSpectrum.bands(from: samples, bandCount: barCount)
-        if levels.count != barCount { levels = Array(repeating: 0, count: barCount) }
-        if peaks.count  != barCount { peaks  = Array(repeating: 0, count: barCount) }
-        for i in 0..<barCount {
-            let f = fresh[i]
-            levels[i] = max(f, levels[i] * levelDecay)
-            peaks[i]  = max(levels[i], peaks[i] * peakDecay)
-        }
-    }
-
-    private func barHeight(at index: Int) -> CGFloat {
-        guard index < levels.count else { return minBarHeight }
-        return max(minBarHeight, CGFloat(levels[index]) * maxBarHeight)
-    }
-
-    private func peakHeight(at index: Int) -> CGFloat {
-        guard index < peaks.count else { return 0 }
-        return CGFloat(peaks[index]) * maxBarHeight
-    }
-}
-
-private extension Comparable {
-    func clamped(to range: ClosedRange<Self>) -> Self {
-        min(max(self, range.lowerBound), range.upperBound)
     }
 }
