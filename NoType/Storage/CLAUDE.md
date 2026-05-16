@@ -56,8 +56,6 @@ ever needs to round-trip across a renamed-file boundary.
 
 ## Pointers
 
-- Why centralise the file IO → git history of PRs #33 (extraction) and
-  the follow-up that dropped the redundant `storeName:` parameter.
 - Consumers (which store does what) → `NoType/History/CLAUDE.md`,
   `NoType/Instructions/CLAUDE.md`, `NoType/Dictionary/CLAUDE.md`.
 - Privacy posture (these stores never leave the device) →
