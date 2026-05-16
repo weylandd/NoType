@@ -37,7 +37,7 @@ The Keychain entry uses:
 - **No billing relationship.** Operating a hosted-key model means handling user accounts, API quota, abuse mitigation, and the legal apparatus of a paid SaaS — none of which the v1 product asks for.
 - **OSS positioning.** A user can read the source, build the binary, and confirm the key never leaves their device. Hosted keys would force them to trust a server they can't audit.
 - **Future-proof.** The paid SaaS tier (when it lands) can add a hosted option as a Pro feature; the OSS app continues to work standalone with BYOK.
-- **Keychain over a 0600 JSON file.** Earlier builds used `~/Library/Application Support/NoType/settings.json` — was migrated transparently into Keychain via `SecretStore.loadGeminiKey()` on first launch of the Keychain-backed build. Keychain wins on: ACL-aware access, `AfterFirstUnlock` semantics, and surviving rebuilds quietly when the codesign designated requirement is stable (we ship a fixed DR via `signing/NoType.xcrequirements`).
+- **Keychain over a 0600 JSON file.** Earlier builds used `~/Library/Application Support/NoType/settings.json` — `SecretStore.loadGeminiKey()` migrates the file's contents into Keychain on first launch of a Keychain-backed build, removes the legacy file on successful save, and falls through to the legacy path *both* on Keychain miss *and* on Keychain read throw (so a transient ACL mismatch on a re-signed dev build doesn't strand the user through onboarding again — see `NoType/Keychain/CLAUDE.md` "Legacy settings.json migration"). Keychain wins on: ACL-aware access, `AfterFirstUnlock` semantics, and surviving rebuilds quietly when the codesign designated requirement is stable (we ship a fixed DR via `signing/NoType.xcrequirements`).
 
 ## When to Apply
 
@@ -51,9 +51,9 @@ The Keychain entry uses:
 ```swift
 enum SecretStore {
     static func saveGeminiKey(_ key: String) throws
-    static func loadGeminiKey() throws -> String?
     static func deleteGeminiKey() throws
-    static func loadFromEnvOrFile() -> String?  // dev-only env var fallback
+    static func loadFromEnvOrFile() -> String?           // env var, then loadGeminiKey()
+    // private static func loadGeminiKey() -> String?    // Keychain → legacy file → nil
 }
 ```
 
