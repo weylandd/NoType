@@ -35,11 +35,8 @@ actor DictionaryStore {
 
     private let url: URL
     /// In-memory mirror of the on-disk document. Populated lazily on the
-    /// first `snapshot()` call; mutated by the writer methods. The
-    /// `cached` flag is what lets a stale envelope read return its result
-    /// without re-decoding the file every call.
+    /// first `snapshot()` call; mutated by the writer methods.
     private var cached: DictionarySnapshot?
-    private var loaded = false
 
     private let encoder = JSONFileStorage.makeEncoder()
     private let decoder = JSONFileStorage.makeDecoder()
@@ -54,7 +51,6 @@ actor DictionaryStore {
         if let cached { return cached }
         let snap = loadFromDisk()
         cached = snap
-        loaded = true
         return snap
     }
 
@@ -63,8 +59,7 @@ actor DictionaryStore {
             from: url,
             as: Envelope.self,
             decoder: decoder,
-            log: Self.log,
-            storeName: "dictionary"
+            log: Self.log
         )
         return envelope?.toSnapshot() ?? .empty
     }
@@ -255,7 +250,7 @@ actor DictionaryStore {
     private func write(_ snap: DictionarySnapshot) {
         cached = snap
         let envelope = Envelope(from: snap, version: Self.currentVersion)
-        JSONFileStorage.write(envelope, to: url, encoder: encoder, log: Self.log, storeName: "dictionary")
+        JSONFileStorage.write(envelope, to: url, encoder: encoder, log: Self.log)
     }
 
     // MARK: - Trim helper

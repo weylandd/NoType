@@ -162,13 +162,13 @@ enum AccessibilityTree {
             if let minimized: Bool = boolAttribute(of: window, key: kAXMinimizedAttribute as String), minimized {
                 continue
             }
-            let title: String? = AXAttr.stringDescribing(window,kAXTitleAttribute as String)
+            let title: String? = AXAttr.stringDescribing(window, kAXTitleAttribute as String)
 
             var lines: [String] = []
             walk(
                 node: window,
                 depth: 0,
-                parentRole: AXAttr.stringDescribing(window,kAXRoleAttribute as String),
+                parentRole: AXAttr.stringDescribing(window, kAXRoleAttribute as String),
                 parentTitle: title,
                 lines: &lines,
                 budget: &nodesRemaining
@@ -197,12 +197,12 @@ enum AccessibilityTree {
         // deadline fires.
         if Task.isCancelled { return }
 
-        let role: String?            = AXAttr.stringDescribing(node,kAXRoleAttribute as String)
-        let subrole: String?         = AXAttr.stringDescribing(node,kAXSubroleAttribute as String)
-        let roleDescription: String? = AXAttr.stringDescribing(node,kAXRoleDescriptionAttribute as String)
-        let title: String?           = AXAttr.stringDescribing(node,kAXTitleAttribute as String)
-        let identifier: String?      = AXAttr.stringDescribing(node,kAXIdentifierAttribute as String)
-        let rawValue: String?        = AXAttr.stringDescribing(node,kAXValueAttribute as String)
+        let role: String?            = AXAttr.stringDescribing(node, kAXRoleAttribute as String)
+        let subrole: String?         = AXAttr.stringDescribing(node, kAXSubroleAttribute as String)
+        let roleDescription: String? = AXAttr.stringDescribing(node, kAXRoleDescriptionAttribute as String)
+        let title: String?           = AXAttr.stringDescribing(node, kAXTitleAttribute as String)
+        let identifier: String?      = AXAttr.stringDescribing(node, kAXIdentifierAttribute as String)
+        let rawValue: String?        = AXAttr.stringDescribing(node, kAXValueAttribute as String)
 
         // Skip the window root itself in the dump — its title is already on
         // the `Window:` header line.

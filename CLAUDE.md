@@ -55,6 +55,7 @@ Per-module guides (Claude Code auto-loads the relevant one when working in that 
 - **@NoType/Gemini/CLAUDE.md** — request shape, cache-friendly part ordering (load-bearing!), prompt templates, retries.
 - **@NoType/Injection/CLAUDE.md** — clipboard save/restore, paste delay, edge cases.
 - **@NoType/History/CLAUDE.md** — JSON store, last-10 cap, schema.
+- **@NoType/Storage/CLAUDE.md** — `JSONFileStorage` shared file-IO plumbing (atomic write, corruption recovery) used by the four actor stores.
 - **@NoType/UI/CLAUDE.md** — menu-bar icon states, history popover, settings sheet, Instructions tab.
 - **@NoType/Permissions/CLAUDE.md** — request flow, status surfacing.
 - **@NoType/Keychain/CLAUDE.md** — Gemini API key storage (`SecretStore`).

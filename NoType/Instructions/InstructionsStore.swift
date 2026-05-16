@@ -55,8 +55,7 @@ actor InstructionsStore {
             from: url,
             as: Envelope.self,
             decoder: decoder,
-            log: Self.log,
-            storeName: "instructions"
+            log: Self.log
         )
         return envelope?.toSnapshot() ?? .empty
     }
@@ -152,7 +151,7 @@ actor InstructionsStore {
 
     private func write(_ snap: InstructionsSnapshot) {
         let envelope = Envelope(from: snap, version: Self.currentVersion)
-        JSONFileStorage.write(envelope, to: url, encoder: encoder, log: Self.log, storeName: "instructions")
+        JSONFileStorage.write(envelope, to: url, encoder: encoder, log: Self.log)
     }
 
     // MARK: - On-disk envelope
