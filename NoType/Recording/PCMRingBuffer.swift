@@ -19,7 +19,7 @@ import Foundation
 ///
 /// **Overflow policy.** If the producer outpaces the consumer (very
 /// long monologue with no force-cuts ever firing — shouldn't happen
-/// today since `PauseDetector.maxChunkSamples = 30 s`, but defensive),
+/// today since `PauseDetector.maxChunkSamples = 180 s`, but defensive),
 /// the oldest samples are dropped silently. `head` advances; absolute
 /// indices the caller still holds for the dropped range will silently
 /// return empty slices.

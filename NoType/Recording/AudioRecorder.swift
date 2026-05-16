@@ -63,13 +63,14 @@ final class AudioRecorder: @unchecked Sendable {
 
     /// Resampled PCM held in memory. Wrap-around ring with absolute
     /// indexing — see `PCMRingBuffer`. Capacity covers the
-    /// `PauseDetector` 30 s force-cut limit (480 000 samples) plus the
-    /// 300 ms pre-roll plus a few seconds of slack for in-flight tap
-    /// callbacks that may pile up while the chunk-builder is busy. The
+    /// `PauseDetector` 180 s force-cut limit (2 880 000 samples) plus the
+    /// 300 ms pre-roll plus ~10 s of slack for in-flight tap callbacks
+    /// that may pile up while the chunk-builder is busy on a slow Gemini
+    /// call. ~12 MB at 16 kHz float32 — trivial vs. modern Mac RAM. The
     /// number itself isn't load-bearing — overshoots are silently
     /// dropped from the head, but with the force-cut in place this
     /// shouldn't happen in normal sessions.
-    private static let pcmRingCapacity: Int = 35 * 16_000  // 35 s @ 16 kHz
+    private static let pcmRingCapacity: Int = 190 * 16_000  // 190 s @ 16 kHz
     private let pcm = PCMRingBuffer(capacity: pcmRingCapacity)
 
     /// Bytes that haven't yet been chunked into a `frameSize` VAD window.

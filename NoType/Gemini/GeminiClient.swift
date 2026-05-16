@@ -47,7 +47,17 @@ actor GeminiClient {
     init() {
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 30
-        cfg.timeoutIntervalForResource = 60
+        // 30 s is the hard ceiling for *any* single request to settle.
+        // gemini-3.1-flash-lite handles a typical chunk (≤40 s of audio
+        // after the PauseDetector adaptive ladder; ~3-5 s wall-clock) in
+        // ~5 s; even the 180 s force-cut safety-net chunk (rare —
+        // requires 3 min of unbroken speech) sits comfortably under 30
+        // s of wall-clock processing. If we're still waiting at 30 s,
+        // something is wrong (Gemini outage, dead Wi-Fi, hung CDN edge)
+        // and a fast user-visible error beats waiting for a response
+        // that won't usefully come. Coupled with PauseDetector.swift —
+        // if chunk sizing increases dramatically, revisit.
+        cfg.timeoutIntervalForResource = 30
         cfg.waitsForConnectivity = false
         self.session = URLSession(configuration: cfg)
     }
