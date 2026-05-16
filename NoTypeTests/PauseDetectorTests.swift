@@ -143,24 +143,26 @@ final class PauseDetectorTests: XCTestCase {
         XCTAssertEqual(chunks[1].end, 8 * frame)
     }
 
-    // MARK: - 30 s force-cut
+    // MARK: - 180 s force-cut
 
-    /// Number of voiced frames to cross the 30 s cap by one frame.
-    /// 30 s @ 16 kHz = 480_000 samples ; each frame = 4096 → 118 frames
-    /// gives 483_328 samples ( > 480_000 ).
-    private let forceCutFrameCount = 118
+    /// Number of voiced frames to cross the 180 s cap by one frame.
+    /// 180 s @ 16 kHz = 2 880 000 samples ; each frame = 4096 → 704 frames
+    /// gives 2 883 584 samples ( > 2 880 000 ).
+    private let forceCutFrameCount = 704
 
-    func test_forceCutFires_onContinuousSpeechBeyond30s() {
+    func test_forceCutFires_onContinuousSpeechBeyond180s() {
         var d = PauseDetector()
-        // Stream 118 consecutive voiced frames. The cut should fire on
-        // the frame whose `frameEnd` first reaches 480_000 samples.
+        // Stream 704 consecutive voiced frames. The cut should fire on
+        // the frame whose `frameEnd` first reaches 2_880_000 samples.
+        // No unvoiced frames → adaptive threshold never engages; only
+        // the force-cut path can produce a chunk here.
         let flags = Array(repeating: true, count: forceCutFrameCount)
         let chunks = run(flags, detector: &d)
 
         XCTAssertEqual(chunks.count, 1, "expected exactly one force-cut")
         let cut = chunks[0]
         XCTAssertEqual(cut.start, 0, "first chunk's pre-roll-rewound start clamps at 0")
-        XCTAssertGreaterThanOrEqual(cut.end, 480_000, "force-cut at >= 30 s of speech")
+        XCTAssertGreaterThanOrEqual(cut.end, 2_880_000, "force-cut at >= 180 s of speech")
         // After a force-cut we remain in .speaking (user hasn't paused) —
         // the seam starts a new chunk at frameEnd. Confirm.
         XCTAssertEqual(d.state, .speaking)
@@ -168,20 +170,75 @@ final class PauseDetectorTests: XCTestCase {
 
     func test_forceCut_resumesSpeakingWithoutPreRollOnSeam() {
         var d = PauseDetector()
-        // 119 voiced frames (one past the cut) + pause. Should emit two
-        // chunks: the 30 s force-cut, then the tail.
-        let flags = Array(repeating: true, count: 119)
+        // 705 voiced frames (one past the cut) + pause. Should emit two
+        // chunks: the 180 s force-cut, then the tail.
+        let flags = Array(repeating: true, count: forceCutFrameCount + 1)
             + Array(repeating: false, count: 5)
         let chunks = run(flags, detector: &d)
 
         XCTAssertEqual(chunks.count, 2)
         // First chunk = force-cut at the boundary.
         let firstEnd = chunks[0].end
-        XCTAssertGreaterThanOrEqual(firstEnd, 480_000)
+        XCTAssertGreaterThanOrEqual(firstEnd, 2_880_000)
         // Second chunk's pre-roll-rewound start equals max(0, seam - preRoll).
         // The seam (chunkStart for chunk 2) is the first-chunk's `end`;
         // pre-roll subtracts 4800 from it. Confirm exactly.
         XCTAssertEqual(chunks[1].start, max(0, firstEnd - preRoll))
+    }
+
+    // MARK: - Adaptive pause threshold
+
+    func test_adaptiveThresholdLadder_pureMapping() {
+        let d = PauseDetector()
+        // <30 s → base threshold (1000 ms = 16_000 samples).
+        XCTAssertEqual(d.pauseThresholdSamples(forChunkLength: 0), 16_000)
+        XCTAssertEqual(d.pauseThresholdSamples(forChunkLength: 479_999), 16_000)
+        // 30–60 s → 800 ms = 12_800 samples.
+        XCTAssertEqual(d.pauseThresholdSamples(forChunkLength: 480_000), 12_800)
+        XCTAssertEqual(d.pauseThresholdSamples(forChunkLength: 959_999), 12_800)
+        // 60–120 s → 600 ms = 9_600 samples.
+        XCTAssertEqual(d.pauseThresholdSamples(forChunkLength: 960_000), 9_600)
+        XCTAssertEqual(d.pauseThresholdSamples(forChunkLength: 1_919_999), 9_600)
+        // ≥120 s → 500 ms = 8_000 samples (floor).
+        XCTAssertEqual(d.pauseThresholdSamples(forChunkLength: 1_920_000), 8_000)
+        XCTAssertEqual(d.pauseThresholdSamples(forChunkLength: 10_000_000), 8_000)
+    }
+
+    func test_adaptiveThreshold_catchesShortPauseAfterLongMonologue() {
+        var d = PauseDetector()
+        // Speak for 125 s — past the 120 s adaptive-floor boundary
+        // (threshold drops to 500 ms = 8 000 samples). 125 s ÷ 256 ms/frame
+        // ≈ 489 voiced frames is enough to land in the ≥120 s bucket.
+        let voicedFrames = 489
+        // Then pause for 2 unvoiced frames = 512 ms — below the legacy
+        // 1 s threshold (would have stayed in .pausing) but above the
+        // adaptive 500 ms floor (must emit).
+        let flags = Array(repeating: true, count: voicedFrames)
+            + Array(repeating: false, count: 2)
+        let chunks = run(flags, detector: &d)
+
+        XCTAssertEqual(chunks.count, 1, "long-monologue pause must cut at the 500 ms floor")
+        // Chunk.end = sample index of the first unvoiced frame.
+        XCTAssertEqual(chunks[0].end, voicedFrames * frame)
+        // We're back in .idle after the cut.
+        XCTAssertEqual(d.state, .idle)
+    }
+
+    func test_adaptiveThreshold_doesNotCutShortChunkOnShortPause() {
+        var d = PauseDetector()
+        // Speak for 2 frames (≈ 512 ms — well under 30 s), then 2 unvoiced
+        // frames (512 ms). Threshold for a <30 s chunk is still 1 s = no
+        // emit. This is the regression guard — adaptive must not affect
+        // short chunks.
+        let flags = [true, true, false, false]
+        let chunks = run(flags, detector: &d)
+
+        XCTAssertEqual(chunks.count, 0)
+        // Still in .pausing with 2 frames of unvoiced behind us.
+        switch d.state {
+        case .pausing: break
+        default: XCTFail("expected .pausing, got \(d.state)")
+        }
     }
 
     // MARK: - finalize()

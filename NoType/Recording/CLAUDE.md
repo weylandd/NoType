@@ -18,9 +18,9 @@
 1. **Audio = 16 kHz mono float32.** Resampled from hardware-native rate via `AVAudioConverter`. Silero requires 16 kHz.
 2. **VAD window = 4096 samples (256 ms).** Matches Silero v6 unified `chunkSize`. Don't change without re-fixturing `PauseDetectorTests`.
 3. **Pre-roll = 4800 samples (300 ms).** Every chunk's start is rewound by this much to capture leading consonants lost to VAD onset latency. Constant in `PauseDetector.init`.
-4. **Pause threshold = 16 000 samples (1.0 s).** Below this gap, the current chunk continues. Constant in `PauseDetector.init`.
-5. **Max chunk size = 30 s** (`PauseDetector.maxChunkSamples`). Continuous monologue force-cuts at this boundary.
-6. **PCM ring capacity = 35 s** (560 000 samples ≈ 2.24 MB at 16 kHz). Comfortably above the 30 s force-cut; overflow drops oldest silently as last-resort.
+4. **Adaptive pause threshold.** Base = 16 000 samples (1.0 s) for chunks under 30 s; steps down to 12 800 (800 ms) for 30–60 s, 9 600 (600 ms) for 60–120 s, 8 000 (500 ms) at and beyond 120 s. The ladder lives in `PauseDetector.pauseThresholdSamples(forChunkLength:)`. 500 ms is the floor on purpose — at ~300 ms stop-consonant closures and inter-phrase micropauses start producing false cuts.
+5. **Max chunk size = 180 s** (`PauseDetector.maxChunkSamples`). Continuous monologue force-cuts at this boundary, but in practice the adaptive threshold (#4) catches the first ≥500 ms breath long before this fires.
+6. **PCM ring capacity = 190 s** (3 040 000 samples ≈ 12 MB at 16 kHz). Comfortably above the 180 s force-cut; overflow drops oldest silently as last-resort.
 7. **Min chunk for upload = 150 ms** (`pcm.count >= 2400`). Below this, the chunk is skipped (accidental tap).
 8. **Silero is stateful.** `hiddenState`, `cellState`, and a 64-sample `carriedContext` look-back persist across calls. Reset all three at session start via `vad.reset()`.
 9. **First chunk waits for context snapshot.** Sender `await`s `contextTask.value` before issuing the first Gemini call. Audio capture itself starts immediately on hotkey press.

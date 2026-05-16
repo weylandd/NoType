@@ -15,16 +15,31 @@ import Foundation
 /// - **`minVoicedRunForChunkStart`** = 1. Tuned for the 256 ms unified
 ///   model: a single voiced frame is already 256 ms of evidence, plenty for
 ///   onset detection. Bump if false starts on coughs become a problem.
-/// - **`pauseThresholdSamples`** = 1.0 s of unvoiced audio counts as a
-///   pause and ends the chunk.
+/// - **Adaptive pause threshold.** The "how long is a pause" bar drops as
+///   the current chunk gets longer, so monologues get cut on natural
+///   breath pauses instead of holding out for full 1-second silences. The
+///   ladder is computed by `pauseThresholdSamples(forChunkLength:)`:
+///
+///   | Chunk length so far | Threshold | What it catches            |
+///   |---------------------|-----------|----------------------------|
+///   | < 30 s              | 1000 ms   | Logical end-of-thought     |
+///   | 30 – 60 s           | 800 ms    | Confident pauses           |
+///   | 60 – 120 s          | 600 ms    | Long breath inhales        |
+///   | ≥ 120 s             | 500 ms    | Any breath (floor)         |
+///
+///   500 ms is the floor on purpose — at ~300 ms we'd start catching
+///   stop-consonant closures ("t", "p", "k" ~80–150 ms) and inter-phrase
+///   micropauses, which would shred normal speech mid-sentence.
 /// - **`preRollSamples`** = 300 ms. Every chunk's start is rewound by this
 ///   much so the chunk includes the leading consonants Silero needs a few
 ///   frames to confirm.
-/// - **`maxChunkSamples`** = 30 s. Force-cut when a chunk reaches this
-///   duration without a natural pause — keeps PCM memory bounded for users
-///   who speak continuously without pausing, and keeps Gemini call payloads
-///   reasonable. The cut emits a chunk and immediately starts a new one at
-///   the cut boundary (no pre-roll loss; we *don't* go back to idle).
+/// - **`maxChunkSamples`** = 180 s. Force-cut when a chunk reaches this
+///   duration without a natural pause — keeps PCM memory bounded and is
+///   the ultimate safety net if the adaptive threshold still can't find a
+///   pause (physically impossible to speak 3 minutes without a ≥500 ms
+///   inhale, but defensive). The cut emits a chunk and immediately starts
+///   a new one at the cut boundary (no pre-roll loss; we *don't* go back
+///   to idle).
 struct PauseDetector {
     struct Chunk: Equatable {
         /// Inclusive sample index where this chunk's PCM begins. Already
@@ -55,6 +70,9 @@ struct PauseDetector {
 
     let voicedFrameThreshold: Float
     let minVoicedRunForChunkStart: Int
+    /// Base (max) pause threshold — applied to chunks under 30 s. The
+    /// effective threshold steps down as the chunk grows; see
+    /// `pauseThresholdSamples(forChunkLength:)` for the ladder.
     let pauseThresholdSamples: Int
     let preRollSamples: Int
     let maxChunkSamples: Int
@@ -62,15 +80,35 @@ struct PauseDetector {
     init(
         voicedFrameThreshold: Float = 0.5,
         minVoicedRunForChunkStart: Int = 1,
-        pauseThresholdSamples: Int = 16_000,    // 1.0 s @ 16 kHz
+        pauseThresholdSamples: Int = 16_000,    // 1.0 s @ 16 kHz — base / short-chunk threshold
         preRollSamples: Int = 4_800,            // 300 ms @ 16 kHz
-        maxChunkSamples: Int = 480_000          // 30 s @ 16 kHz
+        maxChunkSamples: Int = 2_880_000        // 180 s @ 16 kHz — force-cut safety net
     ) {
         self.voicedFrameThreshold = voicedFrameThreshold
         self.minVoicedRunForChunkStart = minVoicedRunForChunkStart
         self.pauseThresholdSamples = pauseThresholdSamples
         self.preRollSamples = preRollSamples
         self.maxChunkSamples = maxChunkSamples
+    }
+
+    /// Effective pause threshold for the current chunk, given how many
+    /// samples its voiced span has accumulated so far. Used in `.pausing`
+    /// to decide whether the unvoiced run we're tracking is "long enough"
+    /// to count as a chunk boundary.
+    ///
+    /// The ladder is intentionally coarse (four steps, not a continuous
+    /// function): it makes behaviour predictable, easy to unit-test, and
+    /// gives a clear story to anyone debugging "why did it cut there".
+    /// Below 30 s the threshold is just `pauseThresholdSamples` (the init
+    /// argument), so existing tests against short chunks behave identically
+    /// to the pre-adaptive code.
+    func pauseThresholdSamples(forChunkLength chunkLength: Int) -> Int {
+        switch chunkLength {
+        case ..<480_000:    return pauseThresholdSamples         // <30 s
+        case ..<960_000:    return 12_800                        //  30–60 s → 800 ms
+        case ..<1_920_000:  return 9_600                         //  60–120 s → 600 ms
+        default:            return 8_000                         //  ≥120 s → 500 ms (floor)
+        }
     }
 
     /// Drive one VAD window through the state machine. `frameStart` /
@@ -134,7 +172,15 @@ struct PauseDetector {
                 return nil
             }
             let unvoicedDuration = frameEnd - unvoicedSince
-            if unvoicedDuration >= pauseThresholdSamples {
+            // Adaptive threshold — uses the current chunk's voiced span
+            // (from chunkStart to the moment the pause started). Longer
+            // chunks require less silence to count as a pause boundary,
+            // so monologues get cut on breath inhales instead of waiting
+            // for the full 1 s.
+            let threshold = pauseThresholdSamples(
+                forChunkLength: unvoicedSince - chunkStart
+            )
+            if unvoicedDuration >= threshold {
                 let chunk = Chunk(
                     start: max(0, chunkStart - preRollSamples),
                     end: unvoicedSince

@@ -270,10 +270,11 @@ final class RecordingSession {
             }
         }
 
-        // Reset Silero state before any frames arrive.
-        let vad = self.vad
-        Task { try? await vad.reset() }
-
+        // Silero state is reset as the first line of the VAD consumer
+        // (`spawnVADConsumer`) so the actor's serial execution order
+        // guarantees reset completes before the first `probability(_:)`
+        // call — regardless of how the scheduler interleaves this start
+        // path with the recorder's tap thread.
         let stream = try recorder.start()
         spawnVADConsumer(stream: stream)
     }
@@ -407,10 +408,29 @@ final class RecordingSession {
         // Detached so VAD inference doesn't block @MainActor; cross back
         // for `enqueueChunk` and `takePauseDetector`.
         vadTask = Task.detached(priority: .userInitiated) { [weak self] in
+            // First message to the VAD actor — clears hiddenState /
+            // cellState / carriedContext left over from the previous
+            // session. Doing it here (rather than fire-and-forget from
+            // `start()`) makes the ordering against the first
+            // `probability(_:)` call deterministic: both go through the
+            // actor's serial executor in submission order.
+            try? await vad.reset()
             var detector = PauseDetector()
             var frameStart = 0
+            // Each VAD window covers 256 ms of audio, so a single
+            // `probability(_:)` call must finish in well under 256 ms to
+            // keep up with realtime. When ANE is contended (other ML
+            // workloads — local LLMs, photo analysis, Final Cut) inference
+            // can spike to 50–200 ms. Audio keeps flowing into the
+            // AsyncStream's buffer, so nothing breaks, but the user feels
+            // it as "paste took 8 seconds instead of 2 after release".
+            // Counting slow inferences here lets us connect those reports
+            // to ANE contention without guessing.
+            var slowInferences = 0
+            var totalInferences = 0
             for await frame in stream {
                 let frameEnd = frameStart + frame.count
+                let inferenceStart = Date()
                 let prob: Float
                 do {
                     prob = try await vad.probability(for: frame)
@@ -419,6 +439,9 @@ final class RecordingSession {
                     frameStart = frameEnd
                     continue
                 }
+                let inferenceMs = Date().timeIntervalSince(inferenceStart) * 1000
+                totalInferences += 1
+                if inferenceMs > 50 { slowInferences += 1 }
 
                 if let chunk = detector.observe(
                     probability: prob,
@@ -428,6 +451,11 @@ final class RecordingSession {
                     await self?.enqueueChunk(start: chunk.start, end: chunk.end, isFinal: false)
                 }
                 frameStart = frameEnd
+            }
+            if slowInferences > 0 {
+                Self.log.warning(
+                    "VAD lag: \(slowInferences)/\(totalInferences) inferences > 50 ms (ANE likely contended)"
+                )
             }
             // Stream finished. Hand the in-progress chunk over to the
             // session so it can call finalize() with the up-to-date sample
@@ -487,6 +515,18 @@ final class RecordingSession {
 
     private func markSenderFinished() {
         senderTask = nil
+        // Close the respawn race: a chunk enqueued in the window between
+        // `runSender` returning and this method running on the main actor
+        // would otherwise hit `ensureSenderRunning`'s `senderTask != nil`
+        // guard and silently never get drained — manifesting as a
+        // `.noSpeech` after a normal-looking session. `stop()`'s
+        // `emitFinalChunkIfAny()` is the worst case because it runs
+        // before `await senderTask?.value`, so the orphan chunk just
+        // sits in `pending` forever. `failure == nil` keeps us from
+        // pointlessly respawning after a `markFailure` exit.
+        if !pending.isEmpty && failure == nil {
+            ensureSenderRunning()
+        }
     }
 
     /// Atomically take the entire pending queue. Returning [] tells the
