@@ -4,7 +4,7 @@ date: 2026-05-16
 category: runtime-errors
 module: UI
 problem_type: runtime_error
-component: framework
+component: tooling
 symptoms:
   - "EXC_BAD_ACCESS / SIGSEGV at `objc_opt_class + 48` on the main thread"
   - "Faulting address near `0x1e` (small integer-shaped value)"
@@ -94,19 +94,23 @@ Concretely:
   - `HistoryPopover.recordingPill` — uses `Self.formatElapsed(from:to:)`.
 - `TranscribingHUD.AnimatedEllipsisLabel` — closure is fully self-contained, no `self` references; left alone.
 
-## Why This Matters
+## Why This Works
 
-`swift_task_isCurrentExecutorWithFlagsImpl` is an isolation check the compiler inserts at the boundary of every `@MainActor` annotated method call when the caller's isolation isn't statically provable to be `@MainActor`. Inside a TimelineView content closure on macOS 26, SwiftUI's diffing machinery is the runtime caller — and the executor reference it passes to the concurrency runtime is a freed/invalid object on that platform.
+`swift_task_isCurrentExecutorWithFlagsImpl` is an isolation check the compiler inserts at the boundary of every `@MainActor`-annotated method call when the caller's isolation isn't statically provable to be `@MainActor`. Inside a TimelineView content closure on macOS 26, SwiftUI's diffing machinery is the runtime caller — and the executor reference it passes to the concurrency runtime is a freed/invalid object on that platform.
 
-The compiler / runtime behaviour is a SwiftUI + Swift concurrency runtime bug specific to macOS 26 SwiftUI (Sequoia is unaffected with the same binary). We can't fix the framework. We can only avoid the call shape that triggers the check.
+The two replacement shapes avoid the broken dispatch path entirely:
 
-## When to Apply
+- **Static-helper variant** lets the TimelineView content closure compile down to pure value reads (`let` props, `ctx.date`, `Self.foo(...)`). No `@MainActor` instance method call → no executor check inserted → no crash.
+- **`.task` driver variant** moves frame updates out of TimelineView's dispatch path completely. `.task` runs on the View's own `@MainActor` context, and `@State` mutation drives normal SwiftUI re-render without going through TimelineView's `UpdateFilter.updateValue()`.
+
+The compiler/runtime behaviour is a SwiftUI + Swift concurrency runtime bug specific to macOS 26 SwiftUI (Sequoia is unaffected with the same binary). We can't fix the framework. We can only avoid the call shape that triggers the check.
+
+## Prevention
 
 - Adding any new `TimelineView` anywhere in NoType — apply the rules above before merging.
 - Reviewing PRs that touch a TimelineView — scan the closure for `self.foo()` or `self.bar` (instance computed prop). If you see either, request the static-helper or `.task`-loop refactor.
 - Investigating any crash that prints `swift_task_isCurrentExecutorWithFlagsImpl` on the stack inside a SwiftUI view — search for nearby TimelineView usages first.
-
-## Examples
+- The 2026-04 fix to this class of bug only patched 3 of 5 TimelineView sites in NoType (the trivial Date→String ones); the two spectrum meters shipped with the same broken pattern. **Audit *every* TimelineView when one is found broken**, not just the one that crashed.
 
 ### Time-display variant (Self.static helper)
 
@@ -133,13 +137,13 @@ private struct TimestampDisplay: View {
 ```swift
 private struct LiveSpectrumMeter: View {
     let samplesProvider: @MainActor () -> [Float]
-    private let barCount = 38
-    private let frameInterval: Duration = .milliseconds(33)
-    @State private var levels: [Float] = Array(repeating: 0, count: 38)
+    private static let barCount = 38
+    private static let frameInterval: Duration = .milliseconds(33)
+    @State private var levels: [Float] = Array(repeating: 0, count: Self.barCount)
 
     var body: some View {
         HStack {
-            ForEach(0..<barCount, id: \.self) { i in
+            ForEach(0..<Self.barCount, id: \.self) { i in
                 LiveSpectrumBar(level: levels[i])   // ← child view, pure inputs
             }
         }
@@ -148,7 +152,7 @@ private struct LiveSpectrumMeter: View {
                 let samples = samplesProvider()
                 // … compute next levels …
                 levels = nextLevels                  // ← triggers normal re-render
-                try? await Task.sleep(for: frameInterval)
+                try? await Task.sleep(for: Self.frameInterval)
             }
         }
     }
@@ -160,8 +164,11 @@ private struct LiveSpectrumBar: View {
 }
 ```
 
-## Related
+## Related Issues
 
+- PR #41 — fix for both spectrum meters (this file's introducing PR).
 - The 2026-04 incident note inlined in `NoType/UI/HistoryRowView.swift` next to `TimestampDisplay.body` — first time this pattern was diagnosed in NoType.
 - Companion comment in `NoType/UI/RecordingHUD.swift` next to `TimerPill.body`.
-- [Swift 6 concurrency convention](../conventions/swift-6-concurrency-and-async-2026-05-15.md) — broader rules on isolation and async work.
+- [`runtime-errors/sender-respawn-race-2026-05-16.md`](sender-respawn-race-2026-05-16.md) — sibling macOS 26 Swift concurrency runtime failure from the same discovery window; same family of "Swift concurrency machinery behaves unexpectedly inside a non-obvious call context."
+- [`tooling-decisions/macos-15-deployment-target-2026-05-15.md`](../tooling-decisions/macos-15-deployment-target-2026-05-15.md) — macOS version policy; this crash is macOS-26-specific so the floor/coverage matrix is relevant context.
+- [`conventions/swift-6-concurrency-and-async-2026-05-15.md`](../conventions/swift-6-concurrency-and-async-2026-05-15.md) — broader rules on isolation and async work; the `.task`-loop fix pattern is the established "periodic work" idiom from this convention.

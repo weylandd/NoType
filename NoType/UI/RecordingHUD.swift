@@ -125,7 +125,13 @@ private struct TimerPill: View {
 private struct LiveSpectrumMeter: View {
     let samplesProvider: @MainActor () -> [Float]
 
-    private let barCount = 38
+    /// Single source of truth for the bar count. Declared `static let` so
+    /// the `@State` initializer for `levels`/`peaks` can reference it —
+    /// instance `let`s aren't visible to other instance-property
+    /// initializers in Swift.
+    private static let barCount = 38
+    /// ~30 fps frame interval for the `.task` driver loop.
+    private static let frameInterval: Duration = .milliseconds(33)
     /// Bar decay per frame (~30 fps). 0.85 ≈ 12 frames from 1.0→0.15.
     private let levelDecay: Float = 0.85
     /// Peak marker decay. Much slower so the marker visibly lingers at
@@ -135,18 +141,16 @@ private struct LiveSpectrumMeter: View {
     /// Max bar height inside the 36 pt container minus 6 pt vertical
     /// padding (top + bottom = 12) → 24 pt.
     private let maxBarHeight: CGFloat = 24
-    /// ~30 fps frame interval. Matches the prior `TimelineView` cadence.
-    private let frameInterval: Duration = .milliseconds(33)
 
-    @State private var levels: [Float] = Array(repeating: 0, count: 38)
-    @State private var peaks:  [Float] = Array(repeating: 0, count: 38)
+    @State private var levels: [Float] = Array(repeating: 0, count: Self.barCount)
+    @State private var peaks:  [Float] = Array(repeating: 0, count: Self.barCount)
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 2) {
-            ForEach(0..<barCount, id: \.self) { i in
+            ForEach(0..<Self.barCount, id: \.self) { i in
                 LiveSpectrumBar(
-                    level: max(minBarHeight, CGFloat(levels.indices.contains(i) ? levels[i] : 0) * maxBarHeight),
-                    peak:  CGFloat(peaks.indices.contains(i) ? peaks[i] : 0) * maxBarHeight,
+                    level: max(minBarHeight, CGFloat(levels[i]) * maxBarHeight),
+                    peak:  CGFloat(peaks[i]) * maxBarHeight,
                     minBarHeight: minBarHeight,
                     maxBarHeight: maxBarHeight
                 )
@@ -171,29 +175,27 @@ private struct LiveSpectrumMeter: View {
                 .strokeBorder(DS.Color.borderSubtle, lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        .accessibilityHidden(true)
         .task {
             // `.task` auto-cancels when the HUD goes away. No
             // TimelineView, no .onChange — just sample + decay + assign
             // to @State, which triggers normal SwiftUI re-render.
+            // Read-before-write (`var next… = levels`) is deliberate: we
+            // decay against the snapshot SwiftUI last rendered so a slow
+            // frame doesn't compound the decay rate.
             while !Task.isCancelled {
                 let samples = samplesProvider()
-                let fresh = AudioSpectrum.bands(from: samples, bandCount: barCount)
+                let fresh = AudioSpectrum.bands(from: samples, bandCount: Self.barCount)
                 var nextLevels = levels
                 var nextPeaks  = peaks
-                if nextLevels.count != barCount {
-                    nextLevels = Array(repeating: 0, count: barCount)
-                }
-                if nextPeaks.count != barCount {
-                    nextPeaks = Array(repeating: 0, count: barCount)
-                }
-                for i in 0..<barCount {
+                for i in 0..<Self.barCount {
                     let f = fresh[i]
                     nextLevels[i] = max(f, nextLevels[i] * levelDecay)
                     nextPeaks[i]  = max(nextLevels[i], nextPeaks[i] * peakDecay)
                 }
                 levels = nextLevels
                 peaks  = nextPeaks
-                try? await Task.sleep(for: frameInterval)
+                try? await Task.sleep(for: Self.frameInterval)
             }
         }
     }

@@ -71,23 +71,28 @@ struct OnboardingMicCheckStep: View {
 private struct OnboardingSpectrumMeter: View {
     let samplesProvider: @MainActor () -> [Float]
 
-    private let barCount = 44
+    /// Single source of truth for the bar count. Declared `static let` so
+    /// the `@State` initializer for `levels`/`peaks` can reference it —
+    /// instance `let`s aren't visible to other instance-property
+    /// initializers in Swift, which is what drove the prior `44`/`38`
+    /// literal duplication.
+    private static let barCount = 44
+    /// ~30 fps frame interval for the `.task` driver loop.
+    private static let frameInterval: Duration = .milliseconds(33)
     private let levelDecay: Float = 0.85
     private let peakDecay:  Float = 0.98
     private let minBarHeight: CGFloat = 2
     private let maxBarHeight: CGFloat = 56
-    /// ~30 fps frame interval. Matches the prior `TimelineView` cadence.
-    private let frameInterval: Duration = .milliseconds(33)
 
-    @State private var levels: [Float] = Array(repeating: 0, count: 44)
-    @State private var peaks:  [Float] = Array(repeating: 0, count: 44)
+    @State private var levels: [Float] = Array(repeating: 0, count: Self.barCount)
+    @State private var peaks:  [Float] = Array(repeating: 0, count: Self.barCount)
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 3) {
-            ForEach(0..<barCount, id: \.self) { i in
+            ForEach(0..<Self.barCount, id: \.self) { i in
                 OnboardingSpectrumBar(
-                    level: max(minBarHeight, CGFloat(levels.indices.contains(i) ? levels[i] : 0) * maxBarHeight),
-                    peak:  CGFloat(peaks.indices.contains(i) ? peaks[i] : 0) * maxBarHeight,
+                    level: max(minBarHeight, CGFloat(levels[i]) * maxBarHeight),
+                    peak:  CGFloat(peaks[i]) * maxBarHeight,
                     minBarHeight: minBarHeight,
                     maxBarHeight: maxBarHeight
                 )
@@ -111,29 +116,27 @@ private struct OnboardingSpectrumMeter: View {
                 .strokeBorder(DS.Color.borderSubtle, lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: DS.Radius.md))
+        .accessibilityHidden(true)
         .task {
             // `.task` auto-cancels when the view disappears (step
             // navigation, window close). No TimelineView, no .onChange —
             // just sample + decay + assign to @State, which re-renders.
+            // Read-before-write (`var next… = levels`) is deliberate: we
+            // decay against the snapshot SwiftUI last rendered so a slow
+            // frame doesn't compound the decay rate.
             while !Task.isCancelled {
                 let samples = samplesProvider()
-                let fresh = AudioSpectrum.bands(from: samples, bandCount: barCount)
+                let fresh = AudioSpectrum.bands(from: samples, bandCount: Self.barCount)
                 var nextLevels = levels
                 var nextPeaks  = peaks
-                if nextLevels.count != barCount {
-                    nextLevels = Array(repeating: 0, count: barCount)
-                }
-                if nextPeaks.count != barCount {
-                    nextPeaks = Array(repeating: 0, count: barCount)
-                }
-                for i in 0..<barCount {
+                for i in 0..<Self.barCount {
                     let f = fresh[i]
                     nextLevels[i] = max(f, nextLevels[i] * levelDecay)
                     nextPeaks[i]  = max(nextLevels[i], nextPeaks[i] * peakDecay)
                 }
                 levels = nextLevels
                 peaks  = nextPeaks
-                try? await Task.sleep(for: frameInterval)
+                try? await Task.sleep(for: Self.frameInterval)
             }
         }
     }
