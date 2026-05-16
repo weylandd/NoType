@@ -168,6 +168,17 @@ final class PauseDetectorTests: XCTestCase {
         XCTAssertEqual(d.state, .speaking)
     }
 
+    func test_forceCut_doesNotFire_oneFrameBeforeBoundary() {
+        var d = PauseDetector()
+        // 703 voiced frames = 2 879 488 samples (< 2 880 000) — exactly
+        // one frame short of the 180 s cap. Pins the `>=` comparison.
+        let flags = Array(repeating: true, count: forceCutFrameCount - 1)
+        let chunks = run(flags, detector: &d)
+
+        XCTAssertEqual(chunks.count, 0, "must not force-cut before reaching the cap")
+        XCTAssertEqual(d.state, .speaking, "still in mid-speech")
+    }
+
     func test_forceCut_resumesSpeakingWithoutPreRollOnSeam() {
         var d = PauseDetector()
         // 705 voiced frames (one past the cut) + pause. Should emit two
@@ -189,27 +200,29 @@ final class PauseDetectorTests: XCTestCase {
     // MARK: - Adaptive pause threshold
 
     func test_adaptiveThresholdLadder_pureMapping() {
-        let d = PauseDetector()
-        // <30 s → base threshold (1000 ms = 16_000 samples).
+        // Construct with an explicit base threshold so the assertions stay
+        // honest if `PauseDetector.init`'s default ever moves — the ladder
+        // contract is "first rung returns the constructor argument", and
+        // this test pins that contract independent of the default.
+        let d = PauseDetector(pauseThresholdSamples: 16_000)
+        // <20 s → base threshold passed at init (here 16_000 = 1000 ms).
         XCTAssertEqual(d.pauseThresholdSamples(forChunkLength: 0), 16_000)
-        XCTAssertEqual(d.pauseThresholdSamples(forChunkLength: 479_999), 16_000)
-        // 30–60 s → 800 ms = 12_800 samples.
-        XCTAssertEqual(d.pauseThresholdSamples(forChunkLength: 480_000), 12_800)
-        XCTAssertEqual(d.pauseThresholdSamples(forChunkLength: 959_999), 12_800)
-        // 60–120 s → 600 ms = 9_600 samples.
-        XCTAssertEqual(d.pauseThresholdSamples(forChunkLength: 960_000), 9_600)
-        XCTAssertEqual(d.pauseThresholdSamples(forChunkLength: 1_919_999), 9_600)
-        // ≥120 s → 500 ms = 8_000 samples (floor).
-        XCTAssertEqual(d.pauseThresholdSamples(forChunkLength: 1_920_000), 8_000)
+        XCTAssertEqual(d.pauseThresholdSamples(forChunkLength: 319_999), 16_000)
+        // 20–40 s → 700 ms = 11_200 samples.
+        XCTAssertEqual(d.pauseThresholdSamples(forChunkLength: 320_000), 11_200)
+        XCTAssertEqual(d.pauseThresholdSamples(forChunkLength: 639_999), 11_200)
+        // ≥40 s → 500 ms = 8_000 samples (floor).
+        XCTAssertEqual(d.pauseThresholdSamples(forChunkLength: 640_000), 8_000)
         XCTAssertEqual(d.pauseThresholdSamples(forChunkLength: 10_000_000), 8_000)
     }
 
     func test_adaptiveThreshold_catchesShortPauseAfterLongMonologue() {
         var d = PauseDetector()
-        // Speak for 125 s — past the 120 s adaptive-floor boundary
-        // (threshold drops to 500 ms = 8 000 samples). 125 s ÷ 256 ms/frame
-        // ≈ 489 voiced frames is enough to land in the ≥120 s bucket.
-        let voicedFrames = 489
+        // Speak for ~42 s — past the 40 s adaptive-floor boundary
+        // (threshold drops to 500 ms = 8 000 samples). 42 s ÷ 256 ms/frame
+        // ≈ 164 voiced frames is enough to land in the ≥40 s bucket
+        // (164 × 4096 = 671 744 ≥ 640 000).
+        let voicedFrames = 164
         // Then pause for 2 unvoiced frames = 512 ms — below the legacy
         // 1 s threshold (would have stayed in .pausing) but above the
         // adaptive 500 ms floor (must emit).
@@ -222,6 +235,42 @@ final class PauseDetectorTests: XCTestCase {
         XCTAssertEqual(chunks[0].end, voicedFrames * frame)
         // We're back in .idle after the cut.
         XCTAssertEqual(d.state, .idle)
+    }
+
+    func test_adaptiveThreshold_middleRungCatchesShortPause() {
+        var d = PauseDetector()
+        // Speak for ~26 s — past the 20 s adaptive-mid boundary
+        // (threshold drops to 700 ms = 11 200 samples). 26 s ÷ 256 ms/frame
+        // ≈ 102 voiced frames lands in the 20–40 s bucket
+        // (102 × 4096 = 417 792 ≥ 320 000, < 640 000).
+        let voicedFrames = 102
+        // Pause for 3 unvoiced frames = 768 ms — above the 700 ms rung,
+        // below the legacy 1 s threshold.
+        let flags = Array(repeating: true, count: voicedFrames)
+            + Array(repeating: false, count: 3)
+        let chunks = run(flags, detector: &d)
+
+        XCTAssertEqual(chunks.count, 1, "20–40 s pause must cut at the 700 ms rung")
+        XCTAssertEqual(chunks[0].end, voicedFrames * frame)
+        XCTAssertEqual(d.state, .idle)
+    }
+
+    func test_adaptiveThreshold_middleRungIgnoresPauseBelowRung() {
+        var d = PauseDetector()
+        // Same ~26 s voiced span landing in the 20–40 s bucket (700 ms rung)…
+        let voicedFrames = 102
+        // …followed by 2 unvoiced frames = 512 ms — below the 700 ms
+        // threshold. We must NOT emit, even though we would at ≥40 s
+        // (where 500 ms applies). Pins the rung boundary.
+        let flags = Array(repeating: true, count: voicedFrames)
+            + Array(repeating: false, count: 2)
+        let chunks = run(flags, detector: &d)
+
+        XCTAssertEqual(chunks.count, 0, "20–40 s chunk with <700 ms pause must not cut")
+        switch d.state {
+        case .pausing: break
+        default: XCTFail("expected .pausing, got \(d.state)")
+        }
     }
 
     func test_adaptiveThreshold_doesNotCutShortChunkOnShortPause() {

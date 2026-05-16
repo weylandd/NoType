@@ -41,6 +41,13 @@ final class RecordingSession {
     /// Empirically covers 1–3 word utterances with breathing room.
     nonisolated static let shortSessionMaxSamples = 32_000
 
+    /// VAD inference call is considered "slow" above this duration. Each
+    /// VAD window covers 256 ms of audio, so on a healthy ANE we observe
+    /// ~1–10 ms per call; anything above 50 ms is a strong signal of ANE
+    /// contention (another ML workload on the chip). Used by the VAD
+    /// consumer to count slow events for the session-end warning log.
+    nonisolated static let slowInferenceThreshold: Duration = .milliseconds(50)
+
     /// Pure-function discriminator for the lite path. Extracted so
     /// `RecordingSessionShortPathTests` can pin the contract without
     /// standing up a full `RecordingSession`.
@@ -324,7 +331,15 @@ final class RecordingSession {
         // together as one batched request.
         await emitFinalChunkIfAny()
 
-        await senderTask?.value         // wait for sender to drain pending
+        // Drain the sender. A single `await senderTask?.value` would
+        // capture whichever Task ref is current at evaluation time —
+        // but `markSenderFinished` may respawn into a fresh Task while
+        // we're suspended on the dying one (the same race the respawn
+        // fix in `markSenderFinished` already half-closes). Loop until
+        // the field is genuinely nil so every respawn is awaited.
+        while let task = senderTask {
+            await task.value
+        }
         let tGemini = Date()
 
         if let err = failure {
@@ -425,12 +440,14 @@ final class RecordingSession {
             // AsyncStream's buffer, so nothing breaks, but the user feels
             // it as "paste took 8 seconds instead of 2 after release".
             // Counting slow inferences here lets us connect those reports
-            // to ANE contention without guessing.
+            // to ANE contention without guessing. `ContinuousClock` is
+            // both monotonic (immune to NTP clock-skew during a 3-min
+            // session) and cheaper to read than `Date()`.
             var slowInferences = 0
             var totalInferences = 0
             for await frame in stream {
                 let frameEnd = frameStart + frame.count
-                let inferenceStart = Date()
+                let inferenceStart = ContinuousClock.now
                 let prob: Float
                 do {
                     prob = try await vad.probability(for: frame)
@@ -439,9 +456,11 @@ final class RecordingSession {
                     frameStart = frameEnd
                     continue
                 }
-                let inferenceMs = Date().timeIntervalSince(inferenceStart) * 1000
+                let inferenceDuration = ContinuousClock.now - inferenceStart
                 totalInferences += 1
-                if inferenceMs > 50 { slowInferences += 1 }
+                if inferenceDuration > Self.slowInferenceThreshold {
+                    slowInferences += 1
+                }
 
                 if let chunk = detector.observe(
                     probability: prob,
@@ -454,7 +473,7 @@ final class RecordingSession {
             }
             if slowInferences > 0 {
                 Self.log.warning(
-                    "VAD lag: \(slowInferences)/\(totalInferences) inferences > 50 ms (ANE likely contended)"
+                    "VAD lag: \(slowInferences)/\(totalInferences) inferences > \(Self.slowInferenceThreshold) (ANE likely contended)"
                 )
             }
             // Stream finished. Hand the in-progress chunk over to the

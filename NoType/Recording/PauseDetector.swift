@@ -22,13 +22,16 @@ import Foundation
 ///
 ///   | Chunk length so far | Threshold | What it catches            |
 ///   |---------------------|-----------|----------------------------|
-///   | < 30 s              | 1000 ms   | Logical end-of-thought     |
-///   | 30 – 60 s           | 800 ms    | Confident pauses           |
-///   | 60 – 120 s          | 600 ms    | Long breath inhales        |
-///   | ≥ 120 s             | 500 ms    | Any breath (floor)         |
+///   | < 20 s              | 1000 ms   | Logical end-of-thought     |
+///   | 20 – 40 s           | 700 ms    | End-of-sentence pauses     |
+///   | ≥ 40 s              | 500 ms    | Any breath (floor)         |
 ///
-///   500 ms is the floor on purpose — at ~300 ms we'd start catching
-///   stop-consonant closures ("t", "p", "k" ~80–150 ms) and inter-phrase
+///   The early step-down keeps chunks small enough that each Gemini
+///   request fits inside the 30 s `timeoutIntervalForResource` budget
+///   set in `GeminiClient` — a typical chunk after 20 s lands in the
+///   20–40 s wall-clock range, well under the network ceiling. 500 ms
+///   is the floor on purpose — at ~300 ms we'd start catching stop-
+///   consonant closures ("t", "p", "k" ~80–150 ms) and inter-phrase
 ///   micropauses, which would shred normal speech mid-sentence.
 /// - **`preRollSamples`** = 300 ms. Every chunk's start is rewound by this
 ///   much so the chunk includes the leading consonants Silero needs a few
@@ -96,18 +99,17 @@ struct PauseDetector {
     /// to decide whether the unvoiced run we're tracking is "long enough"
     /// to count as a chunk boundary.
     ///
-    /// The ladder is intentionally coarse (four steps, not a continuous
+    /// The ladder is intentionally coarse (three steps, not a continuous
     /// function): it makes behaviour predictable, easy to unit-test, and
     /// gives a clear story to anyone debugging "why did it cut there".
-    /// Below 30 s the threshold is just `pauseThresholdSamples` (the init
+    /// Below 20 s the threshold is just `pauseThresholdSamples` (the init
     /// argument), so existing tests against short chunks behave identically
     /// to the pre-adaptive code.
     func pauseThresholdSamples(forChunkLength chunkLength: Int) -> Int {
         switch chunkLength {
-        case ..<480_000:    return pauseThresholdSamples         // <30 s
-        case ..<960_000:    return 12_800                        //  30–60 s → 800 ms
-        case ..<1_920_000:  return 9_600                         //  60–120 s → 600 ms
-        default:            return 8_000                         //  ≥120 s → 500 ms (floor)
+        case ..<320_000:    return pauseThresholdSamples         // <20 s → base (1000 ms)
+        case ..<640_000:    return 11_200                        // 20–40 s → 700 ms
+        default:            return 8_000                         // ≥40 s → 500 ms (floor)
         }
     }
 
