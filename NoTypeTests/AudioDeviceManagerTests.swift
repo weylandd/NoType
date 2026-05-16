@@ -212,4 +212,132 @@ final class AudioDeviceManagerTests: XCTestCase {
         XCTAssertFalse(unknown.isBluetooth)
         XCTAssertFalse(unknown.isBuiltIn)
     }
+
+    // MARK: - effectiveLabel (mirror of pickEffectiveDevice)
+
+    func test_effectiveLabel_pinned_returnsPlainDeviceName() {
+        // Explicit pin: label is just the device name, no marker. The
+        // user picked this on purpose — no "(System)" / "(avoiding…)"
+        // chrome.
+        let inputs = [builtIn, usbMic]
+        let label = AudioDeviceManager.formatEffectiveLabel(
+            inputs: inputs,
+            selectedUID: usbMic.uid,
+            systemDefault: builtIn,
+            preferBuiltInOverBluetooth: true
+        )
+        XCTAssertEqual(label, "Shure MV7")
+    }
+
+    func test_effectiveLabel_btAvoidanceEngaged_showsAvoidingMarker() {
+        // The headline label — surfaces the fallback to the user so
+        // they see why NoType isn't recording from their stated System
+        // Settings default. Format pinned: `"<builtin> (avoiding <bt>)"`.
+        let inputs = [builtIn, btHeadset]
+        let label = AudioDeviceManager.formatEffectiveLabel(
+            inputs: inputs,
+            selectedUID: nil,
+            systemDefault: btHeadset,
+            preferBuiltInOverBluetooth: true
+        )
+        XCTAssertEqual(label, "MacBook Pro Microphone (avoiding AirPods Pro)")
+    }
+
+    func test_effectiveLabel_systemDefaultPassThrough_showsSystemMarker() {
+        // No pin, no BT-avoidance engaged — show the system default
+        // with "(System)" so the user knows they're following System
+        // Settings.
+        let inputs = [builtIn, usbMic]
+        let label = AudioDeviceManager.formatEffectiveLabel(
+            inputs: inputs,
+            selectedUID: nil,
+            systemDefault: usbMic,
+            preferBuiltInOverBluetooth: true
+        )
+        XCTAssertEqual(label, "Shure MV7 (System)")
+    }
+
+    func test_effectiveLabel_btAvoidanceOff_systemBT_showsSystemMarker() {
+        // User opted out of BT avoidance — the label honestly reflects
+        // that NoType will record from the BT mic.
+        let inputs = [builtIn, btHeadset]
+        let label = AudioDeviceManager.formatEffectiveLabel(
+            inputs: inputs,
+            selectedUID: nil,
+            systemDefault: btHeadset,
+            preferBuiltInOverBluetooth: false
+        )
+        XCTAssertEqual(label, "AirPods Pro (System)")
+    }
+
+    func test_effectiveLabel_btAvoidanceOn_noBuiltIn_fallsThroughToSystem() {
+        // Mac mini / Mac Studio with no built-in mic: even with BT
+        // avoidance on, we can't fall back, so we honestly say
+        // "(System)" rather than lying about an "(avoiding…)" state.
+        let inputs = [btHeadset, usbMic]
+        let label = AudioDeviceManager.formatEffectiveLabel(
+            inputs: inputs,
+            selectedUID: nil,
+            systemDefault: btHeadset,
+            preferBuiltInOverBluetooth: true
+        )
+        XCTAssertEqual(label, "AirPods Pro (System)")
+    }
+
+    func test_effectiveLabel_emptyInputs_returnsDefaultInput() {
+        // Degenerate state: HAL hasn't reported any devices yet (or
+        // they all lost input streams) → "Default Input" is a stable
+        // placeholder that survives until the next refresh.
+        let label = AudioDeviceManager.formatEffectiveLabel(
+            inputs: [],
+            selectedUID: nil,
+            systemDefault: nil,
+            preferBuiltInOverBluetooth: true
+        )
+        XCTAssertEqual(label, "Default Input")
+    }
+
+    // MARK: - loadPreferBuiltInOverBluetooth (UserDefaults default-ON idiom)
+
+    private func makeIsolatedDefaults(suite: String = #function) -> UserDefaults {
+        // Per-test suite name so writes don't leak between tests or
+        // pollute `UserDefaults.standard`. `removePersistentDomain` is
+        // both setup and teardown — no test leaks if the harness
+        // process is restarted between runs.
+        let name = "test.audioDeviceManager.\(suite)"
+        let defaults = UserDefaults(suiteName: name) ?? .standard
+        defaults.removePersistentDomain(forName: name)
+        return defaults
+    }
+
+    func test_loadPreference_absentKey_defaultsToOn() {
+        // The headline guarantee. A future regression from
+        // `object(forKey:) as? Bool` to `bool(forKey:)` would silently
+        // flip every existing user — pin the idiom in a test.
+        let defaults = makeIsolatedDefaults()
+        XCTAssertTrue(AudioDeviceManager.loadPreferBuiltInOverBluetooth(from: defaults))
+    }
+
+    func test_loadPreference_storedTrue_isOn() {
+        let defaults = makeIsolatedDefaults()
+        defaults.set(true, forKey: "notype.preferBuiltInOverBluetooth")
+        XCTAssertTrue(AudioDeviceManager.loadPreferBuiltInOverBluetooth(from: defaults))
+    }
+
+    func test_loadPreference_storedFalse_isOff() {
+        // User explicitly opted out — must round-trip.
+        let defaults = makeIsolatedDefaults()
+        defaults.set(false, forKey: "notype.preferBuiltInOverBluetooth")
+        XCTAssertFalse(AudioDeviceManager.loadPreferBuiltInOverBluetooth(from: defaults))
+    }
+
+    func test_loadPreference_corruptStringValue_defaultsToOn() {
+        // Defensive: if something writes a non-Bool to the key (third-
+        // party defaults editor, manual `defaults write`), the `as?`
+        // cast fails and we fall back to ON rather than crashing or
+        // returning a misleading false.
+        let defaults = makeIsolatedDefaults()
+        defaults.set("not-a-bool", forKey: "notype.preferBuiltInOverBluetooth")
+        XCTAssertTrue(AudioDeviceManager.loadPreferBuiltInOverBluetooth(from: defaults))
+    }
 }

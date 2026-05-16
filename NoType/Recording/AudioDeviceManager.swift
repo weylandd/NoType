@@ -19,8 +19,11 @@ import OSLog
 @Observable
 final class AudioDeviceManager {
     @ObservationIgnored nonisolated static let log = Logger(subsystem: "app.notype", category: "audio.devices")
-    @ObservationIgnored private static let selectedUIDKey = "notype.selectedInputDeviceUID"
-    @ObservationIgnored fileprivate static let preferBuiltInOverBluetoothKey = "notype.preferBuiltInOverBluetooth"
+    // Static UserDefaults keys are plain strings — nonisolated so the
+    // nonisolated `loadPreferBuiltInOverBluetooth(from:)` helper can
+    // reference them without hopping to MainActor.
+    @ObservationIgnored nonisolated private static let selectedUIDKey = "notype.selectedInputDeviceUID"
+    @ObservationIgnored nonisolated private static let preferBuiltInOverBluetoothKey = "notype.preferBuiltInOverBluetooth"
 
     @ObservationIgnored static let shared = AudioDeviceManager()
 
@@ -86,13 +89,21 @@ final class AudioDeviceManager {
 
     init() {
         self.selectedUID = UserDefaults.standard.string(forKey: Self.selectedUIDKey)
-        // Read with `object(forKey:) as? Bool` so the absent-key case
-        // resolves to the default ON, not the false default for
-        // `bool(forKey:)`. Same idiom as `AppState.dictionaryEnabled`.
-        let storedPref = UserDefaults.standard.object(forKey: Self.preferBuiltInOverBluetoothKey) as? Bool
-        self.preferBuiltInOverBluetooth = storedPref ?? true
+        self.preferBuiltInOverBluetooth = Self.loadPreferBuiltInOverBluetooth(from: .standard)
         refresh()
         installDeviceListChangeListener()
+    }
+
+    /// Pure: resolve the persisted BT-avoidance preference, defaulting
+    /// to ON when the key is absent. Uses the `object(forKey:) as? Bool`
+    /// idiom rather than `bool(forKey:)` so absent keys land on the
+    /// documented ON default — silently regressing to `bool(forKey:)`
+    /// would flip every existing user to OFF. Pinned by
+    /// `AudioDeviceManagerTests` so a future refactor can't bypass the
+    /// idiom without a test failure.
+    nonisolated static func loadPreferBuiltInOverBluetooth(from defaults: UserDefaults) -> Bool {
+        let stored = defaults.object(forKey: preferBuiltInOverBluetoothKey) as? Bool
+        return stored ?? true
     }
 
     /// The device the recorder should actually open. Returns the pinned
@@ -111,15 +122,35 @@ final class AudioDeviceManager {
         )
     }
 
-    /// Human-readable label for the picker footer.
+    /// Human-readable label for the picker footer. Delegates to the
+    /// pure static helper so the label policy stays in lockstep with
+    /// `pickEffectiveDevice` — both honour pin first, then BT
+    /// avoidance, then system default.
     var effectiveLabel: String {
+        Self.formatEffectiveLabel(
+            inputs: inputs,
+            selectedUID: selectedUID,
+            systemDefault: systemDefault,
+            preferBuiltInOverBluetooth: preferBuiltInOverBluetooth
+        )
+    }
+
+    /// Pure: render the picker footer label for the current state.
+    /// Mirror of `pickEffectiveDevice`'s decision so the label stays
+    /// honest — the user always sees what NoType will actually record
+    /// from. Surfacing the BT-avoidance fallback explicitly
+    /// (`"(avoiding <BT name>)"`) tells the user why the label
+    /// doesn't match System Settings' default. `"(System)"` is the
+    /// marker for the straight-pass-through case.
+    nonisolated static func formatEffectiveLabel(
+        inputs: [Device],
+        selectedUID: String?,
+        systemDefault: Device?,
+        preferBuiltInOverBluetooth: Bool
+    ) -> String {
         if let uid = selectedUID, let pinned = inputs.first(where: { $0.uid == uid }) {
             return pinned.name
         }
-        // Surface the BT-avoidance fallback explicitly so the user
-        // understands why the label doesn't match their System
-        // Settings default. "(System)" stays as the marker for the
-        // straight-pass-through case.
         if preferBuiltInOverBluetooth,
            let def = systemDefault,
            def.isBluetooth,
@@ -170,26 +201,64 @@ final class AudioDeviceManager {
 
     // MARK: - HAL property listeners
 
+    /// Install listeners for two HAL properties on the system audio
+    /// object:
+    ///
+    ///   - `kAudioHardwarePropertyDevices` — fires when devices are
+    ///     plugged / unplugged / connected / disconnected. Keeps
+    ///     `inputs` fresh.
+    ///   - `kAudioHardwarePropertyDefaultInputDevice` — fires when the
+    ///     user flips the default input in System Settings → Sound,
+    ///     even though no device was added or removed. Without this,
+    ///     `systemDefault` would stay stale until the next app launch
+    ///     and the BT-avoidance fallback would silently fire (or fail
+    ///     to fire) against the wrong premise.
+    ///
+    /// Both listeners share the same refresh block — both `inputs` and
+    /// `systemDefault` are derived from the same HAL state, so it's
+    /// cheaper to refresh everything than to maintain two narrower
+    /// refresh paths. Listener blocks are dispatched on
+    /// `DispatchQueue.main`, which runs on the main thread / main
+    /// actor — `MainActor.assumeIsolated` is the synchronous,
+    /// no-extra-hop variant; the original `Task { @MainActor in … }`
+    /// added a second scheduling hop that opened a race where a fast
+    /// "pull AirPods → press hotkey" sequence could observe a stale
+    /// `effectiveDevice`.
     private func installDeviceListChangeListener() {
         guard !listenerInstalled else { return }
-        var address = AudioObjectPropertyAddress(
+
+        let refresh: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            MainActor.assumeIsolated { self?.refresh() }
+        }
+
+        var deviceListAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        let listener: AudioObjectPropertyListenerBlock = { _, _ in
-            Task { @MainActor [weak self] in self?.refresh() }
-        }
-        let status = AudioObjectAddPropertyListenerBlock(
+        let deviceListStatus = AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject),
-            &address,
+            &deviceListAddress,
             DispatchQueue.main,
-            listener
+            refresh
         )
-        if status == noErr {
+
+        var defaultInputAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let defaultInputStatus = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &defaultInputAddress,
+            DispatchQueue.main,
+            refresh
+        )
+
+        if deviceListStatus == noErr && defaultInputStatus == noErr {
             listenerInstalled = true
         } else {
-            Self.log.error("failed to register HAL listener: \(status)")
+            Self.log.error("failed to register HAL listeners: devices=\(deviceListStatus) defaultInput=\(defaultInputStatus)")
         }
     }
 

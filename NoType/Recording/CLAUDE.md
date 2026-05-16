@@ -53,6 +53,7 @@ Three sibling tasks run in the context phase: `AccessibilityTree.snapshot()`, `I
 - `NoTypeTests/PauseDetectorTests.swift` — state-machine fixtures (synthetic VAD probability sequences, adaptive-threshold ladder mapping, long-monologue cuts, 180 s force-cut).
 - `NoTypeTests/ChunkBuilderTests.swift` — PCM → AAC round-trip (valid `ftyp` container, decodable, no tmp-file leaks).
 - `NoTypeTests/RecordingSessionShortPathTests.swift` — pins the lite-path discriminator.
+- `NoTypeTests/AudioDeviceManagerTests.swift` — pins the pure `pickEffectiveDevice` policy (pin-wins, BT-classic / BLE-Audio fallback, no-built-in graceful degrade, off-switch honoured) and the `Device.isBluetooth` / `isBuiltIn` transport-type matrix.
 - `SileroVADTests` — planned (see `solutions/documentation-gaps/silero-vad-reference-test-2026-05-15.md`).
 
 ## Pointers

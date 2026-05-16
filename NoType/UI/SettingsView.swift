@@ -14,10 +14,13 @@ struct SettingsView: View {
     @State private var pasteDelayMs: Double = Double(PasteSettings.defaultRestoreDelayMs)
 
     /// Mirror of `AudioDeviceManager.shared.preferBuiltInOverBluetooth`
-    /// for the toggle control. Initialised in `.onAppear`; the toggle's
-    /// `onChange` writes back through the singleton (which persists to
-    /// `UserDefaults`).
-    @State private var btAvoidance: Bool = true
+    /// for the toggle control. The default is read from the singleton
+    /// (which itself reads `UserDefaults` at init time) so the Toggle
+    /// renders the correct state on the very first frame — initialising
+    /// to a hardcoded `true` would flicker for users who have opted out.
+    /// `.onChange` writes back through the singleton; `.onAppear` keeps
+    /// the mirror in sync if the singleton was mutated after view init.
+    @State private var btAvoidance: Bool = AudioDeviceManager.shared.preferBuiltInOverBluetooth
 
     var body: some View {
         // Shadow the @Environment value with @Bindable so we can pass

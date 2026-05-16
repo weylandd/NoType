@@ -98,28 +98,7 @@ final class AudioRecorder: @unchecked Sendable {
     /// `[frameSize]`-Float array per VAD window. The stream finishes when
     /// `stop()` is called.
     func start() throws -> AsyncStream<[Float]> {
-        // Apply the user-pinned input device (if any) before the engine
-        // is prepared. Must run on `MainActor` because that's where
-        // `AudioDeviceManager` lives — `start()` is called from
-        // `RecordingSession` which is `@MainActor`, so this is in scope.
-        let device = MainActor.assumeIsolated { AudioDeviceManager.shared.effectiveDevice }
-        if let device {
-            _ = AudioDeviceManager.apply(device, to: engine)
-            // Per-session log of the BT-avoidance fallback so the
-            // user can correlate "music got louder" complaints with
-            // whether we actually opted out — visible via
-            // `log show --predicate 'subsystem == "app.notype"'`.
-            MainActor.assumeIsolated {
-                let mgr = AudioDeviceManager.shared
-                if mgr.preferBuiltInOverBluetooth,
-                   mgr.selectedUID == nil,
-                   let sysDef = mgr.systemDefault,
-                   sysDef.isBluetooth,
-                   device.isBuiltIn {
-                    Self.log.info("BT input avoidance: system default \"\(sysDef.name, privacy: .public)\" is Bluetooth — using built-in mic \"\(device.name, privacy: .public)\" to keep A2DP music quality / ducking")
-                }
-            }
-        }
+        applyEffectiveInputDevice()
 
         lock.lock()
         self.pcm.reset()
@@ -197,14 +176,57 @@ final class AudioRecorder: @unchecked Sendable {
         Self.log.info("recording running (\(Int(inFmt.sampleRate))Hz x\(inFmt.channelCount) → 16kHz mono)")
     }
 
+    /// Resolve the active input device via `AudioDeviceManager` and
+    /// apply it to the engine. Emits a per-session BT-avoidance info
+    /// log when the avoidance fallback engages so user reports of
+    /// "music got louder" can be correlated against
+    /// `log show --predicate 'subsystem == "app.notype"' --info`.
+    ///
+    /// Called from `start()` AND `handleConfigurationChange()` — if the
+    /// user connects AirPods mid-session, the config-change handler
+    /// runs and re-applies the avoidance policy against the now-BT
+    /// system default. Without that, the avoidance would silently stop
+    /// working after the first input change of a session.
+    ///
+    /// Device names are logged at `.privacy(.private)` — they routinely
+    /// include the user's name ("John's AirPods") via Continuity. The
+    /// log still surfaces locally with `--info --debug` for developer
+    /// debugging; shared `log collect` dumps redact them.
+    private func applyEffectiveInputDevice() {
+        let device: AudioDeviceManager.Device? = MainActor.assumeIsolated {
+            let mgr = AudioDeviceManager.shared
+            let pick = mgr.effectiveDevice
+            if let pick,
+               mgr.preferBuiltInOverBluetooth,
+               mgr.selectedUID == nil,
+               let sysDef = mgr.systemDefault,
+               sysDef.isBluetooth,
+               pick.isBuiltIn {
+                Self.log.info("BT input avoidance: system default \"\(sysDef.name, privacy: .private)\" is Bluetooth — using built-in mic \"\(pick.name, privacy: .private)\" to keep A2DP music quality / ducking")
+            }
+            return pick
+        }
+        if let device {
+            _ = AudioDeviceManager.apply(device, to: engine)
+        }
+    }
+
     /// Called when AVAudioEngine signals the input device or format
     /// changed. We tear down the tap, rebuild the converter for the new
     /// input format, and restart — without dropping the session's
     /// accumulated PCM. The user keeps dictating; the splice is
     /// invisible (a few ms gap at most).
+    ///
+    /// Re-applies the BT-avoidance policy via
+    /// `applyEffectiveInputDevice()` before rebuilding the tap. Without
+    /// that, a mid-session AirPods connect would let AVAudioEngine
+    /// pick up the new (BT) default and silently undo the avoidance,
+    /// downgrading the user's music from A2DP to HFP/SCO mid-recording
+    /// — the exact regression the BT-avoidance feature exists to fix.
     private func handleConfigurationChange() {
         Self.log.info("AVAudioEngineConfigurationChange — rebuilding tap")
         engine.stop()
+        applyEffectiveInputDevice()
         do {
             try installTapAndStart()
         } catch {
