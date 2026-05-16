@@ -13,6 +13,7 @@ enum ChunkBuilder {
     enum ChunkError: Error, LocalizedError {
         case formatCreate
         case bufferAlloc
+        case bufferUnavailable
         case fileCreate(Error)
         case writeFailed(Error)
         case readFailed(Error)
@@ -21,6 +22,7 @@ enum ChunkBuilder {
             switch self {
             case .formatCreate:           "Couldn't create AAC encoder format."
             case .bufferAlloc:            "Couldn't allocate PCM buffer for chunk encoding."
+            case .bufferUnavailable:      "PCM source buffer had no addressable base pointer (invariant violation)."
             case .fileCreate(let e):      "Couldn't open chunk file: \(e.localizedDescription)"
             case .writeFailed(let e):     "Chunk write failed: \(e.localizedDescription)"
             case .readFailed(let e):      "Chunk read-back failed: \(e.localizedDescription)"
@@ -76,12 +78,20 @@ enum ChunkBuilder {
             guard let dst = buffer.floatChannelData?[0] else {
                 throw ChunkError.bufferAlloc
             }
-            pcm.withUnsafeBufferPointer { src in
-                // `baseAddress` is non-nil for any non-empty buffer; `pcm`
-                // is non-empty here (caller asserts ≥ 150 ms of samples).
-                // The guard documents the invariant and makes the path
-                // safe under a future refactor that loosens it.
-                guard let base = src.baseAddress else { return }
+            // The caller asserts ≥ 150 ms of samples so `pcm` is
+            // non-empty here; `baseAddress` will always be non-nil.
+            // The `try`-from-closure shape exists as defence-in-depth:
+            // if a future refactor lets empty PCM through, a bare
+            // `return` would only escape the closure, leaving
+            // `buffer.frameLength = frames` set against uninitialised
+            // memory — `file.write` would ship an m4a of silence to
+            // Gemini. Throw a dedicated case rather than reusing
+            // `.bufferAlloc` (which already means two different
+            // AVAudio allocation failures above).
+            try pcm.withUnsafeBufferPointer { src in
+                guard let base = src.baseAddress else {
+                    throw ChunkError.bufferUnavailable
+                }
                 dst.update(from: base, count: pcm.count)
             }
 

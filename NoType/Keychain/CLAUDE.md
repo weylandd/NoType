@@ -13,7 +13,7 @@ Stores the user's Gemini API key in the macOS Keychain. Single-account model —
 2. **`AfterFirstUnlock`, not `WhenUnlocked`** — keeps the item readable after FileVault unlock paired with auto-login. Menu-bar app transcribes without re-entry after first interactive login of the session.
 3. **`SecretStore` is the only thing the rest of the app talks to.** `KeychainStore` is private to this module. Swapping the backend (iCloud Keychain, hosted proxy) is a one-file change.
 4. **`save` is upsert** — try `SecItemUpdate`; on `errSecItemNotFound` fall back to `SecItemAdd`. `load` returns `nil` when the item doesn't exist (not an error). `delete` is idempotent — `errSecItemNotFound` is treated as success.
-5. **`loadGeminiKey` is private** (since PR #8) — the only caller is `SecretStore.loadFromEnvOrFile`. Errors are logged and swallowed (return `nil`) rather than thrown.
+5. **`loadGeminiKey` is private** (since PR #8) — the only caller is `SecretStore.loadFromEnvOrFile`. Errors from `KeychainStore.load()` are logged and then **fall through to the legacy-file migration path** (an ACL mismatch on a re-signed binary mustn't strand the user's key). Only an empty Keychain *and* an empty / missing legacy file return `nil`.
 6. **`NOTYPE_GEMINI_KEY` env var wins over Keychain** for `loadFromEnvOrFile`. Never persisted from env into the Keychain — dev-only path.
 
 ## Hard rules
@@ -37,10 +37,10 @@ NoType ships a stable DR (`signing/NoType.xcrequirements` — `designated => ide
 Earlier builds stored the key in `~/Library/Application Support/NoType/settings.json` (0600 JSON, `{"geminiKey": "..."}`). `SecretStore.loadFromEnvOrFile()` (and the private Keychain read it wraps) performs a one-shot migration on first launch of a Keychain-backed build:
 
 1. Read the Keychain. If it has a key → return it.
-2. If empty AND legacy file holds a key → copy to Keychain, return the value (legacy file is removed on success; if the Keychain write fails, we still return the migrated value so the user isn't locked out).
-3. On any successful `saveGeminiKey` / `deleteGeminiKey` → remove the legacy file if it's still around.
+2. If empty **OR the read threw** AND legacy file holds a key → copy to Keychain, **remove the legacy file on success**, return the value. (Removing on success closes a stale-key downgrade window — without it, a later Keychain throw on the same user could re-migrate the old legacy value over a newer Keychain entry.) If the Keychain write fails, we still return the migrated value so the user isn't locked out *and* leave the legacy file on disk so the next launch can retry.
+3. On any successful `saveGeminiKey` / `deleteGeminiKey` → remove the legacy file if it's still around (backstop for users who got their key from path 2 and never went through path 3 via Settings).
 
-Net effect: existing users upgrade transparently, no re-paste.
+Net effect: existing users upgrade transparently, no re-paste, and a transient Keychain hiccup on a re-signed dev build doesn't strand them through onboarding again.
 
 ## Testing
 

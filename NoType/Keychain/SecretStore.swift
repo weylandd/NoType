@@ -56,20 +56,29 @@ enum SecretStore {
                 return kc
             }
         } catch {
-            Self.log.error("keychain read failed: \(error.localizedDescription, privacy: .public)")
-            return nil
+            // Don't bail yet — an ACL mismatch on a re-signed binary or
+            // a Security-framework hiccup must still fall through to
+            // legacy-file migration so an upgrading user keeps their
+            // key. (`kSecAttrAccessibleAfterFirstUnlock` rules out a
+            // genuinely locked keychain as the trigger.) ADR-011
+            // guarantees no re-paste.
+            Self.log.error("keychain read failed, falling through to legacy file: \(error.localizedDescription, privacy: .public)")
         }
-        // Keychain miss → check the legacy file once. If it has a key,
-        // migrate it into the Keychain and clean the file up.
+        // Keychain miss (or transient throw) → check the legacy file
+        // once. If it has a key, migrate it into the Keychain and clean
+        // the file up so a stale legacy key can't later overwrite a
+        // newer Keychain value on a subsequent throw.
         if let migrated = legacyFile.consumeForMigration() {
             do {
                 try KeychainStore.save(migrated)
+                legacyFile.removeIfPresent()
                 Self.log.info("migrated legacy settings.json key into Keychain")
                 return migrated
             } catch {
                 // Migration write failed — return the migrated value
                 // anyway so the user isn't suddenly locked out, but
-                // surface the failure to the caller's logs.
+                // leave the legacy file on disk so the next launch can
+                // retry the migration.
                 Self.log.error("legacy key migration to Keychain failed: \(error.localizedDescription, privacy: .public)")
                 return migrated
             }
