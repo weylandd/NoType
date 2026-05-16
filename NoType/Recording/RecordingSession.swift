@@ -124,7 +124,15 @@ final class RecordingSession {
             switch gerr {
             case .missingKey, .blocked:
                 return true
-            case .http, .empty, .decoding:
+            case .http(let status, _):
+                // 401 (bad key) / 403 (key not authorised for this
+                // model) are terminal — no point burning N×retries on
+                // every chunk of a session whose authentication is
+                // already broken. The user needs to fix the key in
+                // Settings. Other 4xx / 5xx / network (status=0) stay
+                // recoverable: gap marker, continue draining.
+                return status == 401 || status == 403
+            case .empty, .decoding:
                 return false
             }
         }
@@ -199,7 +207,6 @@ final class RecordingSession {
     /// + `NoType/Recording/CLAUDE.md` "Partial recovery".
     private struct ChunkResponse: Sendable {
         let chunkIndices: [Int]
-        let containsFinal: Bool
         let text: String?
     }
 
@@ -381,6 +388,13 @@ final class RecordingSession {
         await vadTask?.value
         responses.removeAll()
         pending.removeAll()
+        // Reset the companion fields together so a partial-recovery
+        // state from a previous cancellation can't leak into the next
+        // session via a re-used `RecordingSession` (the class is one-
+        // session-per-instance today, but keeping these in lockstep
+        // prevents a future refactor from introducing a subtle stale-
+        // state bug).
+        lastRecoverableError = nil
         // Mark a synthetic failure so `stop()` (if it's racing this
         // call) sees a cancelled state rather than trying to paste.
         if failure == nil {
@@ -435,17 +449,15 @@ final class RecordingSession {
             throw err
         }
 
-        // If every dispatched chunk's call failed, there's nothing
-        // user-meaningful to paste — only a string of `[…]` markers.
-        // Surface the real cause (offline / 5xx / decoding / …) so
-        // the AppState error catalog can render the right Error HUD
-        // instead of "pasted N gaps". `lastRecoverableError` was set
-        // every time we appended a `text: nil` response; falling back
-        // to `.noSpeech` only happens if the field was somehow never
-        // populated (shouldn't, but defensive).
-        let dispatchedCount = responses.count
-        let failedCount = responses.filter { $0.text == nil }.count
-        if dispatchedCount > 0 && failedCount == dispatchedCount {
+        // If every dispatched response failed (text == nil), there's
+        // nothing user-meaningful to paste — only a string of `[…]`
+        // markers. Surface the real cause (offline / 5xx / decoding /
+        // …) so the AppState error catalog can render the right Error
+        // HUD instead of "pasted N gaps". `lastRecoverableError` was
+        // set every time we appended a `text: nil` response; falling
+        // back to `.noSpeech` is defensive (a successful append should
+        // always set the field, but the guard keeps `stop()` total).
+        if !responses.isEmpty && responses.allSatisfy({ $0.text == nil }) {
             throw lastRecoverableError ?? SessionError.noSpeech
         }
 
@@ -786,7 +798,6 @@ final class RecordingSession {
             }
             responses.append(ChunkResponse(
                 chunkIndices: encoded.map { $0.idx },
-                containsFinal: containsFinal,
                 text: text
             ))
         } catch {
@@ -812,12 +823,24 @@ final class RecordingSession {
             } else {
                 let c = encoded[0]
                 Self.log.error("\(label) failed: \(error.localizedDescription, privacy: .public) — inserting marker")
-                recordRecoverableFailure(error: error, indices: [c.idx], containsFinal: c.isFinal)
+                recordRecoverableFailure(error: error, indices: [c.idx])
             }
         }
 
         discardProcessedPCM(batch: batch, containsFinal: containsFinal)
     }
+
+    /// Inter-iteration backoff for `splitRetry` after a recoverable
+    /// failure. The batched call has already exhausted its
+    /// HTTP-class retries inside `GeminiClient.sendRequest` (3 attempts
+    /// under 429), and now each split sub-call also has its own
+    /// retry budget. Without a gap, a 6-chunk batch under sustained
+    /// 429 / 5xx fires up to N×3 requests back-to-back — amplifying
+    /// the very condition we're trying to recover from. 250 ms isn't
+    /// a rate-limit-aware exponential backoff; it just caps the burst
+    /// rate at 4 sub-calls per second so we surface a few markers and
+    /// fail visibly rather than burning the user's quota.
+    nonisolated static let splitRetryBackoff: Duration = .milliseconds(250)
 
     /// Fallback for a batched Gemini call that failed recoverably:
     /// re-issue each chunk as an independent `transcribe`. Successful
@@ -829,7 +852,7 @@ final class RecordingSession {
         encoded: [(idx: Int, isFinal: Bool, audio: Data)],
         snap: ChunkSnapshot
     ) async {
-        for chunk in encoded {
+        for (offset, chunk) in encoded.enumerated() {
             if didFail { return }
             // Re-query priors each iteration so a chunk that just
             // succeeded becomes context for the next one.
@@ -846,7 +869,6 @@ final class RecordingSession {
                 )
                 responses.append(ChunkResponse(
                     chunkIndices: [chunk.idx],
-                    containsFinal: chunk.isFinal,
                     text: text
                 ))
             } catch {
@@ -856,7 +878,14 @@ final class RecordingSession {
                     return
                 }
                 Self.log.error("chunk_\(chunk.idx) split-retry failed: \(error.localizedDescription, privacy: .public) — inserting marker")
-                recordRecoverableFailure(error: error, indices: [chunk.idx], containsFinal: chunk.isFinal)
+                recordRecoverableFailure(error: error, indices: [chunk.idx])
+                // Brief pause before the next sub-call so we don't
+                // burst-fire against a rate-limited API. Skip the
+                // sleep when we're already on the last chunk —
+                // nothing comes after.
+                if offset < encoded.count - 1 {
+                    try? await Task.sleep(for: Self.splitRetryBackoff)
+                }
             }
         }
     }
@@ -869,13 +898,11 @@ final class RecordingSession {
     /// than the generic `.noSpeech`.
     private func recordRecoverableFailure(
         error: Error,
-        indices: [Int],
-        containsFinal: Bool
+        indices: [Int]
     ) {
         lastRecoverableError = error
         responses.append(ChunkResponse(
             chunkIndices: indices,
-            containsFinal: containsFinal,
             text: nil
         ))
     }

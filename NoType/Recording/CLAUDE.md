@@ -25,7 +25,7 @@
 8. **Silero is stateful.** `hiddenState`, `cellState`, and a 64-sample `carriedContext` look-back persist across calls. Reset all three at session start via `vad.reset()`.
 9. **First chunk waits for context snapshot.** Sender `await`s `contextTask.value` before issuing the first Gemini call. Audio capture itself starts immediately on hotkey press.
 10. **`RecordingSession` is a value, not a global.** Created on press, dropped on release. There is no "current session" singleton.
-11. **Lite-path discriminator:** `isFinalBatch && currentPriors().isEmpty && totalAudio < 32 000 samples (2.0 s)`. Pure function `shouldUseLitePath`, pinned by `RecordingSessionShortPathTests`. `currentPriors()` returns only chunks whose Gemini call succeeded — recoverable failures (markers) don't disqualify the lite path because the prior section would render `(none yet)` either way.
+11. **Lite-path discriminator:** `isFinalBatch && priorTranscriptCount == 0 && totalAudio < 32 000 samples (2.0 s)`. Pure function `shouldUseLitePath`, pinned by `RecordingSessionShortPathTests`. The call site passes `currentPriors().count` — only chunks whose Gemini call *succeeded* contribute. Recoverable failures (markers) don't disqualify the lite path because the prior section would render `(none yet)` either way.
 12. **Partial recovery.** A recoverable Gemini failure on one chunk (network blip, 5xx, decoding, mid-session empty) appends a `text: nil` response and `failureMarker` ("[…]") appears in its slot at stitch time. The session aborts only on terminal errors (auth, blocked, encode, cancellation — see `RecordingSession.isTerminal(_:)`). A batched call that fails recoverably is split into N independent `transcribe` calls; one bad chunk no longer poisons the others. When every dispatched chunk fails, `stop()` throws `lastRecoverableError` so the AppState error catalog surfaces the real cause (offline / 5xx / …) rather than the generic `noSpeech`.
 
 ## Hard rules
@@ -79,6 +79,7 @@ Three sibling tasks run in the context phase: `AccessibilityTree.snapshot()`, `I
 
 - Why Silero CoreML (not Apple SpeechDetector) → `solutions/tooling-decisions/silero-vad-coreml-2026-05-15.md`.
 - One Gemini request in flight (the sender contract) → `solutions/architecture-patterns/serial-gemini-actor-2026-05-15.md`.
+- Partial recovery via gap markers (what `processBatch`'s catch-block does, why every classifier branch is what it is) → `solutions/architecture-patterns/partial-recovery-with-markers-2026-05-16.md`.
 - Cache-prefix shape (what the sender ships) → `NoType/Gemini/CLAUDE.md`.
 - Context snapshot lifecycle → `NoType/Context/CLAUDE.md`.
 - AAC encoding tech debt → `solutions/documentation-gaps/in-memory-aac-encoding-2026-05-15.md`.

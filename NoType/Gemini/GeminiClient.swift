@@ -567,7 +567,19 @@ actor GeminiClient {
         do {
             (data, response) = try await session.data(for: request)
         } catch let urlError as URLError {
-            // Wrap to give the retry-decider a uniform classifier surface.
+            // Cancellation surfaces from URLSession as `URLError(-999)`
+            // *not* `CancellationError`. Translate so the session-level
+            // retry / partial-recovery layer can classify it as
+            // terminal — otherwise `splitRetry` keeps issuing requests
+            // against an already-cancelled task. See
+            // `RecordingSession.isTerminal(_:)`.
+            if urlError.code == .cancelled {
+                throw CancellationError()
+            }
+            // Wrap to give the retry-decider a uniform classifier
+            // surface. The URLError code is embedded in the body so
+            // `AppState.payloadForSessionFailure` can recover it for
+            // the "no internet" / "timed out" HUDs.
             throw GeminiError.http(
                 status: 0,
                 body: "URLError code=\(urlError.code.rawValue): \(urlError.localizedDescription)"

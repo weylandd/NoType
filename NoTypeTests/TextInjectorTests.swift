@@ -536,4 +536,35 @@ final class TextInjectorTests: XCTestCase {
         )
         XCTAssertEqual(out, "Hello world.")
     }
+
+    // MARK: - Partial-recovery failure marker stitching
+
+    func test_stitchChunks_markerBetweenWords_isSpaced() {
+        // Partial-recovery contract: when one chunk's Gemini call
+        // failed recoverably, `RecordingSession.stop()` substitutes
+        // `RecordingSession.failureMarker` ("[…]") in its slot at
+        // stitch time. The marker must read as a visible gap in the
+        // final paste — single spaces on both sides, not glued to the
+        // surrounding text.
+        let pieces = ["Hello,", RecordingSession.failureMarker, "world"]
+        let stitched = TextInjector.stitchChunks(pieces)
+        XCTAssertEqual(stitched, "Hello, \(RecordingSession.failureMarker) world")
+    }
+
+    func test_stitchChunks_markerAtStart_isSpaced() {
+        // Edge: very first chunk failed. Marker leads the output.
+        let pieces = [RecordingSession.failureMarker, "world"]
+        let stitched = TextInjector.stitchChunks(pieces)
+        XCTAssertEqual(stitched, "\(RecordingSession.failureMarker) world")
+    }
+
+    func test_stitchChunks_markerAtEnd_isSpaced() {
+        // Edge: final chunk (the user's punch line) failed.
+        // `finalizeForInsertion` doesn't strip the marker's trailing
+        // `]` because `]` isn't in the terminal-punct set — so the
+        // marker survives intact at the end of the paste.
+        let pieces = ["Hello world", RecordingSession.failureMarker]
+        let stitched = TextInjector.stitchChunks(pieces)
+        XCTAssertEqual(stitched, "Hello world \(RecordingSession.failureMarker)")
+    }
 }

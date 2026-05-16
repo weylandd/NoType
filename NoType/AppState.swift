@@ -1129,32 +1129,19 @@ private enum NoTypeErrorKind {
     /// HTTP error codes — they're the most common and most actionable.
     private static func payloadForSessionFailure(_ err: Error) -> ErrorPayload {
         if let urlError = err as? URLError {
-            switch urlError.code {
-            case .notConnectedToInternet, .networkConnectionLost:
-                return ErrorPayload(
-                    title: "No internet connection",
-                    description: "NoType needs internet to transcribe. Reconnect and try again — your audio wasn't saved.",
-                    code: "ERR_OFFLINE",
-                    severity: .danger,
-                    iconSymbol: "wifi.slash"
-                )
-            case .timedOut:
-                return ErrorPayload(
-                    title: "Couldn't reach Gemini",
-                    description: "The transcription request timed out. Check your connection and try again.",
-                    code: "ERR_NET_TIMEOUT",
-                    severity: .danger,
-                    iconSymbol: "exclamationmark.triangle.fill"
-                )
-            default:
-                return ErrorPayload(
-                    title: "Network error",
-                    description: urlError.localizedDescription,
-                    code: "ERR_NET_\(urlError.code.rawValue)",
-                    severity: .danger,
-                    iconSymbol: "wifi.exclamationmark"
-                )
-            }
+            return payloadForURLErrorCode(urlError.code.rawValue, fallbackDescription: urlError.localizedDescription)
+        }
+        // `GeminiClient.performOnce` wraps unhandled URLErrors as
+        // `GeminiError.http(0, "URLError code=N: …")`. Pre-PR-#39
+        // sessions threw the wrapped form here and rendered as
+        // "Gemini rejected the request (HTTP 0)" — wrong for
+        // offline / timeout. The partial-recovery rethrow in
+        // `RecordingSession.stop()` makes this path far more common,
+        // so peel the code back out and route through the same
+        // URLError-class HUDs as the native-URLError branch above.
+        if let g = err as? GeminiClient.GeminiError, case let .http(0, body) = g,
+           let code = NetworkErrorTranslator.extractURLErrorCode(from: body) {
+            return payloadForURLErrorCode(code, fallbackDescription: body)
         }
         if let g = err as? GeminiClient.GeminiError {
             switch g {
@@ -1239,5 +1226,58 @@ private enum NoTypeErrorKind {
             severity: .danger,
             iconSymbol: "exclamationmark.triangle.fill"
         )
+    }
+
+    /// Build the right network-class HUD payload for a raw URLError
+    /// code value. Shared between the native-`URLError` branch and the
+    /// `GeminiError.http(0, "URLError code=N: …")` re-extraction
+    /// branch so both paths render the same offline / timeout HUDs.
+    private static func payloadForURLErrorCode(_ rawCode: Int, fallbackDescription: String) -> ErrorPayload {
+        let code = URLError.Code(rawValue: rawCode)
+        switch code {
+        case .notConnectedToInternet, .networkConnectionLost:
+            return ErrorPayload(
+                title: "No internet connection",
+                description: "NoType needs internet to transcribe. Reconnect and try again — your audio wasn't saved.",
+                code: "ERR_OFFLINE",
+                severity: .danger,
+                iconSymbol: "wifi.slash"
+            )
+        case .timedOut:
+            return ErrorPayload(
+                title: "Couldn't reach Gemini",
+                description: "The transcription request timed out. Check your connection and try again.",
+                code: "ERR_NET_TIMEOUT",
+                severity: .danger,
+                iconSymbol: "exclamationmark.triangle.fill"
+            )
+        default:
+            return ErrorPayload(
+                title: "Network error",
+                description: fallbackDescription,
+                code: "ERR_NET_\(rawCode)",
+                severity: .danger,
+                iconSymbol: "wifi.exclamationmark"
+            )
+        }
+    }
+
+}
+
+/// Pull the URLError code out of a `GeminiError.http(0, body)`
+/// body string of the form `"URLError code=-1009: not connected"`.
+/// Returns `nil` when the body isn't a wrapped URLError. Internal so
+/// `AppStateNetworkErrorRoutingTests` can pin the parser against
+/// `GeminiClient.performOnce`'s wrapping format — drift between the
+/// two would silently re-break the offline / timeout HUD routing.
+enum NetworkErrorTranslator {
+    static func extractURLErrorCode(from body: String) -> Int? {
+        let prefix = "URLError code="
+        guard body.hasPrefix(prefix) else { return nil }
+        let rest = body.dropFirst(prefix.count)
+        guard let colon = rest.firstIndex(of: ":") else {
+            return Int(rest.trimmingCharacters(in: .whitespaces))
+        }
+        return Int(rest[..<colon].trimmingCharacters(in: .whitespaces))
     }
 }

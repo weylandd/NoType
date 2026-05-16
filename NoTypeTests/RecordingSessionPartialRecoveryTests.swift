@@ -57,6 +57,24 @@ final class RecordingSessionPartialRecoveryTests: XCTestCase {
         XCTAssertTrue(RecordingSession.isTerminal(nsErr))
     }
 
+    func test_isTerminal_http401_isTerminal() {
+        // Bad key — no point burning N×retries on every chunk of a
+        // session whose authentication is already broken. The user
+        // has to fix the key in Settings before anything works.
+        XCTAssertTrue(RecordingSession.isTerminal(
+            GeminiClient.GeminiError.http(status: 401, body: "unauthorized")
+        ))
+    }
+
+    func test_isTerminal_http403_isTerminal() {
+        // Key not authorised for this model. Same reasoning as 401 —
+        // every chunk will hit the same wall, so fast-fail instead of
+        // letting splitRetry burn the user's quota.
+        XCTAssertTrue(RecordingSession.isTerminal(
+            GeminiClient.GeminiError.http(status: 403, body: "forbidden")
+        ))
+    }
+
     // MARK: - isTerminal — recoverable cases (Gemini transient errors)
 
     func test_isTerminal_http500_isRecoverable() {
