@@ -22,6 +22,73 @@
     <description>NoType release feed for Sparkle 2 auto-updates.</description>
     <language>en</language>
     <item>
+      <title>Version 0.1.6</title>
+      <pubDate>Sat, 16 May 2026 15:34:44 +0000</pubDate>
+      <sparkle:version>8</sparkle:version>
+      <sparkle:shortVersionString>0.1.6</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+Crash + reliability release. Four user-visible fixes targeting paths
+that were either crashing on macOS 26 (Tahoe) or producing wrong
+behaviour in normal use. The crash report that drove #41 was reliable
+on Tahoe within ~3 s of opening the onboarding mic-check step — every
+Tahoe tester ran into it. Existing 0.1.5 installs get this update
+through Sparkle (≤24 h auto-check or immediately on next main-window
+open).
+
+### Fixed
+- **Onboarding mic-check no longer crashes on macOS 26 (Tahoe)** (#41).
+  `SwiftUI.TimelineView` content closures crashed inside
+  `swift_task_isCurrentExecutorWithFlagsImpl` → `objc_opt_class`
+  during layout whenever they called a `@MainActor`-isolated View
+  instance method on each tick. The onboarding mic-check and the
+  recording HUD's live spectrum meter both shipped with that pattern.
+  Both now use a `.task { while !Task.isCancelled { … try? await
+  Task.sleep(...) } }` driver loop that mutates `@State` directly,
+  side-stepping the TimelineView dispatch path entirely. macOS 15
+  (Sequoia) wasn't affected by the same binary. The two spectrum
+  meters now share a single `SpectrumMeter` view so the broken pattern
+  can't reappear in only one of them. Full diagnosis in
+  `docs/solutions/runtime-errors/timelineview-mainactor-instance-method-crash-2026-05-16.md`.
+- **Bluetooth headsets no longer drop to call-quality audio during
+  dictation** (#40). macOS would silently switch a connected
+  Bluetooth headset out of A2DP and into HFP/SCO whenever NoType
+  opened an `AVAudioEngine` input tap — music playing through the
+  same headset would drop to phone-call audio for the duration of a
+  recording. NoType now prefers the built-in mic when both a
+  Bluetooth output and the built-in input are available; the user
+  can still pick the Bluetooth mic explicitly via the input picker
+  if they want it for dictation.
+- **Gemini failures no longer drop the whole session** (#39). A
+  single chunk's network blip, 5xx, or decoding error used to
+  poison the entire transcript with `.noSpeech` — the user lost
+  audio they actually spoke. Each chunk's success now stands alone:
+  failures render as `[…]` markers in the stitched transcript, the
+  user sees the rest of what they said, and a neutral "Pasted with
+  gaps" HUD reports how many chunks fell out. Batched calls that
+  hit a recoverable error are split into N independent retries
+  before being marked as gaps. Terminal errors (auth, blocked,
+  encode, cancellation) still abort the session as before. See
+  `docs/solutions/architecture-patterns/partial-recovery-with-markers-2026-05-16.md`.
+- **Final-chunk audio no longer silently dropped at end of
+  recording** (#38). After hotkey release, the final-chunk audio
+  could land in `pending` after `stop()`'s sender drain had already
+  returned — the user got `.noSpeech` despite clearly speaking. The
+  drain now loops on `senderTask` re-reads
+  (`while let task = senderTask { await task.value }`) so every
+  respawn is observed. Same PR also tightened the adaptive pause
+  threshold ladder so long monologues cut into chunks Gemini can
+  actually transcribe inside its 30 s resource timeout (steps down
+  to 500 ms at 40 s+ audio), reset Silero VAD state deterministically
+  per session instead of relying on warm-up samples, and added
+  per-stage lag logging so a future regression in the chunk pipeline
+  is diagnosable from production logs.
+      ]]></description>
+      <enclosure url="https://github.com/weylandd/NoType/releases/download/v0.1.6/NoType-0.1.6.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="wNngERNmrO404wWagJY2DV+tT1sblXO6ACiRrWvkQnKLgnElTLWfo0wBDf3ukNpv0gzd1VkSgiyxiIoOYd7nAg==" length="5989740" />
+    </item>
+    <item>
       <title>Version 0.1.5</title>
       <pubDate>Fri, 15 May 2026 15:55:38 +0000</pubDate>
       <sparkle:version>7</sparkle:version>
