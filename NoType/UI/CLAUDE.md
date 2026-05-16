@@ -23,6 +23,7 @@ SwiftUI surfaces: menu-bar icon, history popover, the main app window (Home tab 
 - `HUDController.swift` — owns and positions every floating panel.
 - `HUDPanel.swift` — `NSPanel` subclass with embedded `NSVisualEffectView` blur.
 - `AudioSpectrum.swift` — vDSP-backed FFT for the recording-HUD meter.
+- `SpectrumMeter.swift` — shared FFT spectrum meter view used by both the recording HUD (`RecordingHUD.swift`) and the onboarding mic-check step (`NoType/Onboarding/Steps/OnboardingMicCheckStep.swift`). Owns the `.task`-driven 30 fps frame loop + `@State` arrays; the two call sites only supply geometry (bar count, spacing, padding, corner radius, max height).
 - `SettingsView.swift` — opened from the popover header gear.
 
 ## Invariants

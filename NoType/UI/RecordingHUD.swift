@@ -45,7 +45,15 @@ struct RecordingHUD: View {
                 }
             }
 
-            LiveSpectrumMeter(samplesProvider: samplesProvider)
+            SpectrumMeter(
+                samplesProvider: samplesProvider,
+                barCount: 38,
+                barSpacing: 2,
+                padding: EdgeInsets(top: 6, leading: 4, bottom: 6, trailing: 4),
+                cornerRadius: DS.Radius.md,
+                maxBarHeight: 24
+            )
+            .frame(height: 36)
         }
         .padding(EdgeInsets(top: 10, leading: 12, bottom: 11, trailing: 12))
         .frame(width: 300)
@@ -100,150 +108,8 @@ private struct TimerPill: View {
     }
 }
 
-/// Live FFT spectrum analyzer. Pulls the trailing 1024 samples from the
-/// recorder on each tick (~30 fps), runs a windowed FFT via
-/// `AudioSpectrum`, and animates 38 log-spaced bars covering ~100 Hz to
-/// 6.4 kHz.
-///
-/// Each bar carries two animated values:
-/// - `level` — the live magnitude. Instant attack, exponential decay so
-///   the bar drops fluidly after a transient.
-/// - `peak`  — the highest recent magnitude. Same instant attack, but a
-///   *much* slower decay — the marker hangs visibly at the top before
-///   sliding down, giving the meter the classic "VU peak hold" feel.
-///
-/// Frame updates are driven by a `.task` async loop, **not** by
-/// `TimelineView`. On macOS 26 the per-tick re-entry into a
-/// `@MainActor`-isolated View instance method (here: `barColumn(at:)`,
-/// `updateLevels()`, the `tickKey` computed property) from inside the
-/// `TimelineView` content closure triggered a runtime executor check
-/// (`swift_task_isCurrentExecutorWithFlagsImpl` → `objc_opt_class`)
-/// that crashed during layout — same pattern that broke
-/// `HistoryRowView.TimestampDisplay` (incident 4838DA5B-…) and crashed
-/// the tester during onboarding mic-check. A `.task` async loop driving
-/// `@State` mutation directly side-steps the TimelineView dispatch path.
-private struct LiveSpectrumMeter: View {
-    let samplesProvider: @MainActor () -> [Float]
-
-    /// Single source of truth for the bar count. Declared `static let` so
-    /// the `@State` initializer for `levels`/`peaks` can reference it —
-    /// instance `let`s aren't visible to other instance-property
-    /// initializers in Swift.
-    private static let barCount = 38
-    /// ~30 fps frame interval for the `.task` driver loop.
-    private static let frameInterval: Duration = .milliseconds(33)
-    /// Bar decay per frame (~30 fps). 0.85 ≈ 12 frames from 1.0→0.15.
-    private let levelDecay: Float = 0.85
-    /// Peak marker decay. Much slower so the marker visibly lingers at
-    /// the bar's high-water mark for ~½ s before catching up.
-    private let peakDecay:  Float = 0.98
-    private let minBarHeight: CGFloat = 2
-    /// Max bar height inside the 36 pt container minus 6 pt vertical
-    /// padding (top + bottom = 12) → 24 pt.
-    private let maxBarHeight: CGFloat = 24
-
-    @State private var levels: [Float] = Array(repeating: 0, count: Self.barCount)
-    @State private var peaks:  [Float] = Array(repeating: 0, count: Self.barCount)
-
-    var body: some View {
-        HStack(alignment: .bottom, spacing: 2) {
-            ForEach(0..<Self.barCount, id: \.self) { i in
-                LiveSpectrumBar(
-                    level: max(minBarHeight, CGFloat(levels[i]) * maxBarHeight),
-                    peak:  CGFloat(peaks[i]) * maxBarHeight,
-                    minBarHeight: minBarHeight,
-                    maxBarHeight: maxBarHeight
-                )
-                .frame(maxWidth: .infinity)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-        .padding(EdgeInsets(top: 6, leading: 4, bottom: 6, trailing: 4))
-        .frame(height: 36)
-        .background(
-            LinearGradient(
-                colors: [
-                    DS.Color.bgInset.opacity(0.8),
-                    DS.Color.bgCanvas.opacity(0.6),
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(DS.Color.borderSubtle, lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .accessibilityHidden(true)
-        .task {
-            // `.task` auto-cancels when the HUD goes away. No
-            // TimelineView, no .onChange — just sample + decay + assign
-            // to @State, which triggers normal SwiftUI re-render.
-            // Read-before-write (`var next… = levels`) is deliberate: we
-            // decay against the snapshot SwiftUI last rendered so a slow
-            // frame doesn't compound the decay rate.
-            while !Task.isCancelled {
-                let samples = samplesProvider()
-                let fresh = AudioSpectrum.bands(from: samples, bandCount: Self.barCount)
-                var nextLevels = levels
-                var nextPeaks  = peaks
-                for i in 0..<Self.barCount {
-                    let f = fresh[i]
-                    nextLevels[i] = max(f, nextLevels[i] * levelDecay)
-                    nextPeaks[i]  = max(nextLevels[i], nextPeaks[i] * peakDecay)
-                }
-                levels = nextLevels
-                peaks  = nextPeaks
-                try? await Task.sleep(for: Self.frameInterval)
-            }
-        }
-    }
-}
-
-/// Pure-presentation bar with peak-hold marker. Takes geometry as inputs
-/// so the parent can drive it from a frozen snapshot of `@State` without
-/// the bar reaching back into `self`.
-private struct LiveSpectrumBar: View {
-    let level: CGFloat
-    let peak: CGFloat
-    let minBarHeight: CGFloat
-    let maxBarHeight: CGFloat
-
-    private let peakThickness: CGFloat = 2
-    private let peakInset: CGFloat = 0.5
-    private let peakRadius: CGFloat = 1
-
-    var body: some View {
-        ZStack(alignment: .bottom) {
-            // Live bar: top corners 2 pt, bottom flat — sits firmly
-            // on the meter's baseline like a column rather than a pill.
-            UnevenRoundedRectangle(
-                topLeadingRadius: 2,
-                bottomLeadingRadius: 0,
-                bottomTrailingRadius: 0,
-                topTrailingRadius: 2,
-                style: .continuous
-            )
-            .fill(
-                LinearGradient(
-                    colors: [DS.Color.accentFg, DS.Color.accent],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
-            .frame(height: level)
-
-            // Peak-hold marker: 2 pt-tall rounded puck, narrower than
-            // the bar by `peakInset` on each side. Decays much slower
-            // than the bar → the puck hangs at the high-water mark
-            // while the column drops, then catches up.
-            RoundedRectangle(cornerRadius: peakRadius, style: .continuous)
-                .fill(DS.Color.accentFg)
-                .frame(height: peakThickness)
-                .padding(.horizontal, peakInset)
-                .offset(y: -min(max(peak - peakThickness, 0), maxBarHeight))
-                .opacity(peak > minBarHeight ? 0.9 : 0)
-        }
-    }
-}
+// The live FFT spectrum meter is the shared `SpectrumMeter` view
+// (`NoType/UI/SpectrumMeter.swift`). The HUD instantiates it inside its
+// `body` with HUD-specific geometry (38 bars, tighter padding, 36 pt
+// fixed height); the onboarding mic-check step uses the same component
+// at 44 bars + larger padding.

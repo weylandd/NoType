@@ -107,6 +107,7 @@
 		E2E98E97A1953262FB1C1F37 /* PermissionStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 467C43FEBD5D7C433CF08838 /* PermissionStatus.swift */; };
 		EE185C97E6EC5BFD56B1049F /* DSIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1774DA573523F7148D0D7D1F /* DSIcon.swift */; };
 		F35926FC7CDED3D48865AF67 /* AppCategory.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDC461E80955722B1004A930 /* AppCategory.swift */; };
+		F743D05ACEFB83485AAF13F3 /* SpectrumMeter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D9E71E12555E34331D74735 /* SpectrumMeter.swift */; };
 		FB346850052106404473489C /* ChunkBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DF4C781909D13747095144C /* ChunkBuilder.swift */; };
 		FB3ABA9FCEFA9F35039E13DE /* NetworkErrorTranslatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CE153F5C0A4476F796C6209 /* NetworkErrorTranslatorTests.swift */; };
 /* End PBXBuildFile section */
@@ -141,6 +142,7 @@
 		38B9D623D9D9F7934E636F65 /* HistoryEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryEntry.swift; sourceTree = "<group>"; };
 		3C1BC42D455578DC7436789D /* CategoryResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CategoryResolverTests.swift; sourceTree = "<group>"; };
 		3CF86AC1057B7E5A81EB2CF4 /* SileroVAD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SileroVAD.swift; sourceTree = "<group>"; };
+		3D9E71E12555E34331D74735 /* SpectrumMeter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpectrumMeter.swift; sourceTree = "<group>"; };
 		3DB3A3F97F363A200F24DBC0 /* PCMRingBufferTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PCMRingBufferTests.swift; sourceTree = "<group>"; };
 		3F06DFB43BBA124B5D04E447 /* DictionaryHarvester.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryHarvester.swift; sourceTree = "<group>"; };
 		40FA8D4F920AE01822A1F8E6 /* OnboardingFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingFlow.swift; sourceTree = "<group>"; };
@@ -349,6 +351,7 @@
 				0A3FCB66408303B77B1CEA6A /* PermissionsHUD.swift */,
 				C14E8B007DEBD358EA83ED05 /* RecordingHUD.swift */,
 				FEF718234BA790AE54908255 /* SettingsView.swift */,
+				3D9E71E12555E34331D74735 /* SpectrumMeter.swift */,
 				6C62AA4B6AC6FC3D6AAE71EB /* TranscribingHUD.swift */,
 				A0C8D42A3F9EB438B0D1EA2F /* UpdateBanner.swift */,
 				A4DBDCDD507B70E1B95E56B3 /* Dictionary */,
@@ -699,6 +702,7 @@
 				4B1A4427BB37829351167B1B /* SecureFieldMasker.swift in Sources */,
 				12C7C8B6FC41A210D9391FB9 /* SettingsView.swift in Sources */,
 				4640032E8C9EDE6729F49FFD /* SileroVAD.swift in Sources */,
+				F743D05ACEFB83485AAF13F3 /* SpectrumMeter.swift in Sources */,
 				D1408E25430A0E7020FE2CA1 /* StatsStore.swift in Sources */,
 				CF4FB82AE92685D1DD66A140 /* SystemSettingsPane.swift in Sources */,
 				35B420BDBA4A559C00E9B857 /* TextInjector.swift in Sources */,
