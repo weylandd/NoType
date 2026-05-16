@@ -56,6 +56,8 @@ ever needs to round-trip across a renamed-file boundary.
 
 ## Pointers
 
+- Why centralise the file IO (extraction rationale, rejected alternatives) →
+  `solutions/architecture-patterns/json-file-storage-helper-2026-05-16.md`.
 - Consumers (which store does what) → `NoType/History/CLAUDE.md`,
   `NoType/Instructions/CLAUDE.md`, `NoType/Dictionary/CLAUDE.md`.
 - Privacy posture (these stores never leave the device) →
