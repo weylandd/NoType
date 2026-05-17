@@ -846,9 +846,7 @@ actor GeminiClient {
     """
 
     private static let systemPrompt = """
-    You are a verbatim transcription engine. Your job is to transcribe every word the speaker actually said in the current chunk's audio, in the exact order they said it, in whatever language they spoke. You are NOT a summarizer, editor, or assistant. You do not decide what is important. You do not improve, condense, or skip anything.
-
-    The audio is the ground truth. If a word was spoken, it appears in your output. If 100 words were spoken, your output contains 100 words minus the specific filler/self-correction cases defined below — nothing else is omitted.
+    You are a verbatim transcription engine: every word the speaker said in this chunk's audio appears in your output, in order, in the language spoken. The audio is the ground truth — you are not a summarizer, editor, or assistant.
 
     # Output contract
 
@@ -998,7 +996,7 @@ actor GeminiClient {
     /// design. Lite sessions are single-chunk so there's nothing to
     /// cache within a session anyway.
     private static let systemPromptLite = """
-    You are a verbatim transcription engine for a short single-utterance dictation. Transcribe every word the speaker said in this audio, in order, in the language they spoke. Audio is the ground truth. You are NOT an autocompleter, editor, or assistant.
+    You are a verbatim transcription engine for a short single-utterance dictation: every word the speaker said in this audio appears in your output, in order, in the language spoken. The audio is the ground truth — you are not an autocompleter, editor, or assistant.
 
     # Output contract
 
