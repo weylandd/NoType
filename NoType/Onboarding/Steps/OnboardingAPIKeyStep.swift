@@ -283,36 +283,15 @@ struct OnboardingAPIKeyStep: View {
     // MARK: - Continue button
 
     private var continueButton: some View {
-        Button(action: continueTapped) {
-            HStack(spacing: 6) {
-                Text(validating ? "Validating" : "Continue")
-                    .font(.system(size: 14, weight: .medium))
-                if validating {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(DS.Color.textOnAccent)
-                } else {
-                    Image(systemName: "arrow.right")
-                        .font(.system(size: 12, weight: .semibold))
-                }
-            }
-            .foregroundStyle(DS.Color.textOnAccent)
-            .padding(.horizontal, 14)
-            .frame(minWidth: 180, minHeight: 36)
-            .background(
-                continueEnabled ? DS.Color.accent : DS.Color.accent.opacity(0.4),
-                in: RoundedRectangle(cornerRadius: 8)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(.white.opacity(0.18), lineWidth: DS.Border.hairline)
-                    .blendMode(.plusLighter)
-                    .opacity(continueEnabled ? 1 : 0)
-            )
-        }
-        .buttonStyle(.plain)
-        .disabled(!continueEnabled)
-        .accessibilityLabel("Continue")
+        DSPrimaryButton(
+            label: validating ? "Validating" : "Continue",
+            size: .large,
+            trailingSystemSymbol: "arrow.right",
+            isLoading: validating,
+            isEnabled: continueEnabled,
+            minWidth: 180,
+            action: continueTapped
+        )
     }
 
     private var continueEnabled: Bool {

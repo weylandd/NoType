@@ -103,7 +103,7 @@ struct OnboardingChrome<Body: View, Footer: View>: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
         .background(
-            DS.Color.bgBase.opacity(0.6),
+            DS.Color.progressPillFill,
             in: Capsule()
         )
         .overlay(
@@ -154,7 +154,7 @@ private struct ProgressDot: View {
 
     private var fillColor: Color {
         switch state {
-        case .pending: return DS.Color.textQuaternary.opacity(0.55)
+        case .pending: return DS.Color.progressDotPending
         case .done:    return DS.Color.accentFg
         case .active:  return DS.Color.accent
         }

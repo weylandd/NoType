@@ -123,33 +123,15 @@ struct OnboardingPermissionsStep: View {
     }
 
     private var continueButton: some View {
-        let enabled = permissions.allGranted
-        return Button(action: {
-            if enabled { onboarding.goNext() }
-        }) {
-            HStack(spacing: 6) {
-                Text("Continue")
-                    .font(.system(size: 14, weight: .medium))
-                Image(systemName: "arrow.right")
-                    .font(.system(size: 12, weight: .semibold))
-            }
-            .foregroundStyle(DS.Color.textOnAccent)
-            .padding(.horizontal, 14)
-            .frame(minWidth: 180, minHeight: 36)
-            .background(
-                enabled ? DS.Color.accent : DS.Color.accent.opacity(0.4),
-                in: RoundedRectangle(cornerRadius: 8)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(.white.opacity(0.18), lineWidth: DS.Border.hairline)
-                    .blendMode(.plusLighter)
-                    .opacity(enabled ? 1 : 0)
-            )
+        DSPrimaryButton(
+            label: "Continue",
+            size: .large,
+            trailingSystemSymbol: "arrow.right",
+            isEnabled: permissions.allGranted,
+            minWidth: 180
+        ) {
+            if permissions.allGranted { onboarding.goNext() }
         }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
-        .accessibilityLabel("Continue")
     }
 }
 
@@ -173,7 +155,15 @@ private struct PermissionRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 14) {
-            glyph
+            DSGlyphChip(
+                severity: glyphSeverity,
+                symbol: symbol,
+                size: 44,
+                cornerRadius: 10,
+                symbolSize: 18,
+                symbolWeight: .regular,
+                showBorder: true
+            )
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
@@ -214,7 +204,7 @@ private struct PermissionRow: View {
         return isRequired ? .required : .optional
     }
 
-    private var glyphSeverity: GlyphSeverity {
+    private var glyphSeverity: DSGlyphChip.Severity {
         if granted { return .success }
         if denied  { return .danger }
         return isRequired ? .warning : .neutral
@@ -222,7 +212,7 @@ private struct PermissionRow: View {
 
     private var rowBackground: AnyShapeStyle {
         if denied {
-            return AnyShapeStyle(DS.Color.dangerSoft.opacity(0.4))
+            return AnyShapeStyle(DS.Color.dangerSoftStrong)
         }
         return AnyShapeStyle(DS.Color.bgSurface)
     }
@@ -231,49 +221,6 @@ private struct PermissionRow: View {
         if granted { return DS.Color.successBorder }
         if denied  { return DS.Color.dangerBorder }
         return DS.Color.borderDefault
-    }
-
-    // MARK: glyph
-
-    @ViewBuilder
-    private var glyph: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 10)
-                .fill(glyphFill)
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(glyphBorder, lineWidth: 1)
-            Image(systemName: symbol)
-                .font(.system(size: 18, weight: .regular))
-                .foregroundStyle(glyphFg)
-        }
-        .frame(width: 44, height: 44)
-    }
-
-    private var glyphFill: Color {
-        switch glyphSeverity {
-        case .success: return DS.Color.successSoft
-        case .danger:  return DS.Color.dangerSoft
-        case .warning: return DS.Color.warningSoft
-        case .neutral: return DS.Color.bgInset
-        }
-    }
-
-    private var glyphBorder: Color {
-        switch glyphSeverity {
-        case .success: return DS.Color.successBorder
-        case .danger:  return DS.Color.dangerBorder
-        case .warning: return DS.Color.warningBorder
-        case .neutral: return DS.Color.borderDefault
-        }
-    }
-
-    private var glyphFg: Color {
-        switch glyphSeverity {
-        case .success: return DS.Color.successFg
-        case .danger:  return DS.Color.dangerFg
-        case .warning: return DS.Color.warningFg
-        case .neutral: return DS.Color.textTertiary
-        }
     }
 
     // MARK: detail
@@ -302,21 +249,22 @@ private struct PermissionRow: View {
             if granted {
                 grantedPill
             } else if denied {
-                Button(action: openSettings) {
-                    ctaLabel("Open Settings", style: .secondary)
-                }
-                .buttonStyle(.plain)
+                DSSecondaryButton(label: "Open Settings", size: .medium, action: openSettings)
+                RecheckLink(action: onRecheck)
+            } else if isRequired {
+                DSPrimaryButton(label: "Grant", size: .medium, action: primary)
                 RecheckLink(action: onRecheck)
             } else {
-                Button(action: primary) {
-                    ctaLabel("Grant", style: isRequired ? .primary : .secondary)
-                }
-                .buttonStyle(.plain)
+                DSSecondaryButton(label: "Grant", size: .medium, action: primary)
                 RecheckLink(action: onRecheck)
             }
         }
     }
 
+    // Inline "Granted" pill — visually distinct from the
+    // bgInset / accent CTA buttons (it's a status display, not a tap
+    // target), so it stays a per-row composition rather than a shared
+    // component.
     private var grantedPill: some View {
         HStack(spacing: 6) {
             Image(systemName: "checkmark")
@@ -332,35 +280,7 @@ private struct PermissionRow: View {
             Capsule().strokeBorder(DS.Color.successBorder, lineWidth: DS.Border.hairline)
         )
     }
-
-    private enum CtaStyle { case primary, secondary }
-
-    private func ctaLabel(_ text: String, style: CtaStyle) -> some View {
-        HStack(spacing: 0) {
-            Text(text)
-                .font(.system(size: 12.5, weight: .medium))
-        }
-        .foregroundStyle(style == .primary ? DS.Color.textOnAccent : DS.Color.textPrimary)
-        .padding(.horizontal, 12)
-        .frame(height: 28)
-        .background(
-            style == .primary ? AnyShapeStyle(DS.Color.accent) : AnyShapeStyle(DS.Color.bgInset),
-            in: RoundedRectangle(cornerRadius: 6)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(
-                    style == .primary ? Color.white.opacity(0.18) : DS.Color.borderDefault,
-                    lineWidth: DS.Border.hairline
-                )
-                .blendMode(style == .primary ? .plusLighter : .normal)
-        )
-    }
 }
-
-// MARK: - Severity
-
-private enum GlyphSeverity { case warning, neutral, success, danger }
 
 // MARK: - Status tag
 

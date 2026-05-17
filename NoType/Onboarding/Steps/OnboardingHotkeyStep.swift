@@ -133,32 +133,15 @@ struct OnboardingHotkeyStep: View {
 
     private var continueButton: some View {
         let enabled = verified && !remap
-        return Button(action: {
+        return DSPrimaryButton(
+            label: "Complete setup",
+            size: .large,
+            trailingSystemSymbol: "checkmark",
+            isEnabled: enabled,
+            minWidth: 200
+        ) {
             if enabled { onboarding.goNext() }
-        }) {
-            HStack(spacing: 6) {
-                Text("Complete setup")
-                    .font(.system(size: 14, weight: .medium))
-                Image(systemName: "checkmark")
-                    .font(.system(size: 12, weight: .semibold))
-            }
-            .foregroundStyle(DS.Color.textOnAccent)
-            .padding(.horizontal, 14)
-            .frame(minWidth: 200, minHeight: 36)
-            .background(
-                enabled ? DS.Color.accent : DS.Color.accent.opacity(0.4),
-                in: RoundedRectangle(cornerRadius: 8)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(.white.opacity(0.18), lineWidth: DS.Border.hairline)
-                    .blendMode(.plusLighter)
-                    .opacity(enabled ? 1 : 0)
-            )
         }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
-        .accessibilityLabel("Complete setup")
     }
 
     // MARK: - Event wiring

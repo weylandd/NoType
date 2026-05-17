@@ -84,6 +84,13 @@ enum DS {
             lightRGBA: (108/255, 70/255, 240/255, 0.28),
             darkRGBA:  (124/255, 92/255, 255/255, 0.32)
         )
+        // 40 % accent — the "disabled" fill of the large primary CTA.
+        // Reused across every onboarding step's Continue / Complete-setup
+        // button so the visual `not-yet-ready` state is shared.
+        static let accentDisabled    = SwiftUI.Color.dsDynamic(
+            lightRGBA: (108/255, 70/255, 240/255, 0.40),
+            darkRGBA:  (124/255, 92/255, 255/255, 0.40)
+        )
 
         // Status — primary + foreground swatches
         static let successBase   = SwiftUI.Color.dsDynamic(light: "#008135", dark: "#3DBE73")
@@ -114,6 +121,31 @@ enum DS {
             r: 80/255, g: 160/255, b: 240/255, alpha: 0.14)
         static let infoBorder    = SwiftUI.Color.dsDynamicSameRGBA(
             r: 80/255, g: 160/255, b: 240/255, alpha: 0.30)
+
+        // Inner-highlight stroke painted with `.blendMode(.plusLighter)`
+        // on the rim of every solid-accent button (the HUD's
+        // `DSPrimaryButton`, the onboarding Continue / Complete-setup
+        // CTAs, the PermissionRow Grant button). White at 18 % in both
+        // themes — the plus-lighter blend means it reads as a faint
+        // raised lip against the violet fill regardless of the surface
+        // beneath. Intentionally theme-shared (no dsDynamic wrap).
+        static let buttonInnerHighlight = SwiftUI.Color.white.opacity(0.18)
+
+        // 40 % danger soft — used for the row background of a permission
+        // that's in the `denied` state. Reads as a flag tint that the
+        // user needs to address; less intense than `dangerSoft` alone
+        // which is already pre-mixed against white.
+        static let dangerSoftStrong = SwiftUI.Color.dsDynamicSameRGBA(
+            r: 240/255, g: 90/255, b: 80/255, alpha: 0.40)
+
+        // Onboarding-chrome derivatives — the centered progress pill
+        // background and the pending-dot fill. Both are alpha rungs of
+        // existing semantic colors; the named tokens exist so the
+        // wizard's chrome can't drift step-to-step and any future theme
+        // change to `bgBase` / `textQuaternary` carries through here
+        // automatically.
+        static let progressPillFill   = bgBase.opacity(0.60)
+        static let progressDotPending = textQuaternary.opacity(0.55)
 
         // Glass top-edge highlight — a 1pt strip we paint at the top of
         // every HUD shell + the popover. White on dark, black on light

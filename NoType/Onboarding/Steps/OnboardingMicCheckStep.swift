@@ -66,24 +66,13 @@ struct OnboardingMicCheckStep: View {
     }
 
     private var continueButton: some View {
-        Button(action: { onboarding.goNext() }) {
-            HStack(spacing: 6) {
-                Text("Continue")
-                    .font(.system(size: 14, weight: .medium))
-                Image(systemName: "arrow.right")
-                    .font(.system(size: 12, weight: .semibold))
-            }
-            .foregroundStyle(DS.Color.textOnAccent)
-            .padding(.horizontal, 14)
-            .frame(minWidth: 180, minHeight: 36)
-            .background(DS.Color.accent, in: RoundedRectangle(cornerRadius: 8))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(.white.opacity(0.18), lineWidth: DS.Border.hairline)
-                    .blendMode(.plusLighter)
-            )
+        DSPrimaryButton(
+            label: "Continue",
+            size: .large,
+            trailingSystemSymbol: "arrow.right",
+            minWidth: 180
+        ) {
+            onboarding.goNext()
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Continue")
     }
 }
