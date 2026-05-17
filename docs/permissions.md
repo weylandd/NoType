@@ -46,7 +46,7 @@ We deliberately do **not** request:
 
 On first launch (no API key on file) the main window opens directly into the wizard (`NoType/Onboarding/`). Steps:
 
-1. **Welcome.** One sentence: "Hold Right Option and talk. NoType transcribes and pastes."
+1. **Welcome.** One sentence: "Hold your push-to-talk key (Right Option by default — configurable in the shortcut step) and talk. NoType transcribes and pastes."
 2. **API key.** Input field for Gemini key + a link to Google AI Studio with instructions to create one. "Continue" calls `GeminiClient.validateKey(_:)` — a no-cost `GET /v1beta/models` with the key in the `x-goog-api-key` header — that returns 200 for any valid key and 401/403 for a bad one, before persisting via `SecretStore`. If a key already exists it shows `AIzaSy••••••••` with an Edit link; editing forces revalidation.
 3. **Permissions.** Cards for Microphone, Accessibility, and Screen Recording (Optional). Each shows status and a "Grant" button that calls the request API; if the user has previously denied, it opens the relevant Settings pane via `x-apple.systempreferences:` URL. The Screen Recording card uses an explicit "Optional" pill and a neutral (not warning) chip — its state never gates the wizard's Continue button.
 4. **Mic check.** Uses `MicProbe` (`NoType/Onboarding/MicProbe.swift`) — its own `AVAudioEngine` instance, no VAD, no `RecordingSession` — to render a live spectrum so the user can confirm the right input device is being captured.

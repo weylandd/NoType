@@ -45,8 +45,13 @@ The tap is installed on a **dedicated `Thread` with its own `RunLoop`** — neve
 
 ## When to Apply
 
-- Default for the v1 push-to-talk binding.
-- When making the hotkey configurable post-v1: `HotkeyConfig` will hold a `HotkeyBinding` enum; non-modifier bindings (e.g. `⌃⇧Space`) switch to `keyDown`/`keyUp` instead of `flagsChanged`. The `CGEventTap`-on-dedicated-thread structure stays.
+- **Default push-to-talk binding.** Right Option held → press/release via `CGEventTap` on `flagsChanged`, bit-mask on `0x40` / `0x20`.
+- **User-configurable bindings (PR #43, shipped).** `HotkeyBinding` is a `struct` (not enum, as originally sketched) with a JS-style `code: String` (e.g. `"AltRight"`, `"KeyR"`, `"F12"`), persisted to `UserDefaults` under `notype.hotkey.bindingCode`. `HotkeyMonitor` is parametrised on the binding:
+  - **Modifier bindings** (`AltRight`, `ControlLeft`, `ShiftLeft`, `MetaRight`, `Fn`, …) keep the `flagsChanged` bit-mask path. The per-side device bit is looked up via `HotkeyBinding.modifierBit` rather than hard-coded.
+  - **Non-modifier bindings** (e.g. `KeyR`, `F12`, `Space`) switch to virtual-key matching on `keyDown` / `keyUp` events, comparing against `HotkeyBinding.virtualKeyCode`. `nonModifierHeld` collapses macOS's auto-repeated `keyDown` events so the session sees a single press/release pair.
+  - **Escape** (`kVK_Escape = 53`) stays hard-wired to `onEscape` regardless of binding — single cancellation hotkey for in-flight sessions. `HotkeyBinding.isAllowedAsHotkey` rejects Escape / Power / CapsLock so a user can't pick a key that would shadow the cancellation path.
+  - The `CGEventTap`-on-dedicated-thread structure stays. Live rebinding tears the old monitor down (`HotkeyMonitor.stop()`) and starts a new one (`AppState.applyHotkeyBinding(_:)`).
+- **Multi-key combos (e.g. `⌃⇧Space`)** are NOT supported by the current `HotkeyBinding` shape — `code: String` is a single identifier. Combos remain a future expansion (would need either a `[String]` codes field or an explicit `modifiers + base` pair).
 
 ## Examples
 
@@ -75,6 +80,8 @@ static func detectTransition(prev: UInt64, curr: UInt64) -> Transition {
 
 ## Related
 
+- `NoType/Hotkey/HotkeyBinding.swift` — the canonical landed value type (PR #43).
+- `NoType/Hotkey/HotkeyMonitor.swift` — the parametrised monitor; `stop()` invalidates the tap + stops the runloop for clean rebinds.
 - `NoType/Hotkey/CLAUDE.md` — runloop / tap-restoration details, `tapDisabledByTimeout` recovery, Escape cancellation flow.
 - `docs/decisions.md` ADR-005 — legacy index entry, redirects here.
 - `solutions/architecture-patterns/clipboard-cmd-v-paste-2026-05-15.md` — the same `CGEvent` API on the output side.

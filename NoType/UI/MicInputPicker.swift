@@ -3,8 +3,12 @@ import SwiftUI
 
 /// Native dropdown for the user-pinned input device.
 ///
-/// Visually identical to the original `.mic-select` pill in the popover
-/// footer — fixed 30 × 180 pt, accent mic glyph, secondary label, chevron.
+/// Two visual sizes:
+///   - `.compact` (default) — fixed 30 × 180 pt, used in the popover
+///     footer. Matches the original `.mic-select` pill.
+///   - `.large` — 38 pt tall, min-width 340 pt, used on the onboarding
+///     mic-check screen where the picker is the focal control.
+///
 /// Clicking opens an `NSMenu` listing every audio input the HAL knows
 /// about plus an explicit "System default" entry. Selection is persisted
 /// in `UserDefaults` via `AudioDeviceManager.shared.selectedUID`.
@@ -14,6 +18,10 @@ import SwiftUI
 /// (`OnboardingMicCheckStep`). Per `NoType/UI/CLAUDE.md`'s "appears in ≥2
 /// surfaces → live in a shared file" rule.
 struct MicInputPicker: View {
+    enum Size { case compact, large }
+
+    var size: Size = .compact
+
     // Singleton @Observable — SwiftUI tracks reads inside `body` and
     // re-renders when observed properties change. No wrapper needed.
     private var devices: AudioDeviceManager { AudioDeviceManager.shared }
@@ -22,27 +30,62 @@ struct MicInputPicker: View {
         Button {
             showMenu()
         } label: {
-            HStack(spacing: DS.Space.s2 + 1) {
-                DSIcon(name: .mic, size: 13, color: DS.Color.accentFg)
+            HStack(spacing: spec.gap) {
+                DSIcon(name: .mic, size: spec.iconSize, color: DS.Color.accentFg)
                 Text(devices.effectiveLabel)
-                    .font(DS.Font.bodySM())
-                    .foregroundStyle(DS.Color.textSecondary)
+                    .font(spec.font)
+                    .foregroundStyle(spec.labelColor)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer()
-                DSIcon(name: .chevronDown, size: 11, color: DS.Color.textTertiary)
+                DSIcon(name: .chevronDown, size: spec.chevSize, color: DS.Color.textTertiary)
             }
-            .padding(.horizontal, DS.Space.s3 + 2)  // 10 pt
-            .frame(height: DS.Size.hSM + 2)         // 30 pt
-            .frame(maxWidth: 180)
-            .background(DS.Color.bgInset, in: RoundedRectangle(cornerRadius: DS.Radius.sm + 1))
+            .padding(.horizontal, spec.hPad)
+            .frame(height: spec.height)
+            .frame(minWidth: spec.minWidth, maxWidth: spec.maxWidth)
+            .background(DS.Color.bgInset, in: RoundedRectangle(cornerRadius: spec.radius))
             .overlay(
-                RoundedRectangle(cornerRadius: DS.Radius.sm + 1)
-                    .strokeBorder(DS.Color.borderSubtle, lineWidth: DS.Border.hairline)
+                RoundedRectangle(cornerRadius: spec.radius)
+                    .strokeBorder(spec.border, lineWidth: DS.Border.hairline)
             )
         }
         .buttonStyle(.plain)
         .help("Choose microphone")
+    }
+
+    private var spec: Spec {
+        switch size {
+        case .compact:
+            return Spec(
+                height: DS.Size.hSM + 2, hPad: DS.Space.s3 + 2, gap: DS.Space.s2 + 1,
+                radius: DS.Radius.sm + 1, iconSize: 13, chevSize: 11,
+                font: DS.Font.bodySM(), labelColor: DS.Color.textSecondary,
+                minWidth: nil, maxWidth: 180,
+                border: DS.Color.borderSubtle
+            )
+        case .large:
+            return Spec(
+                height: 38, hPad: 12, gap: 10,
+                radius: 8, iconSize: 14, chevSize: 12,
+                font: .system(size: 13), labelColor: DS.Color.textPrimary,
+                minWidth: 340, maxWidth: 420,
+                border: DS.Color.borderDefault
+            )
+        }
+    }
+
+    private struct Spec {
+        let height: CGFloat
+        let hPad: CGFloat
+        let gap: CGFloat
+        let radius: CGFloat
+        let iconSize: CGFloat
+        let chevSize: CGFloat
+        let font: SwiftUI.Font
+        let labelColor: Color
+        let minWidth: CGFloat?
+        let maxWidth: CGFloat
+        let border: Color
     }
 
     /// Pop a native NSMenu from the click. Using NSMenu directly (rather

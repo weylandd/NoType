@@ -94,6 +94,8 @@ Concretely:
   - `HistoryPopover.recordingPill` — uses `Self.formatElapsed(from:to:)`.
 - `TranscribingHUD.AnimatedEllipsisLabel` — closure is fully self-contained, no `self` references; left alone.
 
+**Subsequent consolidation (post-PR #41).** The two spectrum meters above were later merged into a single shared `SpectrumMeter` view at `NoType/UI/SpectrumMeter.swift` (with a private `SpectrumBar` child), consumed by both `RecordingHUD` and `OnboardingMicCheckStep` with per-call-site geometry. The `.task`-loop pattern carried through unchanged — the consolidation didn't reintroduce a TimelineView. The four TimelineView sites in NoType today are all time-display / animation pulses using the static-helper variant: `RecordingHUD.TimerPill`, `HistoryRowView.TimestampDisplay`, `HistoryPopover.recordingPill`, and `TranscribingHUD.AnimatedEllipsisLabel`.
+
 ## Why This Works
 
 `swift_task_isCurrentExecutorWithFlagsImpl` is an isolation check the compiler inserts at the boundary of every `@MainActor`-annotated method call when the caller's isolation isn't statically provable to be `@MainActor`. Inside a TimelineView content closure on macOS 26, SwiftUI's diffing machinery is the runtime caller — and the executor reference it passes to the concurrency runtime is a freed/invalid object on that platform.
@@ -134,17 +136,19 @@ private struct TimestampDisplay: View {
 
 ### Mutable-state variant (.task loop, no TimelineView)
 
+This is the shape currently shipping in `NoType/UI/SpectrumMeter.swift`. Names below match the consolidated shared view rather than the original `LiveSpectrumMeter` / `LiveSpectrumBar`.
+
 ```swift
-private struct LiveSpectrumMeter: View {
+struct SpectrumMeter: View {
     let samplesProvider: @MainActor () -> [Float]
-    private static let barCount = 38
+    let barCount: Int
     private static let frameInterval: Duration = .milliseconds(33)
-    @State private var levels: [Float] = Array(repeating: 0, count: Self.barCount)
+    @State private var levels: [Float]
 
     var body: some View {
         HStack {
-            ForEach(0..<Self.barCount, id: \.self) { i in
-                LiveSpectrumBar(level: levels[i])   // ← child view, pure inputs
+            ForEach(0..<barCount, id: \.self) { i in
+                SpectrumBar(level: levels[i])       // ← child view, pure inputs
             }
         }
         .task {
@@ -158,7 +162,7 @@ private struct LiveSpectrumMeter: View {
     }
 }
 
-private struct LiveSpectrumBar: View {
+private struct SpectrumBar: View {
     let level: CGFloat
     var body: some View { Rectangle().frame(height: level) }
 }

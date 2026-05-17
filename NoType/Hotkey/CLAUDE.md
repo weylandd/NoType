@@ -1,29 +1,31 @@
 # Hotkey module
 
-Detects the global push-to-talk hotkey. Default: **Right Option** (held).
+Detects the global push-to-talk hotkey. Default: **Right Option** (held), user-rebindable.
 
 ## Files
 
-- `HotkeyMonitor.swift` — `CGEventTap`, dedicated runloop, press / release dispatch, Escape cancellation.
-
-The v1 binding is hard-coded to Right Option inside `HotkeyMonitor`. The "v2 customization" subsection below sketches the planned `HotkeyConfig` / `HotkeyBinding` shape — those types don't exist yet, introduce them when the feature lands.
+- `HotkeyBinding.swift` — `struct` value type with a JS-style `code: String` (`AltRight`, `KeyR`, `F12`, …). Persisted in `UserDefaults` under `notype.hotkey.bindingCode`. Owns the static `modifierBits` / `virtualKeyCodes` / display tables and the `isAllowedAsHotkey` gate that filters reserved keys (Escape, Power, CapsLock).
+- `HotkeyMonitor.swift` — `CGEventTap`, dedicated runloop, press / release dispatch, Escape cancellation. Parametrised on a `HotkeyBinding`.
 
 ## Invariants
 
-1. **Right Option bit = `0x40`** (`NX_DEVICERALTKEYMASK`); left Option bit = `0x20`. Press = bit transitions 0 → 1, release = 1 → 0. We track `previousFlags` ourselves because `flagsChanged` doesn't tell us *which* flag changed.
-2. **`.listenOnly`, not `.defaultTap`.** We don't consume the event; Right Option / Escape pass through to the OS for normal use.
-3. **Tap lives on a dedicated `Thread` with its own `RunLoop`** named `"app.notype.hotkey"`, `qualityOfService = .userInteractive`. Never on the main runloop.
-4. **`tapDisabledByTimeout` / `tapDisabledByUserInput` must re-enable.** macOS disables our tap if we're slow (>1 s); if we don't re-enable, the app silently stops responding to the hotkey.
-5. **Escape (keycode 53) cancels** when `recordingState` is `.recording` or `.sending`. Stray Esc when `.idle` is a harmless no-op.
+1. **Detection routing.** Modifier bindings (Option/Control/Shift/Command, L+R split, Fn) drive via `flagsChanged` and the device-side bit returned by `HotkeyBinding.modifierBit` — Right Option = `0x40` (`NX_DEVICERALTKEYMASK`), Left Option = `0x20`, full table in `HotkeyBinding.modifierBits`. Press = bit transitions 0→1, release = 1→0. We track `previousFlags` ourselves because `flagsChanged` doesn't tell us *which* flag changed. Non-modifier bindings (letters, digits, F-row, Space, …) drive via `keyDown`/`keyUp` and virtual-key matching on `HotkeyBinding.virtualKeyCode`; auto-repeated `keyDown` is collapsed by `nonModifierHeld`.
+2. **`.listenOnly`, not `.defaultTap`.** We don't consume the event; the bound key (and Escape) pass through to the OS for normal use.
+3. **Tap lives on a dedicated `Thread` with its own `RunLoop`** named `"app.notype.hotkey"`, `qualityOfService = .userInteractive`. Never on the main runloop. `runLoopReady` (DispatchSemaphore) publishes the runloop reference to the main actor before `start()` returns; `stop()` schedules teardown via `CFRunLoopPerformBlock` on that runloop and the thread exits when `CFRunLoopRun()` returns.
+4. **`tapDisabledByTimeout` / `tapDisabledByUserInput` must re-enable** AND reset `nonModifierHeld` + `previousFlags`. Skipping the state reset would silently strand a non-modifier hotkey held during the disabled window (stuck `nonModifierHeld == true`).
+5. **Escape (keycode 53) cancels** when `recordingState` is `.recording` or `.sending`. Stray Esc when `.idle` is a harmless no-op. Escape is hard-wired regardless of the chosen binding, and `HotkeyBinding.isAllowedAsHotkey` rejects Escape/Power/CapsLock so a user can't pick a key that would shadow the cancellation path.
 6. **`AppState.cancelRecording()` is the single cancellation entry point** for both Esc and the recording-HUD close button.
-7. **`AppState` watches `permissions.accessibility`** and installs / uninstalls the tap on transition. Accessibility revoke mid-session is supported (tap goes down, polling notices when re-granted).
+7. **`AppState` watches `permissions.accessibility`** and installs / uninstalls the tap on transition. Accessibility revoke mid-session is supported (`uninstallHotkey()` calls `monitor.stop()` to invalidate the tap + stop the runloop; polling notices when re-granted).
+8. **Rebinds (`AppState.applyHotkeyBinding(_:)`) are refused while `recordingState != .idle`.** Tearing the monitor down mid-session would drop the release event for the previously-held key and orphan the session.
 
 ## Hard rules
 
 - **Don't install the tap on the main runloop.** Main-runloop busy (UI animation, file pickers, modal sheets) stalls the tap and drops events.
-- **Don't read `event.getIntegerValueField(.keyboardEventKeycode)` for Option detection.** Bit-mask on `event.flags.rawValue` is sufficient and avoids a syscall.
-- **Always re-enable on `tapDisabledByTimeout`.** Log the disable / re-enable cycle in production to surface flaky behaviour.
+- **Modifier detection uses the device-side bit, not the keycode field.** `HotkeyBinding.modifierBit` returns the `NX_DEVICE*KEYMASK` to mask against `event.flags.rawValue`. Reading `event.getIntegerValueField(.keyboardEventKeycode)` is allowed only in the `keyDown`/`keyUp` branches (Escape detection + non-modifier binding match) — it costs a syscall, so don't add it back to the `flagsChanged` branch.
+- **Always re-enable on `tapDisabledByTimeout` AND reset `nonModifierHeld` + `previousFlags`.** Log the disable / re-enable cycle in production to surface flaky behaviour.
 - **`finalizeRecording` keeps `currentSession` non-nil during `.sending`** so the Esc cancellation path can reach the session. The completion `Task` uses `currentSession === session` identity guards to avoid a late-arriving result clobbering a replaced session.
+- **Dispatched press/release `Task`s check `isActive`** before invoking the callback. Without this, a press queued microseconds before `stop()` could fire `onPress` against a being-torn-down monitor or, during rebind, against the new monitor's wiring.
+- **`runLoopReady` must always be signalled** — the `defer { if !setupCompleted { readySignal.signal() } }` in the thread closure covers the early-exit case so an unexpected guard-fail can't deadlock the main actor's `start()` waiter.
 
 ## Cancellation flow
 
@@ -54,19 +56,14 @@ static func detectTransition(prev: UInt64, curr: UInt64) -> Transition {
 
 ## Testing
 
-- The bit-math helper as a pure function (`HotkeyMonitor.detectTransition(prev:curr:)`).
+- The bit-math helper as a pure function (`HotkeyMonitor.detectTransition(prev:curr:bit:)`). The single-arg overload is kept for backwards compatibility with `HotkeyMonitorTests` and defaults to `rightOptionBit`.
 - The state machine with synthetic event sequences.
 - `CGEventTap` itself is system-level — not unit-testable.
 
-Manual smoke test before each release: hold Right Option in Mail / Slack / Xcode / Safari / Terminal and verify press / release fire.
-
-## v2 customization (not yet built)
-
-When configurable hotkeys land:
-
-- Introduce `HotkeyConfig` + `HotkeyBinding` enum (`.rightOption`, `.leftOption`, `.fnKey`, `.custom(modifiers, keyCode)`).
-- `HotkeyMonitor` switches detection logic on the binding.
-- Non-modifier-only bindings (e.g. `⌃⇧Space`) subscribe to `keyDown`/`keyUp` instead of `flagsChanged`. The dedicated-thread `CGEventTap` structure stays.
+Manual smoke tests before each release:
+- Default (Right Option): hold in Mail / Slack / Xcode / Safari / Terminal and verify press / release fire.
+- **Rebind round-trip**: Settings → change to a letter key → press it, verify session starts/stops. Change back to Right Option, verify only one session per press (not two — that's the rebind-leak regression).
+- **Rebind during recording**: hold the hotkey to start a session, attempt rebind via the onboarding remap UI. `applyHotkeyBinding` should refuse with a log warning (`recordingState != .idle`).
 
 ## Pointers
 

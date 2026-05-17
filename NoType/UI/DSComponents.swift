@@ -151,9 +151,14 @@ struct DSCloseButton: View {
 
 // MARK: - Glyph chip
 //
-// The 26×26 tinted-square + foreground SF symbol that opens every HUD's
-// content row (recording mic, error icon, permission glyph). Optional
-// outward-pulse ring for the "live" recording state.
+// Severity-tinted square + foreground SF symbol used as the leading
+// affordance of every HUD content row (26×26 — recording mic, error
+// icon, permission glyph) AND of the onboarding permission rows
+// (44×44, larger symbol, hairline border, more rounding). All knobs
+// have defaults that preserve the HUD's existing look, so the new
+// params only kick in for the onboarding tile callers.
+//
+// Optional outward-pulse ring for the "live" recording state.
 
 struct DSGlyphChip: View {
     enum Severity { case accent, danger, warning, success, info, neutral }
@@ -161,15 +166,24 @@ struct DSGlyphChip: View {
     let severity: Severity
     let symbol: String              // SF symbol name
     var size: CGFloat = 26
+    var cornerRadius: CGFloat = 8
+    var symbolSize: CGFloat = 13
+    var symbolWeight: SwiftUI.Font.Weight = .semibold
+    var showBorder: Bool = false
     var withPulse: Bool = false
 
     var body: some View {
         let chip = ZStack {
-            RoundedRectangle(cornerRadius: 8)
+            RoundedRectangle(cornerRadius: cornerRadius)
                 .fill(tintFill)
                 .frame(width: size, height: size)
+            if showBorder {
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .strokeBorder(tintBorder, lineWidth: DS.Border.hairline)
+                    .frame(width: size, height: size)
+            }
             Image(systemName: symbol)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.system(size: symbolSize, weight: symbolWeight))
                 .foregroundStyle(tintFg)
         }
 
@@ -207,6 +221,17 @@ struct DSGlyphChip: View {
         }
     }
 
+    private var tintBorder: Color {
+        switch severity {
+        case .accent:  return DS.Color.accentBorder
+        case .danger:  return DS.Color.dangerBorder
+        case .warning: return DS.Color.warningBorder
+        case .success: return DS.Color.successBorder
+        case .info:    return DS.Color.infoBorder
+        case .neutral: return DS.Color.borderDefault
+        }
+    }
+
     private var pulseColor: Color {
         switch severity {
         case .accent:  return DS.Color.accent.opacity(0.50)
@@ -235,13 +260,35 @@ private struct PulseRing: View {
 
 // MARK: - Action buttons (Primary / Secondary)
 //
-// 24 pt-tall pill CTA used in every HUD's actions row. Primary is the
-// accent-filled call to action; Secondary is the bg-inset neutral
-// alternative used when there's a backup action next to it.
+// Accent-filled / bg-inset pill CTAs. Three sizes — `.small` is the
+// existing 24 pt HUD pill; `.medium` is the 28 pt inline CTA used by
+// the onboarding PermissionRow Grant / Open Settings buttons; `.large`
+// is the 36 pt footer CTA used by every onboarding step's Continue /
+// Complete-setup button. Defaults preserve the original HUD shape.
 
 struct DSPrimaryButton: View {
+    enum Size { case small, medium, large }
+
     let label: String
+    var size: Size = .small
     var trailingSystemSymbol: String? = nil
+    /// When `true`, replaces the trailing symbol with a `ProgressView`.
+    /// Combined with `isEnabled == false` to express the "validating…"
+    /// state of the API-key step's Continue button.
+    var isLoading: Bool = false
+    /// When `false`, the button reads-as-disabled (dimmed fill, dropped
+    /// inner highlight, no hover / press transforms) AND blocks taps.
+    /// Centralises the `accent.opacity(0.4)` + overlay-opacity-0 pattern
+    /// the onboarding steps were each re-rolling.
+    var isEnabled: Bool = true
+    /// Optional explicit `minWidth` — onboarding CTAs use 180 / 200 pt
+    /// to give the footer button a stable hit-target across labels.
+    var minWidth: CGFloat? = nil
+    /// Optional VoiceOver-only label override. When `nil`, `label` is
+    /// announced. Set when the visible label changes during the
+    /// button's lifecycle (e.g. "Continue" → "Validating") but the
+    /// announced identity should stay stable.
+    var accessibilityLabelOverride: String? = nil
     let action: () -> Void
 
     @State private var hovered = false
@@ -249,59 +296,89 @@ struct DSPrimaryButton: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 5) {
+            HStack(spacing: size.contentSpacing) {
                 Text(label)
-                    .font(.system(size: 11.5, weight: .medium))
-                if let symbol = trailingSystemSymbol {
+                    .font(.system(size: size.fontSize, weight: .medium))
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(DS.Color.textOnAccent)
+                } else if let symbol = trailingSystemSymbol {
                     Image(systemName: symbol)
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: size.symbolSize, weight: .semibold))
                 }
             }
             .foregroundStyle(DS.Color.textOnAccent)
-            .padding(.horizontal, 9)
-            .frame(height: 24)
+            .padding(.horizontal, size.horizontalPadding)
+            .frame(minWidth: minWidth, minHeight: size.height)
             .background(
-                hovered ? DS.Color.accentHover : DS.Color.accent,
-                in: RoundedRectangle(cornerRadius: 6)
+                fillColor,
+                in: RoundedRectangle(cornerRadius: size.cornerRadius)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(.white.opacity(0.18), lineWidth: DS.Border.hairline)
+                RoundedRectangle(cornerRadius: size.cornerRadius)
+                    .stroke(DS.Color.buttonInnerHighlight, lineWidth: DS.Border.hairline)
                     .blendMode(.plusLighter)
+                    .opacity(isEnabled ? 1 : 0)
             )
-            .offset(y: pressed ? 0.5 : 0)
+            .offset(y: pressed && isEnabled ? 0.5 : 0)
         }
         .buttonStyle(.plain)
-        .onHover { hovered = $0 }
+        .disabled(!isEnabled || isLoading)
+        .onHover { hovered = $0 && isEnabled }
+        // `.onHover` only fires on cursor enter/leave, so if the parent
+        // flips `isEnabled` false → true while the cursor was hovering
+        // a disabled button, `hovered` stays true and the re-enabled
+        // button snaps straight into `accentHover` fill without a real
+        // hover event. Clear it on the disable edge so re-enable starts
+        // from the neutral `accent` fill.
+        .onChange(of: isEnabled) { _, newValue in
+            if !newValue { hovered = false }
+        }
         .pressEvents(onPress: { pressed = true }, onRelease: { pressed = false })
         .animation(DS.Motion.fast, value: hovered)
+        .animation(DS.Motion.fast, value: isEnabled)
+        .accessibilityLabel(accessibilityLabelOverride ?? label)
+    }
+
+    private var fillColor: Color {
+        if !isEnabled { return DS.Color.accentDisabled }
+        return hovered ? DS.Color.accentHover : DS.Color.accent
     }
 }
 
 struct DSSecondaryButton: View {
+    typealias Size = DSPrimaryButton.Size
+
     let label: String
+    var size: Size = .small
     var leadingSystemSymbol: String? = nil
+    var trailingSystemSymbol: String? = nil
     let action: () -> Void
 
     @State private var hovered = false
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 5) {
+            HStack(spacing: size.contentSpacing) {
                 if let symbol = leadingSystemSymbol {
                     Image(systemName: symbol)
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: size.symbolSize, weight: .semibold))
                 }
                 Text(label)
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(.system(size: size.fontSize, weight: .medium))
+                if let symbol = trailingSystemSymbol {
+                    Image(systemName: symbol)
+                        .font(.system(size: size.symbolSize, weight: .semibold))
+                }
             }
             .foregroundStyle(DS.Color.textPrimary)
-            .padding(.horizontal, 9)
-            .frame(height: 24)
+            .padding(.horizontal, size.horizontalPadding)
+            .frame(minHeight: size.height)
             .background(hovered ? DS.Color.bgHover : DS.Color.bgInset,
-                        in: RoundedRectangle(cornerRadius: 6))
+                        in: RoundedRectangle(cornerRadius: size.cornerRadius))
             .overlay(
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: size.cornerRadius)
                     .strokeBorder(hovered ? DS.Color.borderStrong : DS.Color.borderDefault,
                                   lineWidth: DS.Border.hairline)
             )
@@ -309,7 +386,45 @@ struct DSSecondaryButton: View {
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
         .animation(DS.Motion.fast, value: hovered)
+        .accessibilityLabel(label)
     }
+}
+
+extension DSPrimaryButton.Size {
+    fileprivate var height: CGFloat {
+        switch self {
+        case .small:  return 24
+        case .medium: return 28
+        case .large:  return 36
+        }
+    }
+    fileprivate var horizontalPadding: CGFloat {
+        switch self {
+        case .small:  return 9
+        case .medium: return 12
+        case .large:  return 14
+        }
+    }
+    fileprivate var fontSize: CGFloat {
+        switch self {
+        case .small:  return 11.5
+        case .medium: return 12.5
+        case .large:  return 14
+        }
+    }
+    fileprivate var symbolSize: CGFloat {
+        switch self {
+        case .small:  return 11
+        case .medium: return 11.5
+        case .large:  return 12
+        }
+    }
+    // `.small` and `.medium` share the HUD radius / content-spacing; only
+    // `.large` (the onboarding footer CTA) bumps up. Expressed as a
+    // boolean rather than three identical switch arms so it's obvious
+    // when a future medium-tuning change would need a real third value.
+    fileprivate var contentSpacing: CGFloat { self == .large ? 6 : 5 }
+    fileprivate var cornerRadius:   CGFloat { self == .large ? 8 : 6 }
 }
 
 /// Quiet text-style secondary action ("View logs", "Learn more"). Used
