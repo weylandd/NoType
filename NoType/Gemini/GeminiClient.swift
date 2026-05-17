@@ -963,9 +963,7 @@ actor GeminiClient {
 
     # Category
 
-    The `Category:` value tells you what kind of text the user typically writes in this app. It changes how speech maps to formatting — line breaks, paragraph structure, conventions of address. It does NOT change which words you transcribe or in what order. Apply the category-specific rules from `Category instruction:` below.
-
-    Possible values: `messaging`, `email`, `social`, `notes`, `docs`, `code`, `search`, `uncategorized`. If the value is `uncategorized` or `Category instruction:` is omitted, fall back to neutral formatting: natural sentence punctuation, no special structure.
+    The `Category:` value controls formatting only (line breaks, paragraph structure, register) — not which words you transcribe. `uncategorized`, or any value without a following `Category instruction:` section, uses neutral formatting: natural sentence punctuation, no special structure.
 
     # User instruction
 
