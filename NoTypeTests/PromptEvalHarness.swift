@@ -73,6 +73,12 @@ enum PromptEvalHarness {
         let path: Path
         let transcript: String
         let elapsedMs: Int
+        /// Token usage from Gemini's `usageMetadata`. Populated when
+        /// the response carried it (typically present on every
+        /// successful 200). Nil indicates the harness couldn't read
+        /// it — usually means the call failed before the response
+        /// was parsed.
+        let usage: GeminiAPI.UsageMetadata?
     }
 
     // MARK: - Key resolution + skip gates
@@ -241,11 +247,13 @@ enum PromptEvalHarness {
             )
         }
         let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
+        let usage = await client.lastUsage
         return Result(
             fixtureID: fixture.id,
             path: path,
             transcript: transcript,
-            elapsedMs: elapsedMs
+            elapsedMs: elapsedMs,
+            usage: usage
         )
     }
 
@@ -389,21 +397,11 @@ extension PromptEvalHarness {
     }
 }
 
-// MARK: - TODO
+// MARK: - Token-ceiling assertions (deferred)
 //
-// Token-ceiling assertions (`Fixture.usageTokensCeiling`) are parsed
-// but not enforced. To wire them up the harness needs `GeminiClient`
-// to surface `UsageMetadata` alongside the transcript — currently
-// `transcribe(...)` / `transcribeShort(...)` return `String`.
-//
-// Options:
-//
-// 1. Add a test-only `transcribeForEval(...)` entry point that returns
-//    `(String, UsageMetadata?)`. Cleanest for prod-API hygiene.
-// 2. Publish a `lastUsage` property on the actor that the harness
-//    reads after the await returns. Simpler but actor state needs
-//    care.
-//
-// Either way is a separate commit, paired with populating the JSON's
-// `usageTokensCeiling` values from a baseline run. See U2 in the plan
-// — token deltas are part of the audit, so this lands when U2 starts.
+// `Fixture.usageTokensCeiling` is parsed and surfaced in `Result.usage`
+// but not yet enforced by `assertContract`. Wiring it up is cheap once
+// per-fixture ceilings are populated from a calm baseline run. Until
+// then `usage` is available in test logs and to the U2 audit
+// machinery, but the suite doesn't fail a fixture just because token
+// counts crept up. Re-evaluate after U3 (post-trim) lands.

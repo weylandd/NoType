@@ -290,6 +290,13 @@ final class PromptEvalTests: XCTestCase {
         contextDescription: String? = nil
     ) {
         let ctx = contextDescription.map { " | ctx: \($0)" } ?? ""
-        print("[\(res.fixtureID) | \(res.path) | \(res.elapsedMs)ms\(ctx)] → \"\(res.transcript)\"")
+        var tokens = ""
+        if let u = res.usage {
+            let prompt = u.promptTokenCount ?? 0
+            let cached = u.cachedContentTokenCount ?? 0
+            let out = u.candidatesTokenCount ?? 0
+            tokens = " | tokens prompt=\(prompt) cached=\(cached) out=\(out)"
+        }
+        print("[\(res.fixtureID) | \(res.path) | \(res.elapsedMs)ms\(tokens)\(ctx)] → \"\(res.transcript)\"")
     }
 }

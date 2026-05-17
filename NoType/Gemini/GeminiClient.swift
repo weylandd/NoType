@@ -44,6 +44,24 @@ actor GeminiClient {
 
     private let session: URLSession
 
+    /// Most recent successful response's `UsageMetadata`. Read-only
+    /// from outside the actor. **Test-only convenience** — production
+    /// code doesn't consume this; the prompt-eval harness reads it
+    /// after each `transcribe*` call to record per-fixture token
+    /// deltas during the U2 audit (see
+    /// `docs/plans/2026-05-17-001-refactor-gemini-prompt-audit-and-trim-plan.md`).
+    ///
+    /// Single-call-at-a-time semantics by construction — the
+    /// serial-actor invariant (I1) means at most one in-flight
+    /// request per session. Cross-test contamination is also a
+    /// non-issue because each test instantiates a fresh
+    /// `GeminiClient` in `setUp()`.
+    ///
+    /// `nil` until the first successful call; reset on each
+    /// successful response. Untouched on errors (so the value
+    /// from the last good call survives a subsequent failure).
+    private(set) var lastUsage: GeminiAPI.UsageMetadata?
+
     init() {
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 30
@@ -608,6 +626,15 @@ actor GeminiClient {
         if let block = parsed.promptFeedback?.blockReason, !block.isEmpty {
             throw GeminiError.blocked(block)
         }
+
+        // Capture usage metadata before any further can-throw paths.
+        // Production code ignores this; the prompt-eval harness reads
+        // `lastUsage` after a successful call. Set on every parsed
+        // response (including ones we're about to reject for being
+        // empty mid-session) — the test surface still benefits from
+        // knowing the model billed us before deciding the output was
+        // unusable.
+        self.lastUsage = parsed.usageMetadata
 
         let text = parsed
             .candidates?
