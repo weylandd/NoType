@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 /// User's chosen push-to-talk hotkey.
 ///
@@ -22,16 +23,27 @@ struct HotkeyBinding: Codable, Equatable, Sendable {
     static let `default` = HotkeyBinding(code: "AltRight")
     static let userDefaultsKey = "notype.hotkey.bindingCode"
 
+    private static let log = Logger(subsystem: "app.notype", category: "hotkey")
+
     /// Read the persisted binding. Falls back to the default if nothing
-    /// is stored or the stored value isn't a known code.
+    /// is stored, the stored value is empty, or the stored code is no
+    /// longer in the allowed-keys set (e.g. a future build removed a
+    /// previously-supported key from `virtualKeyCodes`/`modifierBits`).
+    /// In the last case we log a warning and clear the stale value so
+    /// the on-disk state matches what's actually in use.
     static func load() -> HotkeyBinding {
         guard let raw = UserDefaults.standard.string(forKey: userDefaultsKey),
-              !raw.isEmpty,
-              HotkeyBinding(code: raw).isAllowedAsHotkey
+              !raw.isEmpty
         else {
             return .default
         }
-        return HotkeyBinding(code: raw)
+        let candidate = HotkeyBinding(code: raw)
+        guard candidate.isAllowedAsHotkey else {
+            log.warning("invalid stored hotkey '\(raw, privacy: .public)'; falling back to \(`default`.code, privacy: .public)")
+            UserDefaults.standard.removeObject(forKey: userDefaultsKey)
+            return .default
+        }
+        return candidate
     }
 
     /// Persist this binding.
@@ -79,7 +91,14 @@ struct HotkeyBinding: Codable, Equatable, Sendable {
     }
 
     /// L/R side indicator for split modifiers (Left/Right Option…).
+    /// Restricted to actual paired-modifier prefixes so non-modifier
+    /// keys like `ArrowLeft`/`ArrowRight` don't pick up a bogus
+    /// "L"/"R" tag.
     var sideIndicator: String? {
+        let pairedModifierPrefixes = ["Alt", "Control", "Shift", "Meta"]
+        guard pairedModifierPrefixes.contains(where: { code.hasPrefix($0) }) else {
+            return nil
+        }
         if code.hasSuffix("Right") { return "R" }
         if code.hasSuffix("Left")  { return "L" }
         return nil

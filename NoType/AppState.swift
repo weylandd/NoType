@@ -383,17 +383,28 @@ final class AppState {
     }
 
     /// Persist a new hotkey binding and reinstall the monitor against it.
-    /// Called by the onboarding shortcut screen's remap UI; safe to call
-    /// from any thread that hops back to `@MainActor`.
+    /// Called by the onboarding shortcut screen's remap UI (and, in the
+    /// future, a Settings rebind UI).
+    ///
+    /// Refused while a recording session is in flight — tearing the
+    /// monitor down mid-session drops the release event for the
+    /// previously-held key, which would orphan the session in
+    /// `.recording`/`.sending` with no path to finalize except Esc.
+    /// The caller is expected to check `recordingState` and disable the
+    /// remap UI accordingly; this guard is defence-in-depth.
     func applyHotkeyBinding(_ binding: HotkeyBinding) {
         guard binding.isAllowedAsHotkey else { return }
         guard binding != hotkeyBinding else { return }
+        guard case .idle = recordingState else {
+            Self.log.warning("applyHotkeyBinding refused while recordingState != .idle")
+            return
+        }
         hotkeyBinding = binding
         binding.save()
         // Re-create the underlying tap so the new binding's detection
-        // path takes effect. The old `HotkeyMonitor` instance is
-        // released; its CFRunLoop thread parks idle (matches the
-        // permissions-revoke path's leak — single-digit KB per swap).
+        // path takes effect. `uninstallHotkey -> monitor.stop()`
+        // invalidates the tap and unwinds the dedicated runloop; the
+        // prior thread terminates cleanly (no leak).
         uninstallHotkey()
         installHotkeyIfPossible()
     }

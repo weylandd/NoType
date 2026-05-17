@@ -29,6 +29,10 @@ struct OnboardingHotkeyStep: View {
     @State private var binding:  HotkeyBinding = .load()
     @State private var verified: Bool = false
     @State private var remap:    Bool = false
+    /// Snapshot of `verified` taken when entering remap mode so a
+    /// Cancel restores the prior state instead of forcing the user to
+    /// re-verify a binding they had already confirmed.
+    @State private var verifiedBeforeRemap: Bool = false
     @State private var heldCodes: Set<String> = []
     @State private var localMonitor: Any?
 
@@ -174,18 +178,28 @@ struct OnboardingHotkeyStep: View {
 
         // Local NSEvent monitor — fires for ANY key while the app is
         // focused. Drives the "you pressed the wrong key" feedback by
-        // lighting up whichever key the user actually hit. Doesn't
-        // consume the event, so other handlers still see it.
-        localMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.keyDown, .keyUp, .flagsChanged]
-        ) { event in
-            handleNSEvent(event)
-            // In remap mode we eat keyDown/keyUp so a tap on `Return`
-            // doesn't also activate the focused Continue button.
-            if remap, event.type != .flagsChanged {
-                return nil
+        // lighting up whichever key the user actually hit.
+        // Guard against double-install: SwiftUI can fire `.onAppear`
+        // twice across view-identity churn, and leaking the old token
+        // means a stale closure keeps running for the process lifetime.
+        if localMonitor == nil {
+            localMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: [.keyDown, .keyUp, .flagsChanged]
+            ) { event in
+                handleNSEvent(event)
+                // In remap mode we eat plain keyDown/keyUp so a tap on
+                // `Return` doesn't also activate the focused Continue
+                // button. BUT we still pass through shortcuts the user
+                // might need to leave the window (⌘W, ⌘Q, ⌘., ⌃-…) —
+                // eating them would trap the user in remap.
+                if remap, event.type != .flagsChanged {
+                    let passthroughMods: NSEvent.ModifierFlags = [.command, .control]
+                    if event.modifierFlags.intersection(passthroughMods).isEmpty {
+                        return nil
+                    }
+                }
+                return event
             }
-            return event
         }
     }
 
@@ -263,8 +277,13 @@ struct OnboardingHotkeyStep: View {
 
     private func toggleRemap() {
         if remap {
+            // Cancel — restore the verified state we had before entering
+            // remap mode so the user doesn't have to re-press a binding
+            // they had already confirmed.
             remap = false
+            verified = verifiedBeforeRemap
         } else {
+            verifiedBeforeRemap = verified
             remap = true
             verified = false
         }
@@ -276,9 +295,18 @@ struct OnboardingHotkeyStep: View {
             // Visual no-op — Escape / Power / CapsLock are filtered out.
             return
         }
+        // Rebinding to the SAME code is a no-op at the AppState level
+        // (applyHotkeyBinding short-circuits on equality). Preserve the
+        // user's prior `verified` state in that case so they aren't
+        // forced to re-press a binding they had already confirmed.
+        let sameAsCurrent = candidate.code == binding.code
         binding = candidate
         appState.applyHotkeyBinding(candidate)
-        verified = false
+        if !sameAsCurrent {
+            verified = false
+        } else {
+            verified = verifiedBeforeRemap
+        }
         remap = false
     }
 

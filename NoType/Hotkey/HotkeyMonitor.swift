@@ -19,9 +19,13 @@ import OSLog
 /// session. As a consequence `HotkeyBinding.isAllowedAsHotkey` rejects
 /// Escape so the user can't accidentally pick it.
 ///
-/// `@unchecked Sendable`: `previousFlags` is touched only on the tap
-/// thread; `tap`/`runLoopSource`/`thread`/`binding` are immutable after
-/// `start()`; the closures are `@Sendable`.
+/// `@unchecked Sendable`: `binding` and the `on*` closures are immutable
+/// after init. `previousFlags` and `nonModifierHeld` are touched only on
+/// the tap thread. `tap`, `runLoopSource`, `runLoop`, `thread`, and
+/// `isActive` are written from the main actor (`start()` / `stop()`);
+/// the `runLoopReady` semaphore provides the happens-before edge between
+/// the tap thread's setup writes (`self.runLoop = …`) and the main
+/// actor's reads in `stop()`.
 final class HotkeyMonitor: @unchecked Sendable {
     private static let log = Logger(subsystem: "app.notype", category: "hotkey")
 
@@ -67,6 +71,12 @@ final class HotkeyMonitor: @unchecked Sendable {
     /// currently held so we only emit one press/release pair even when
     /// macOS auto-repeats keyDown events.
     private var nonModifierHeld: Bool = false
+    /// Flipped to `false` at the top of `stop()`. Press / release Tasks
+    /// dispatched to `@MainActor` check it before invoking the callback
+    /// so a callback queued just before `stop()` doesn't fire `onPress`
+    /// against a being-torn-down monitor — important during rebind,
+    /// where the next monitor is installed immediately after.
+    private var isActive: Bool = true
 
     init(
         binding:   HotkeyBinding = .default,
@@ -123,7 +133,15 @@ final class HotkeyMonitor: @unchecked Sendable {
 
         self.tap = newTap
 
+        // Capture the semaphore directly so the early-exit defer below
+        // can still signal it even if `[weak self]` resolves to nil
+        // between Thread.init and the closure body — without that, the
+        // main actor's `runLoopReady.wait()` would deadlock waiting for
+        // a signal that never arrives.
+        let readySignal = runLoopReady
         let thread = Thread { [weak self] in
+            var setupCompleted = false
+            defer { if !setupCompleted { readySignal.signal() } }
             guard let self, let tap = self.tap else { return }
             let rl = CFRunLoopGetCurrent()
             self.runLoop = rl
@@ -131,7 +149,8 @@ final class HotkeyMonitor: @unchecked Sendable {
             self.runLoopSource = source
             CFRunLoopAddSource(rl, source, .commonModes)
             CGEvent.tapEnable(tap: tap, enable: true)
-            self.runLoopReady.signal()
+            setupCompleted = true
+            readySignal.signal()
             Self.log.info("hotkey runloop started (binding=\(self.binding.code, privacy: .public))")
             CFRunLoopRun()
             // CFRunLoopRun returns once stop() has scheduled CFRunLoopStop
@@ -166,6 +185,12 @@ final class HotkeyMonitor: @unchecked Sendable {
     /// old tap keeps firing for its previously-bound key in parallel
     /// with the freshly-installed monitor for the new binding.
     func stop() {
+        // Flip the active flag first so any press/release Tasks already
+        // queued on the main actor short-circuit before invoking the
+        // callback. Without this, a press dispatched microseconds before
+        // `stop()` could fire `onPress` against the NEW monitor's
+        // session wiring during a rebind.
+        isActive = false
         guard let tap, let runLoop else { return }
         // Disable immediately so no further callbacks fire while we tear
         // down. Thread-safe per Apple's docs.
@@ -208,6 +233,14 @@ final class HotkeyMonitor: @unchecked Sendable {
     fileprivate func handle(type: CGEventType, event: CGEvent) {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             Self.log.warning("CGEventTap disabled (\(type.rawValue, privacy: .public)); re-enabling")
+            // Reset state machines that depend on observing matched
+            // press/release pairs. If a keyUp landed during the disabled
+            // window, `nonModifierHeld` would stay stuck at `true` and
+            // the hotkey would silently stop firing until app restart;
+            // `previousFlags` would carry a phantom prior-bit value into
+            // the next flagsChanged transition.
+            nonModifierHeld = false
+            previousFlags = 0
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return
         }
@@ -221,7 +254,10 @@ final class HotkeyMonitor: @unchecked Sendable {
             // still passes through to the focused app (`.listenOnly`).
             if keycode == Self.escapeKeyCode {
                 let onEscape = self.onEscape
-                Task { @MainActor in onEscape() }
+                Task { @MainActor [weak self] in
+                    guard self?.isActive == true else { return }
+                    onEscape()
+                }
                 return
             }
 
@@ -232,7 +268,10 @@ final class HotkeyMonitor: @unchecked Sendable {
             if let vk = binding.virtualKeyCode, keycode == vk, !nonModifierHeld {
                 nonModifierHeld = true
                 let onPress = self.onPress
-                Task { @MainActor in onPress() }
+                Task { @MainActor [weak self] in
+                    guard self?.isActive == true else { return }
+                    onPress()
+                }
             }
             return
         }
@@ -242,7 +281,10 @@ final class HotkeyMonitor: @unchecked Sendable {
             if let vk = binding.virtualKeyCode, keycode == vk, nonModifierHeld {
                 nonModifierHeld = false
                 let onRelease = self.onRelease
-                Task { @MainActor in onRelease() }
+                Task { @MainActor [weak self] in
+                    guard self?.isActive == true else { return }
+                    onRelease()
+                }
             }
             return
         }
@@ -262,10 +304,16 @@ final class HotkeyMonitor: @unchecked Sendable {
         switch Self.detectTransition(prev: prev, curr: flags, bit: bit) {
         case .pressed:
             let onPress = self.onPress
-            Task { @MainActor in onPress() }
+            Task { @MainActor [weak self] in
+                guard self?.isActive == true else { return }
+                onPress()
+            }
         case .released:
             let onRelease = self.onRelease
-            Task { @MainActor in onRelease() }
+            Task { @MainActor [weak self] in
+                guard self?.isActive == true else { return }
+                onRelease()
+            }
         case .none:
             break
         }

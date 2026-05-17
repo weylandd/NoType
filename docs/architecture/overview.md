@@ -8,7 +8,7 @@
 
 ```mermaid
 flowchart TD
-  HK["Right Option held<br/>HotkeyMonitor<br/>(CGEventTap)"]
+  HK["Hotkey held (default: Right Option)<br/>HotkeyMonitor<br/>(CGEventTap)"]
   REC["AudioRecorder<br/>(AVAudioEngine, 16 kHz mono PCM)"]
   RING[PCMRingBuffer]
   VAD["SileroVAD<br/>(CoreML, 256 ms windows)"]
@@ -54,7 +54,7 @@ Solid arrows = audio / text path. Dotted arrows = control / async signal.
 
 | Folder | Owns | Source-of-truth doc |
 |---|---|---|
-| `NoType/Hotkey/` | Right Option press / release detection via CGEventTap | `Hotkey/CLAUDE.md` |
+| `NoType/Hotkey/` | Configurable hotkey press / release detection via CGEventTap (default: Right Option; `HotkeyBinding` persisted in UserDefaults) | `Hotkey/CLAUDE.md` |
 | `NoType/Recording/` | `AVAudioEngine`, Silero VAD, PCM ring buffer, chunk slicing & encoding | `Recording/CLAUDE.md` |
 | `NoType/Context/` | Full-screen AX walk, optional OCR fallback, secure-field masking | `Context/CLAUDE.md` |
 | `NoType/Instructions/` | Per-app `AppCategory`, user / category instructions, search-field AX override, classifier | `Instructions/CLAUDE.md` |
