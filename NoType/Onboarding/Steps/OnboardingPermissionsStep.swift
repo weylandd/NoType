@@ -269,6 +269,7 @@ private struct PermissionRow: View {
         HStack(spacing: 6) {
             Image(systemName: "checkmark")
                 .font(.system(size: 11, weight: .bold))
+                .accessibilityHidden(true)
             Text("Granted")
                 .font(.system(size: 12, weight: .medium))
         }
@@ -279,6 +280,8 @@ private struct PermissionRow: View {
         .overlay(
             Capsule().strokeBorder(DS.Color.successBorder, lineWidth: DS.Border.hairline)
         )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Granted")
     }
 }
 

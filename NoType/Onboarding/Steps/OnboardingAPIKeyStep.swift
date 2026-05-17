@@ -290,6 +290,10 @@ struct OnboardingAPIKeyStep: View {
             isLoading: validating,
             isEnabled: continueEnabled,
             minWidth: 180,
+            // Keep VoiceOver pinned to "Continue" so the announced
+            // identity doesn't churn when the visible label flips to
+            // "Validating" during the API-key check.
+            accessibilityLabelOverride: "Continue",
             action: continueTapped
         )
     }

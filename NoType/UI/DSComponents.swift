@@ -284,6 +284,11 @@ struct DSPrimaryButton: View {
     /// Optional explicit `minWidth` — onboarding CTAs use 180 / 200 pt
     /// to give the footer button a stable hit-target across labels.
     var minWidth: CGFloat? = nil
+    /// Optional VoiceOver-only label override. When `nil`, `label` is
+    /// announced. Set when the visible label changes during the
+    /// button's lifecycle (e.g. "Continue" → "Validating") but the
+    /// announced identity should stay stable.
+    var accessibilityLabelOverride: String? = nil
     let action: () -> Void
 
     @State private var hovered = false
@@ -321,10 +326,19 @@ struct DSPrimaryButton: View {
         .buttonStyle(.plain)
         .disabled(!isEnabled || isLoading)
         .onHover { hovered = $0 && isEnabled }
+        // `.onHover` only fires on cursor enter/leave, so if the parent
+        // flips `isEnabled` false → true while the cursor was hovering
+        // a disabled button, `hovered` stays true and the re-enabled
+        // button snaps straight into `accentHover` fill without a real
+        // hover event. Clear it on the disable edge so re-enable starts
+        // from the neutral `accent` fill.
+        .onChange(of: isEnabled) { _, newValue in
+            if !newValue { hovered = false }
+        }
         .pressEvents(onPress: { pressed = true }, onRelease: { pressed = false })
         .animation(DS.Motion.fast, value: hovered)
         .animation(DS.Motion.fast, value: isEnabled)
-        .accessibilityLabel(label)
+        .accessibilityLabel(accessibilityLabelOverride ?? label)
     }
 
     private var fillColor: Color {
@@ -405,20 +419,12 @@ extension DSPrimaryButton.Size {
         case .large:  return 12
         }
     }
-    fileprivate var contentSpacing: CGFloat {
-        switch self {
-        case .small:  return 5
-        case .medium: return 5
-        case .large:  return 6
-        }
-    }
-    fileprivate var cornerRadius: CGFloat {
-        switch self {
-        case .small:  return 6
-        case .medium: return 6
-        case .large:  return 8
-        }
-    }
+    // `.small` and `.medium` share the HUD radius / content-spacing; only
+    // `.large` (the onboarding footer CTA) bumps up. Expressed as a
+    // boolean rather than three identical switch arms so it's obvious
+    // when a future medium-tuning change would need a real third value.
+    fileprivate var contentSpacing: CGFloat { self == .large ? 6 : 5 }
+    fileprivate var cornerRadius:   CGFloat { self == .large ? 8 : 6 }
 }
 
 /// Quiet text-style secondary action ("View logs", "Learn more"). Used

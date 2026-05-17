@@ -131,21 +131,32 @@ enum DS {
         // beneath. Intentionally theme-shared (no dsDynamic wrap).
         static let buttonInnerHighlight = SwiftUI.Color.white.opacity(0.18)
 
-        // 40 % danger soft — used for the row background of a permission
+        // 40 % danger — used for the row background of a permission
         // that's in the `denied` state. Reads as a flag tint that the
-        // user needs to address; less intense than `dangerSoft` alone
-        // which is already pre-mixed against white.
+        // user needs to address. Roughly 7× the effective alpha of the
+        // `dangerSoft.opacity(0.4)` literal it replaced (~0.056), which
+        // is intentional — the prior value was too washed out to read
+        // as a flag against `bgSurface`.
         static let dangerSoftStrong = SwiftUI.Color.dsDynamicSameRGBA(
             r: 240/255, g: 90/255, b: 80/255, alpha: 0.40)
 
         // Onboarding-chrome derivatives — the centered progress pill
-        // background and the pending-dot fill. Both are alpha rungs of
-        // existing semantic colors; the named tokens exist so the
-        // wizard's chrome can't drift step-to-step and any future theme
-        // change to `bgBase` / `textQuaternary` carries through here
-        // automatically.
-        static let progressPillFill   = bgBase.opacity(0.60)
-        static let progressDotPending = textQuaternary.opacity(0.55)
+        // background and the pending-dot fill. Expressed as explicit
+        // per-theme RGBA so the dynamic NSColor provider re-resolves on
+        // appearance flips. (Wrapping a dynamic color in
+        // `SwiftUI.Color.opacity(_:)` at static-let scope risks freezing
+        // the sRGB at first access — safer to spell out the tuple.)
+        // Anchors:
+        //   bgBase light=#FEFCF9, dark=#0D0E11 @ 60%
+        //   textQuaternary light=#909297, dark=#6E6D76 @ 55%
+        static let progressPillFill   = SwiftUI.Color.dsDynamic(
+            lightRGBA: (254/255, 252/255, 249/255, 0.60),
+            darkRGBA:  ( 13/255,  14/255,  17/255, 0.60)
+        )
+        static let progressDotPending = SwiftUI.Color.dsDynamic(
+            lightRGBA: (144/255, 146/255, 151/255, 0.55),
+            darkRGBA:  (110/255, 109/255, 118/255, 0.55)
+        )
 
         // Glass top-edge highlight — a 1pt strip we paint at the top of
         // every HUD shell + the popover. White on dark, black on light
