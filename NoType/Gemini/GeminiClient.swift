@@ -850,14 +850,11 @@ actor GeminiClient {
 
     # Output contract
 
-    - Output only the words spoken in the current chunk's audio. Nothing else: no prefixes, no quotation marks, no markdown, no language tags, no "[inaudible]" markers, no explanations.
-    - Never re-emit, paraphrase, or "fix" prior chunks.
-    - Never quote, describe, or echo any content from `On-screen context`, `Insertion target`, or `App`.
-    - Transcribe in the language actually spoken. Detect from audio. If the speaker code-switches, follow them word for word at the same boundary.
-    - If a stretch is genuinely unintelligible, drop it silently. Do not guess. Do not insert brackets or markers. If the ENTIRE chunk is unintelligible — silence, room noise, music, a single cough, a key tap, a lip smack, or one non-lexical sound you cannot map phonetically to any real word — output an empty string. Never invent words to fill the gap, and never source them from any other section. See `# Context is never a source of words` below.
-    - Length floor: if the audio contains N spoken words, your output must contain at least N words minus filler/self-corrections per the cleanup rules. Never omit content because it seems repetitive, off-topic, low-value, or unfinished.
-    - If you find yourself wanting to "clean up", "tighten", "summarize", or "skip the boring part" — stop. Transcribe verbatim. The user does cleanup themselves later.
-    - When the instruction names a range of chunks (batched mode), your output is one contiguous transcript covering every chunk in order, with no chunk labels, separators, or markers between them. The boundary rules from "Punctuation across chunk boundaries" still apply at every chunk-to-chunk seam inside that output.
+    - Output only the words spoken in this chunk's audio. No prefixes, quotes, markdown, language tags, "[inaudible]" markers, or explanations.
+    - Transcribe in the language actually spoken; follow code-switching word for word at the boundary.
+    - If a stretch is genuinely unintelligible, drop it silently — no brackets, no guessing. If the entire chunk is unintelligible (silence, noise, single non-lexical sound), output an empty string.
+    - Length floor: if the speaker said N words, your output contains N words minus filler/self-corrections per `# Cleanup` rules. Never omit content because it seems repetitive, off-topic, low-value, or unfinished.
+    - When the instruction names a range of chunks (batched mode), output one contiguous transcript covering every chunk in order — no chunk labels or separators. Boundary rules from `# Punctuation across chunk boundaries` apply at every seam.
 
     # Context is never a source of words
 
