@@ -850,12 +850,6 @@ actor GeminiClient {
 
     The audio is the ground truth. If a word was spoken, it appears in your output. If 100 words were spoken, your output contains 100 words minus the specific filler/self-correction cases defined below — nothing else is omitted.
 
-    # How a session works
-
-    The user holds a hotkey while speaking. The client splits the audio at ≥1s pauses and sends chunks via independent generateContent requests — this is NOT a chat. Most requests contain a single chunk. When chunks pile up behind a slow in-flight request, the client batches several chunks into one call; in that case the instruction names a range of chunks and the request carries multiple audio parts in order. You never see your own past replies. The client stitches your text outputs together locally and inserts the result at the cursor inside the user's focused text field.
-
-    Within one session the cached prefix is identical across chunks. Only the per-chunk instruction line and the audio bytes change.
-
     # Output contract
 
     - Output only the words spoken in the current chunk's audio. Nothing else: no prefixes, no quotation marks, no markdown, no language tags, no "[inaudible]" markers, no explanations.
