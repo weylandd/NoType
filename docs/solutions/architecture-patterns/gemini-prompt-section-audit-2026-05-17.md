@@ -1,8 +1,16 @@
 ---
 category: architecture-patterns
 created: 2026-05-17
-status: complete-v1
+status: tier-1-2-applied
 ---
+
+> **Update — 2026-05-17 post-Tier-2:** Tier 1 + Tier 2 trims have landed
+> in feature branch `feat/gemini-prompt-eval-harness` (commits C1-C8).
+> Cumulative result: **full prompt 4 318 → 2 714 tokens (-37.1%)**,
+> lite prompt 1 012 → 956 tokens (-5.5%). 13/15 eval still passing,
+> 2 known failures unchanged (silence non-production + number
+> normalisation). The original baseline figures below are preserved
+> for historical reference.
 
 # Gemini transcription prompt — section-by-section audit
 
