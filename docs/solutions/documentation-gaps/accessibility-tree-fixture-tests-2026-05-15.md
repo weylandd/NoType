@@ -1,48 +1,51 @@
 ---
-title: AccessibilityTree fixture-driven tests (planned)
+title: AccessibilityTree fixture-driven tests (closed)
 date: 2026-05-15
 category: documentation-gaps
 module: Context
 problem_type: documentation_gap
 component: testing_framework
 severity: medium
+status: closed
 applies_when:
-  - Refactoring AccessibilityTree's walk / depth / cancellation logic
-  - Investigating a regression in AX context quality or budget overruns
-tags: [accessibility-tree, fixture-tests, mockable, tech-debt]
+  - Historical reference — gap closed by the noise-filtering plan
+tags: [accessibility-tree, fixture-tests, mockable, tech-debt, closed]
 ---
 
-# AccessibilityTree fixture-driven tests (planned)
+# AccessibilityTree fixture-driven tests (closed)
 
 ## Context
 
-No `AccessibilityTreeTests.swift` exists. The tree walker (`NoType/Context/AccessibilityTree.swift`) has subtle invariants — depth cap, per-app node budget, per-app cancellation, total budget, `truncated` flag — that could be locked down with a synthetic `MockAXNode` graph driving the walk via a thin protocol.
+No `AccessibilityTreeTests.swift` existed. The tree walker (`NoType/Context/AccessibilityTree.swift`) had subtle invariants — depth cap, per-app node budget, per-app cancellation, total budget, `truncated` flag — that could be locked down with a synthetic graph.
 
 ## Guidance
 
-When the next refactor lands on the walker (e.g. tightening the per-app deadline check), introduce the mock graph protocol and write the regression tests at the same time. **Don't introduce the protocol on its own** — wait for a real change that benefits from it.
+**Closed** by `docs/plans/2026-05-17-002-refactor-ax-tree-noise-filtering-plan.md` (U2 + U4). The right next refactor showed up — adding noise filters and active-app priority — and pulled the testability seams in with it. Rather than the originally-proposed `MockAXNode` + walker-protocol shape (which would have required carving a non-trivial abstraction through `AXUIElementCopyAttributeValue`), the plan extracted two pure seams from inside the walker:
+
+- `AccessibilityTree.decideForNode(role:subrole:title:value:metadata:parentBundleID:depth:) -> NodeDecision` — the per-node pipeline (masker → noise filter → format) as a pure function. Tested directly with synthetic `NodeMetadata` inputs; no AX live calls.
+- `AccessibilityTree.applyGlobalCap(dumps:activeBundleID:) -> (apps,totalNodes,truncated)` — the active-first sort + global-budget truncation as a pure function over hand-built `RedactedAppDump` arrays.
+
+Plus `AccessibilityTree.budgetForApp(bundleID:active:) -> Int` for routing rules.
+
+This covered the same invariants the original gap called out (depth, budget, cancellation race, truncation flag) without faking `AXUIElementCopyAttributeValue` — and added new coverage (R8 masker precedence, R5 terminal-parent scrollback gate, R6 pack-collapse negative cases) that the rewritten walker needed anyway.
 
 ## Why This Matters
 
-The walker has been stable since launch; nothing has regressed it. But refactoring without tests is the kind of thing that ships invisible regressions — a `truncated` flag that flips spuriously, a per-app budget that's off-by-one, a deadline that no longer fires.
+Recorded so a future contributor knows the gap is closed AND that the `MockAXNode`+protocol shape was rejected in favour of seam extraction. If the walker grows again and the existing seams don't cover the new logic, the right move is more seams — not retro-fitting the rejected mock-graph approach.
 
 ## When to Apply
 
-- Any PR that materially changes the walk algorithm (depth, breadth, cancellation, budget).
-- Any PR that introduces a new node category to the dump (e.g. a richer secure-field heuristic).
+Historical reference only.
 
 ## Examples
 
-The shape would be:
+What shipped:
 
-- A `MockAXNode` value type with `role`, `subrole`, `value`, `children`, etc.
-- A protocol the walker uses to descend nodes (instead of calling `AXUIElementCopyAttributeValue` directly).
-- ~10 test cases covering depth cap, budget overflow, cancellation race, truncation flag.
-
-Approximate effort: **M**.
+- `NoTypeTests/AXNoiseFilterTests.swift` — 56 cases on the pure predicates (R4 chrome, R5 terminal-parent scrollback, R6 pack-collapse with negative cases, R7 length floor + CJK).
+- `NoTypeTests/AccessibilityTreeTests.swift` — 25 cases on the walker's three pure seams (`decideForNode`, `budgetForApp`, `applyGlobalCap`) plus the rendering contract.
 
 ## Related
 
-- `NoType/Context/CLAUDE.md` "What we walk" — the invariants the tests would pin.
-- `solutions/design-patterns/full-screen-ax-tree-2026-05-15.md` — the underlying decision.
-- `docs/TECHDEBT.md` — legacy index entry, redirects here.
+- `docs/plans/2026-05-17-002-refactor-ax-tree-noise-filtering-plan.md` (closing plan, U2 + U4).
+- `NoType/Context/CLAUDE.md` "Noise filtering" — invariants now pinned by the new tests.
+- `solutions/design-patterns/full-screen-ax-tree-2026-05-15.md` — the underlying multi-app decision.
