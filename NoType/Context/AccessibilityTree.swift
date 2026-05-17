@@ -141,6 +141,68 @@ enum AccessibilityTree {
         }
     }
 
+    // MARK: - Per-node decision
+
+    /// Outcome of `decideForNode` for a single AX node:
+    /// - `.skipSubtree` — `SecureFieldMasker` flagged this node; drop it
+    ///   AND its descendants (secure-field children would be just internal
+    ///   text storage).
+    /// - `.dropRender` — `AXNoiseFilter` classified this node's line as
+    ///   noise (structural chrome, gibberish, terminal scrollback). Don't
+    ///   append a line, don't charge against the budget, but **do** still
+    ///   recurse into children — a noisy parent may wrap real content.
+    /// - `.render(line)` — formatted prompt line; append and charge budget.
+    enum NodeDecision: Equatable {
+        case skipSubtree
+        case dropRender
+        case render(String)
+    }
+
+    /// Pure per-node pipeline. Pipeline order is load-bearing — pinned by
+    /// `AccessibilityTreeTests`:
+    ///
+    /// 1. `SecureFieldMasker.mask` (security boundary, R8) — `.skip`
+    ///    short-circuits to `.skipSubtree`.
+    /// 2. `AXNoiseFilter.shouldDropNode` (R4 + R7) — structural chrome
+    ///    and gibberish-only content drop to `.dropRender`.
+    /// 3. `AXNoiseFilter.isViewportScrollback` (R5) — terminal-parent
+    ///    gated scrollback drop.
+    /// 4. `formatLine` — the existing nothing-to-render safety net
+    ///    (empty-Group case) also falls through to `.dropRender`.
+    static func decideForNode(
+        role: String?,
+        subrole: String?,
+        title: String?,
+        value: String?,
+        metadata: SecureFieldMasker.NodeMetadata,
+        parentBundleID: String?,
+        depth: Int
+    ) -> NodeDecision {
+        let action = SecureFieldMasker.mask(value: value, metadata: metadata)
+        switch action {
+        case .skip:
+            return .skipSubtree
+        case .keep(let v), .replace(let v, _):
+            if AXNoiseFilter.shouldDropNode(
+                role: role, subrole: subrole, title: title, value: v
+            ) {
+                return .dropRender
+            }
+            if AXNoiseFilter.isViewportScrollback(
+                role: role, value: v, parentBundleID: parentBundleID
+            ) {
+                return .dropRender
+            }
+            guard let line = formatLine(
+                role: role, subrole: subrole, title: title,
+                value: v, depth: depth
+            ) else {
+                return .dropRender
+            }
+            return .render(line)
+        }
+    }
+
     /// Synchronous tree walk for one app. Runs inside a task with the
     /// per-app timeout. Polls `Task.isCancelled` between windows so a
     /// fired timeout actually stops the walk, not just hides it.
@@ -170,9 +232,13 @@ enum AccessibilityTree {
                 depth: 0,
                 parentRole: AXAttr.stringDescribing(window, kAXRoleAttribute as String),
                 parentTitle: title,
+                parentBundleID: bundleID,
                 lines: &lines,
                 budget: &nodesRemaining
             )
+            // R6: collapse repetitive packs once per window AFTER the walk.
+            // Pure post-pass on rendered lines; no AX calls.
+            AXNoiseFilter.collapseRepetitivePacks(&lines)
             windowDumps.append(RedactedWindowDump(title: title, lines: lines))
         }
 
@@ -186,6 +252,7 @@ enum AccessibilityTree {
         depth: Int,
         parentRole: String?,
         parentTitle: String?,
+        parentBundleID: String?,
         lines: inout [String],
         budget: inout Int
     ) {
@@ -218,23 +285,33 @@ enum AccessibilityTree {
                 parentTitle: parentTitle
             )
 
-            let action = SecureFieldMasker.mask(value: rawValue, metadata: metadata)
+            let decision = decideForNode(
+                role: role,
+                subrole: subrole,
+                title: title,
+                value: rawValue,
+                metadata: metadata,
+                parentBundleID: parentBundleID,
+                depth: depth
+            )
 
-            switch action {
-            case .skip:
+            switch decision {
+            case .skipSubtree:
                 // Drop this node and everything below it. AXSecureTextField
-                // children would be just internal text storage — no reason to
-                // descend.
+                // children would be just internal text storage — no reason
+                // to descend. Charge budget so secure-rich subtrees can't
+                // monopolise the per-app walk.
                 budget -= 1
                 return
-            case .keep(let v), .replace(let v, _):
-                if let line = formatLine(
-                    role: role, subrole: subrole, title: title,
-                    value: v, depth: depth
-                ) {
-                    lines.append(line)
-                    budget -= 1
-                }
+            case .dropRender:
+                // Noise — don't append a line, don't charge budget, but
+                // DO recurse into children. Per R10: budget caps rendered
+                // lines, not nodes visited. A noisy container (label-less
+                // Toolbar) may wrap real content (labelled Search field).
+                break
+            case .render(let line):
+                lines.append(line)
+                budget -= 1
             }
         }
 
@@ -248,6 +325,7 @@ enum AccessibilityTree {
                 depth: depth + 1,
                 parentRole: role,
                 parentTitle: title ?? parentTitle,
+                parentBundleID: parentBundleID,
                 lines: &lines,
                 budget: &budget
             )
