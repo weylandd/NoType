@@ -109,7 +109,10 @@ struct NoTypeApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
-        .defaultSize(width: 1080, height: 760)
+        .defaultSize(
+            width:  MainWindowMetrics.canvasSize.width,
+            height: MainWindowMetrics.canvasSize.height
+        )
         .defaultLaunchBehavior(
             OnboardingState.hasCompletedOnboarding ? .automatic : .presented
         )

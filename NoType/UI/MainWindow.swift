@@ -1,6 +1,16 @@
 import AppKit
 import SwiftUI
 
+/// Window canvas dimensions. The same `NSSize` is consumed by three
+/// load-bearing sites that must agree or the SwiftUI hint and the
+/// AppKit lock fight each other silently:
+///   1. `NoTypeApp.swift` — `.defaultSize(...)` on the `Window` scene.
+///   2. `MainWindowView.body` — `.frame(min==max ...)`.
+///   3. `MainWindowView.body` — `FixedSizeWindowConfigurator(size:)`.
+enum MainWindowMetrics {
+    static let canvasSize = NSSize(width: 1080, height: 760)
+}
+
 /// Tabs available in the main window's left navigation. Only `home`
 /// exists today; the enum is structured so future tabs (settings,
 /// activity, etc.) can be added without touching the layout code.
@@ -61,11 +71,13 @@ struct MainWindowView: View {
         // treated as an "ideal" hint and lets AppKit make the window
         // resizable. See Apple Developer Forums thread 708177.
         .frame(
-            minWidth: 1080, maxWidth: 1080,
-            minHeight: 760, maxHeight: 760
+            minWidth:  MainWindowMetrics.canvasSize.width,
+            maxWidth:  MainWindowMetrics.canvasSize.width,
+            minHeight: MainWindowMetrics.canvasSize.height,
+            maxHeight: MainWindowMetrics.canvasSize.height
         )
         .background(DS.Color.bgBase.ignoresSafeArea())
-        .background(FixedSizeWindowConfigurator(size: NSSize(width: 1080, height: 760)))
+        .background(FixedSizeWindowConfigurator(size: MainWindowMetrics.canvasSize))
         .onAppear {
             NSApp.setActivationPolicy(.regular)
             NSApp.activate(ignoringOtherApps: true)
@@ -180,8 +192,19 @@ struct MainWindowView: View {
 // view, walk up to the hosting NSWindow on appear, drop the resizable
 // bit, and pin `minSize == maxSize`. The window cannot grow or shrink
 // after this — exactly what we want for a rarely-opened utility shell.
+//
+// **Why the lock lives in BOTH `viewDidMoveToWindow` and `updateNSView`
+// (do not delete the latter as "redundant").** SwiftUI owns the NSWindow
+// and re-applies its window configuration on certain system events
+// (Mission Control / Space switch, display add-remove, screen
+// sleep/wake, full-screen exit). Those re-configurations can transiently
+// re-assert `.resizable` until the next SwiftUI body rebuild. The
+// `viewDidMoveToWindow` hook only fires when AppKit (re-)attaches the
+// view to a window; SwiftUI may update the body without a re-attach.
+// `updateNSView` re-strips the bit on every body update so the lock
+// recovers without an actual re-attach event.
 
-private struct FixedSizeWindowConfigurator: NSViewRepresentable {
+struct FixedSizeWindowConfigurator: NSViewRepresentable {
     let size: NSSize
 
     func makeNSView(context: Context) -> NSView {
@@ -194,25 +217,30 @@ private struct FixedSizeWindowConfigurator: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
-        // Idempotent re-application — SwiftUI may rebuild the view
-        // hierarchy after onboarding finishes (the wizard branch swaps
-        // for the sidebar+pane branch) and we want the lock to survive.
         guard let window = nsView.window else { return }
         Self.lock(window: window, to: size)
     }
 
-    fileprivate static func lock(window: NSWindow, to size: NSSize) {
+    static func lock(window: NSWindow, to size: NSSize) {
         window.styleMask.remove(.resizable)
         window.minSize = size
         window.maxSize = size
         if window.frame.size != size {
-            var frame = window.frame
-            // AppKit origin is bottom-left; preserve top-left anchor.
-            let dy = frame.size.height - size.height
-            frame.size = size
-            frame.origin.y += dy
-            window.setFrame(frame, display: true)
+            window.setFrame(adjustedFrame(for: window.frame, target: size), display: true)
         }
+    }
+
+    /// Shift `currentFrame` to `target` while preserving the visual top-left
+    /// anchor. AppKit's coordinate system has the origin at the bottom-left,
+    /// so a height change must be matched by an offset on `origin.y` —
+    /// otherwise the window appears to jump vertically by the height delta.
+    /// Exposed `internal static` for direct unit testing.
+    static func adjustedFrame(for currentFrame: NSRect, target: NSSize) -> NSRect {
+        var frame = currentFrame
+        let dy = frame.size.height - target.height
+        frame.size = target
+        frame.origin.y += dy
+        return frame
     }
 }
 
