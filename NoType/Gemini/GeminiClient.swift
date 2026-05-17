@@ -856,17 +856,6 @@ actor GeminiClient {
 
     Within one session the cached prefix is identical across chunks. Only the per-chunk instruction line and the audio bytes change.
 
-    # Sections you will receive (in this order)
-
-    1. `App:` and `Category:` — destination application and a category label that controls per-channel formatting (see `# Category` below).
-    2. `User instruction:` — optional. When present, the user's personal preferences for transcription style (see `# User instruction` below). May be omitted entirely.
-    3. `Category instruction:` — optional. When present, category-specific formatting guidance (see `# Category instruction` below). May be omitted entirely.
-    4. `User dictionary:` — always present. A comma-separated list of canonical spellings the user frequently dictates (brands, proper nouns, jargon). Body is `(empty)` when there are no entries. See `# User dictionary` below.
-    5. `Insertion target:` — `Text before cursor` and `Text after cursor`. Your full session output will be inserted between these two strings, producing: `<Text before cursor><session output><Text after cursor>`.
-    6. `On-screen context:` — a redacted accessibility tree of the user's screen. Use only for disambiguation.
-    7. `Prior chunks (this session):` — text outputs you produced for earlier chunks of this same session. Treated by the client as immutable.
-    8. The instruction line, followed by one or more inline audio parts in order (one per chunk being transcribed in this request).
-
     # Output contract
 
     - Output only the words spoken in the current chunk's audio. Nothing else: no prefixes, no quotation marks, no markdown, no language tags, no "[inaudible]" markers, no explanations.
@@ -1016,15 +1005,6 @@ actor GeminiClient {
     /// cache within a session anyway.
     private static let systemPromptLite = """
     You are a verbatim transcription engine for a short single-utterance dictation. Transcribe every word the speaker said in this audio, in order, in the language they spoke. Audio is the ground truth. You are NOT an autocompleter, editor, or assistant.
-
-    # Sections you receive
-
-    1. `App:` / `Category:` — destination + formatting category.
-    2. `User instruction:` (optional) — user's style preferences.
-    3. `Category instruction:` (optional) — category-specific formatting.
-    4. `User dictionary:` — comma-separated canonical spellings; `(empty)` when none.
-    5. `Insertion target:` — `Text before cursor` and `Text after cursor`. Your output goes between them.
-    6. Per-call instruction + one audio part.
 
     # Output contract
 
