@@ -94,24 +94,41 @@ enum AccessibilityTree {
             return collected
         }
 
-        // Active-first ordering — stable move-to-front, not a comparator
-        // sort (Swift's `Array.sort` isn't documented stable). Ensures the
-        // active app is never the one truncated when the global cap fires
-        // on a busy machine.
+        let (capped, totalNodes, truncated) = applyGlobalCap(
+            dumps: dumps,
+            activeBundleID: activeBundleID
+        )
+
+        let result = RedactedAXSnapshot(apps: capped, truncated: truncated)
+        Self.log.info("ax snapshot: \(capped.count) apps, \(totalNodes) nodes, active=\(activeBundleID ?? "nil", privacy: .public), truncated=\(truncated)")
+        return result
+    }
+
+    /// Pure helper for `snapshot()`'s ordering + global-cap pass. Active
+    /// app (when present) moves to the front via stable move-to-front
+    /// (NOT `Array.sort` — Swift doesn't document it as stable). Then the
+    /// 5000-line global budget truncates from the tail. Active-first
+    /// guarantees the user's frontmost app survives the cap on busy
+    /// machines (7+ candidate apps). Returns `(cappedDumps, totalLines,
+    /// truncatedFlag)` so the caller can log the breakdown.
+    ///
+    /// Exposed for direct unit testing in `AccessibilityTreeTests`.
+    static func applyGlobalCap(
+        dumps: [RedactedAppDump],
+        activeBundleID: String?
+    ) -> (apps: [RedactedAppDump], totalNodes: Int, truncated: Bool) {
+        var ordered = dumps
         if let activeBundleID,
-           let idx = dumps.firstIndex(where: { $0.bundleID == activeBundleID }),
+           let idx = ordered.firstIndex(where: { $0.bundleID == activeBundleID }),
            idx > 0 {
-            let active = dumps.remove(at: idx)
-            dumps.insert(active, at: 0)
+            let active = ordered.remove(at: idx)
+            ordered.insert(active, at: 0)
         }
 
-        // Apply the global rendered-line budget (R10). Counts lines, not
-        // nodes — filtering may reduce lines-per-walked-node, that's the
-        // intended efficiency gain.
         var totalNodes = 0
         var truncated = false
         var capped: [RedactedAppDump] = []
-        for app in dumps {
+        for app in ordered {
             let appNodes = app.windows.reduce(0) { $0 + $1.lines.count }
             if totalNodes + appNodes > totalNodeBudget {
                 truncated = true
@@ -120,10 +137,7 @@ enum AccessibilityTree {
             totalNodes += appNodes
             capped.append(app)
         }
-
-        let result = RedactedAXSnapshot(apps: capped, truncated: truncated)
-        Self.log.info("ax snapshot: \(capped.count) apps, \(totalNodes) nodes, active=\(activeBundleID ?? "nil", privacy: .public), truncated=\(truncated)")
-        return result
+        return (capped, totalNodes, truncated)
     }
 
     // MARK: - Candidate enumeration
