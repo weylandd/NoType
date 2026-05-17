@@ -1,0 +1,5 @@
+# Audio fixtures for the prompt-eval test suite.
+#
+# Drop m4a files here per the recording recipe in
+# ../README.md. This file exists only to keep the
+# directory tracked in git before any audio lands.

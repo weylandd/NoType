@@ -71,8 +71,8 @@ Both file-scope constants (force-unwrap is the documented exception for compile-
 ## Testing
 
 - `NoTypeTests/GeminiRequestBuilderTests.swift` — pins the cache-friendly part ordering and the system-prompt anti-completion clause. Touching this test means the prompt contract changed → explicit reviewer review.
+- `NoTypeTests/PromptEvalTests.swift` + `NoTypeTests/PromptEvalHarness.swift` — live-API behavioural eval. Drives 9 audio fixtures through the prompts and asserts on substring / word-count / wordCountCeiling. Gated by Keychain entry `app.notype.tests.gemini` (or `NOTYPE_GEMINI_KEY` env). Skips cleanly when neither is set.
 - `NoTypeTests/AppCategorizerTests.swift` — pins the classifier JSON parser.
-- Live-API tests gated by `NOTYPE_INTEGRATION=1`.
 
 ## Pointers
 
@@ -83,3 +83,4 @@ Both file-scope constants (force-unwrap is the documented exception for compile-
 - Per-app classifier → `solutions/architecture-patterns/per-app-categorization-instructions-2026-05-15.md` + `NoType/Instructions/CLAUDE.md`.
 - OCR sub-block → `solutions/architecture-patterns/screenshot-ocr-fallback-2026-05-15.md` + `NoType/Context/CLAUDE.md`.
 - User dictionary section → `solutions/architecture-patterns/personal-dictionary-2026-05-15.md` + `NoType/Dictionary/CLAUDE.md`.
+- Prompt-size audit + Tier 1/2 trim methodology → `solutions/architecture-patterns/gemini-prompt-section-audit-2026-05-17.md`. Current size (post-Tier-2): full ~2 700 tokens, lite ~960 tokens (system + cache prefix, excluding audio).
