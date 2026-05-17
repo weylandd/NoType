@@ -23,7 +23,7 @@ This audit gives an empirical answer. **TL;DR — on the current eval coverage, 
 
 13 passing tests, 2 failing tests. Both failures are real regressions on production prompts:
 
-- 🚨 **`silence_only`** — pure digital silence (-91 dB, 2.0 s) transcribes as *"Hello, how are you?"*. Prompt requires empty string. **Hallucination from silence.**
+- ⚠️ **`silence_only`** — pure digital silence (-91 dB, 2.0 s) transcribes as *"Hello, how are you?"*. Prompt requires empty string. **Hallucination from silence.** *Synthetic edge case only* — in production NoType's Silero VAD + `PauseDetector` (150 ms voiced floor, `pcm.count >= 2400` minimum chunk size) ensures silence chunks never reach Gemini. Fixture kept as a robustness probe for "what if VAD ever fails" defence-in-depth, **not** as a Tier 4 blocker.
 - ⚠️ **`long_monologue_en`** — *"sixteen pixel"* normalised to *"16-pixel"* (similarly `twelve`/`twenty`/`thirty`). Verbatim contract violated; spelled-out → digit normalization. Partial — `"three sprints"` and `"accessibility"` preserved.
 
 ### Removal-experiment matrix
@@ -107,10 +107,11 @@ Tier 3 — **defer until eval expands**:
 - `# User instruction` (#12), `# Category instruction` (#13, L8) — add fixtures with non-default instructions, then audit
 
 Tier 4 — **NEEDS NEW INTERVENTION** (not in any section's removal experiment):
-- 🚨 **Silence handling.** No section's removal restored or worsened silence behavior consistently. The model hallucinates "Hello..." patterns from silence regardless of scaffolding. Hypothesis: this needs a *positive* intervention (response-schema constraint, post-processing filter, or moving the silence rule to the per-call instruction line where it's textually adjacent to the audio) rather than more system-prompt prose.
-- ⚠️ **Number normalisation.** Same pattern — model normalises `sixteen` → `16` despite cleanup-whitelist rule, and removing the rule doesn't change behavior. Hypothesis: needs an explicit positive rule like `"if the speaker pronounced a number as a word, output the word — do not convert to digits"` in either per-call instruction or as a structural constraint.
+- ⚠️ **Number normalisation.** Model normalises `sixteen` → `16` despite cleanup-whitelist rule, and removing the rule doesn't change behavior. Hypothesis: needs an explicit positive rule like `"if the speaker pronounced a number as a word, output the word — do not convert to digits"` in either per-call instruction or as a structural constraint.
 
-Both Tier 4 items go through `prompt-master` in U3.
+The number-normalisation fix goes through `prompt-master` in U3.
+
+**Silence handling is *not* in Tier 4.** Per NoType's VAD + min-chunk-size pipeline (see `NoType/Recording/CLAUDE.md`), silence-only chunks never reach Gemini in production — they're filtered before the chunk builder. The `silence_only` fixture stays in the eval as a robustness probe (defence-in-depth for hypothetical VAD failure modes), but designing new prompt scaffolding for silence handling would optimise for a case that doesn't ship.
 
 ## Why This Matters
 
@@ -118,7 +119,7 @@ Three concrete answers to the user's question:
 
 1. **Yes, the prompt is currently over-engineered for what the eval can prove.** Removing any single section doesn't measurably change behaviour on 13 of 15 passing fixtures. Approximately 50-60% of the system-instruction tokens are not earning their cost against the eval suite as currently configured.
 
-2. **The 2 failing fixtures (silence, numbers) aren't defended by ANY section.** Scaffolding language *describing* the rule isn't enforcing it. These need a different kind of intervention (Tier 4 above).
+2. **The 2 failing fixtures (silence, numbers) aren't defended by ANY section.** Scaffolding language *describing* the rule isn't enforcing it. Only the number-normalisation case is a real production concern; silence is filtered out by VAD before it reaches Gemini.
 
 3. **But eval coverage is incomplete.** The prompt sections most likely to be defending real production failure modes — context leakage from AX trees, OCR, dictionaries, multi-chunk behavior — aren't testable with current fixtures. Trimming those without first expanding the eval is risky.
 
