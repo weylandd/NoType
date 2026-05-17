@@ -67,28 +67,95 @@ enum PromptEvalHarness {
         let elapsedMs: Int
     }
 
-    // MARK: - Skip gates
+    // MARK: - Key resolution + skip gates
 
-    /// Throws `XCTSkip` unless both `NOTYPE_INTEGRATION=1` and
-    /// `NOTYPE_GEMINI_KEY=<key>` are set. Call at the top of every
-    /// test method that uses the harness — this is the only thing
-    /// that keeps the standard `xcodebuild test` run free of live
-    /// API calls.
-    static func skipIfNotIntegration() throws {
-        let env = ProcessInfo.processInfo.environment
-        guard env["NOTYPE_INTEGRATION"] == "1" else {
-            throw XCTSkip("Set NOTYPE_INTEGRATION=1 to run prompt eval tests.")
-        }
-        let trimmedKey = (env["NOTYPE_GEMINI_KEY"] ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedKey.isEmpty else {
-            throw XCTSkip("Set NOTYPE_GEMINI_KEY=<your key> to run prompt eval tests.")
-        }
+    /// Dedicated Keychain service for the eval suite — NOT the
+    /// production service (`app.notype.gemini`). Production's ACL
+    /// is keyed on the main app's designated requirement
+    /// (`identifier "app.notype"`); the xctest process's identifier
+    /// is different, so it can't silently read the production entry
+    /// without prompting the user. This separate service lets the
+    /// maintainer drop a test-only key with broad ACL (via
+    /// `security … -A`) without weakening the production entry's
+    /// security model.
+    ///
+    /// Setup is documented in `NoTypeTests/Fixtures/README.md` —
+    /// see "Setting the API key for the eval suite".
+    static let testKeychainService = "app.notype.tests.gemini"
+    static let testKeychainAccount = "default"
+
+    /// Source of the resolved API key — useful in test logs so a
+    /// failed test makes clear *which* key was used (or that one
+    /// wasn't found at all).
+    enum KeySource: String, Sendable {
+        case environment   // NOTYPE_GEMINI_KEY env var
+        case keychain      // app.notype.tests.gemini Keychain entry
+        case none
     }
 
-    static var apiKey: String {
-        (ProcessInfo.processInfo.environment["NOTYPE_GEMINI_KEY"] ?? "")
+    /// Resolve the eval API key. Priority:
+    ///   1. `NOTYPE_GEMINI_KEY` env var (CI, ad-hoc override).
+    ///   2. Keychain entry `app.notype.tests.gemini` / `default`.
+    ///   3. None — caller should `XCTSkip` with setup instructions.
+    ///
+    /// **Never** falls back to the production Keychain entry
+    /// (`app.notype.gemini`) — that would couple eval runs to the
+    /// production key's lifecycle and trip the ACL prompt.
+    static func resolveAPIKey() -> (key: String, source: KeySource) {
+        // 1. Env var.
+        let envKey = (ProcessInfo.processInfo.environment["NOTYPE_GEMINI_KEY"] ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !envKey.isEmpty {
+            return (envKey, .environment)
+        }
+
+        // 2. Keychain. `try?` collapses both "not found" (nil) and
+        // any access error (ACL mismatch, daemon flake) into the
+        // same "missing" outcome — the test will skip rather than
+        // throw an unhelpful trace.
+        if let keychainKey = (try? KeychainStore.load(
+            service: testKeychainService,
+            account: testKeychainAccount
+        ))?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !keychainKey.isEmpty {
+            return (keychainKey, .keychain)
+        }
+
+        return ("", .none)
+    }
+
+    /// Throws `XCTSkip` unless `NOTYPE_INTEGRATION=1` is set AND an
+    /// API key can be resolved (via env var or Keychain — see
+    /// `resolveAPIKey()`). Call at the top of every test method
+    /// that uses the harness — this is the only thing that keeps
+    /// the standard `xcodebuild test` run free of live API calls.
+    static func skipIfNotIntegration() throws {
+        guard ProcessInfo.processInfo.environment["NOTYPE_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set NOTYPE_INTEGRATION=1 to run prompt eval tests.")
+        }
+        let (key, source) = resolveAPIKey()
+        guard !key.isEmpty else {
+            throw XCTSkip("""
+            No Gemini API key found for the eval suite. Set one of:
+              1. NOTYPE_GEMINI_KEY=<key> env var, OR
+              2. Keychain entry: security add-generic-password \\
+                   -s \(testKeychainService) -a \(testKeychainAccount) \\
+                   -w "<key>" -U -A
+            See NoTypeTests/Fixtures/README.md for details.
+            """)
+        }
+        // Source is captured here for diagnostic completeness even
+        // though we don't surface it from this gate — the harness's
+        // `apiKey` accessor below returns the same resolution.
+        _ = source
+    }
+
+    /// Resolved API key (env var → Keychain → empty). Trimmed.
+    /// Empty string means no key was found — callers are expected
+    /// to have already gone through `skipIfNotIntegration()` which
+    /// throws `XCTSkip` in that case.
+    static var apiKey: String {
+        resolveAPIKey().key
     }
 
     // MARK: - Fixture loading

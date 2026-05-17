@@ -17,6 +17,78 @@ Every file in `Audio/` MUST be:
 Mismatched format will be rejected by `PromptEvalHarness` at load time
 with a clear error — the harness does not silently resample.
 
+## Setting the API key for the eval suite
+
+The eval tests need a Gemini API key to hit the live API. The harness
+resolves the key from two sources, **in priority order**:
+
+1. `NOTYPE_GEMINI_KEY` environment variable.
+2. macOS Keychain entry: service `app.notype.tests.gemini`,
+   account `default`.
+
+If neither is set, every test in `PromptEvalTests` `XCTSkip`s with the
+setup instructions printed inline.
+
+### Why a dedicated test Keychain entry
+
+The production app's Keychain entry (`app.notype.gemini`) is
+ACL-restricted to the main app's designated requirement
+(`identifier "app.notype"`). The xctest process that loads the test
+bundle has a different identifier, so it can't read the production
+entry without prompting you for your login password every run.
+
+The fix is a separate, test-only Keychain entry with a broad ACL.
+This is a key you're comfortable with any process on your machine
+reading — i.e. a Gemini API key with a low blast radius (revokable,
+rate-limited, no production data behind it).
+
+### One-shot setup (recommended for local dev)
+
+```bash
+# Lead with a space if your zsh has `setopt HIST_IGNORE_SPACE`
+# (default in modern zsh). Otherwise temporarily `unset HISTFILE`
+# before running so the key doesn't land in shell history.
+ security add-generic-password \
+   -s app.notype.tests.gemini \
+   -a default \
+   -w "AIza..." \
+   -U -A
+```
+
+Flag breakdown:
+
+- `-s app.notype.tests.gemini` / `-a default` — service + account
+  the harness looks up (see `PromptEvalHarness.testKeychainService`).
+- `-w "AIza..."` — your Gemini API key. **This is the only place the
+  key appears in plaintext.** Keep this command out of shell history.
+- `-U` — update the entry if it already exists (so re-running this
+  recipe just refreshes the key).
+- `-A` — allow any application to read the entry without prompting.
+  This is the convenience knob; the trade-off is that any process
+  running as your user can read the key without an explicit
+  authorisation dialog. The eval-suite key is intended to be
+  revokable / low-blast-radius — if you keep production-tier
+  secrets here, drop `-A` and accept a one-time prompt.
+
+### One-shot setup (CI / GitHub Actions)
+
+Set `NOTYPE_GEMINI_KEY` as a repository secret and pass it through
+the workflow's `env:` block. The env-var path wins over Keychain, so
+the same harness binary works in both contexts.
+
+### Rotating / removing the key
+
+```bash
+# Update with a new key
+ security add-generic-password -s app.notype.tests.gemini \
+   -a default -w "AIza-new..." -U -A
+
+# Remove entirely
+security delete-generic-password -s app.notype.tests.gemini -a default
+```
+
+---
+
 ## Recording workflow (ElevenLabs → m4a)
 
 1. Generate the take in ElevenLabs (any voice; pick a natural
