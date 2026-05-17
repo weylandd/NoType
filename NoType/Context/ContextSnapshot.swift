@@ -416,7 +416,11 @@ struct InsertionTarget: Sendable, Equatable {
     /// editable field. Insertion-target capture must bail to `.unknown`
     /// for these so we don't ship code/log lines as `Text after cursor`
     /// and let the model "complete" the dictation from that text.
-    private static let knownTerminalBundleIDs: Set<String> = [
+    ///
+    /// Shared with `AXNoiseFilter.isViewportScrollback` (terminal-parent
+    /// gate for tree-walker scrollback drop). Promoted to `internal static`
+    /// so the noise filter can read it without duplicating the bundle id list.
+    static let knownTerminalBundleIDs: Set<String> = [
         "com.apple.Terminal",
         "com.googlecode.iterm2",
         "com.mitchellh.ghostty",
