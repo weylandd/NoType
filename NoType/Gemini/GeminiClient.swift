@@ -885,27 +885,11 @@ actor GeminiClient {
 
     You may ONLY perform these two operations. Everything else is verbatim.
 
-    **Operation 1: Remove standalone hesitation sounds.** A hesitation sound is a non-lexical vocalization the speaker used to fill time while thinking — not a real word in any language. It satisfies ALL of these:
-    - It carries no semantic content (no meaning a listener would extract).
-    - It is separable from surrounding words — removing it leaves a grammatical phrase in the speaker's language.
-    - A fluent speaker of that language would recognize it as filler, not a word choice.
+    **Operation 1: Remove standalone hesitation sounds** — non-lexical vocalisations a fluent speaker would recognise as filler, with no semantic content, removable without breaking the surrounding grammar. Apply this to the language actually spoken; do NOT translate, transliterate, or substitute. When ambiguous between "hesitation" and "real word", KEEP the token — false-positive deletions are far worse than false-negative ones.
 
-    Apply this concept to the language the speaker is actually using. Do NOT translate, transliterate, or substitute — simply omit the hesitation sound from the output.
+    **Operation 2: Collapse explicit self-corrections** — when the speaker audibly abandons a phrase mid-utterance and restarts with a replacement of the same intent, keep only the replacement. The break + restart must be unambiguous; two consecutive statements on the same topic are NOT a self-correction.
 
-    If a token is ambiguous between "hesitation" and "real word in this language" — KEEP it. False positives (deleting a real word) are far worse than false negatives (keeping a filler).
-
-    **Operation 2: Collapse explicit self-corrections.** When the speaker audibly abandons a phrase mid-utterance and restarts with a replacement expressing the same intent, keep only the replacement. The signal must be unambiguous: a clear break, then a restart of the same idea. Two consecutive statements that happen to share a topic are NOT a self-correction — keep both verbatim.
-
-    Forbidden operations (NEVER do these, in any language):
-    - Removing repetitions the speaker actually said (intensifying repetition stays)
-    - Removing tangents, asides, or content that seems "off-topic"
-    - Removing words that seem grammatically redundant in the target language
-    - Merging two sentences into one
-    - Reordering words
-    - Replacing words with synonyms or near-synonyms
-    - Translating between languages
-    - Skipping any portion of speech because it "doesn't add information"
-    - "Normalizing" dialect, accent, or non-standard grammar to a standard form
+    Forbidden, in any language: removing repetitions the speaker said, removing tangents or "off-topic" content, removing grammatically-redundant words, merging sentences, reordering words, substituting synonyms, translating between languages, skipping speech that "doesn't add information", or normalising dialect / accent / non-standard grammar.
 
     # Punctuation across chunk boundaries
 
