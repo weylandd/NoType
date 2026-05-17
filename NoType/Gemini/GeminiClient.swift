@@ -899,24 +899,15 @@ actor GeminiClient {
     - If the current chunk reads as a complete sentence in itself, terminal punctuation is allowed.
     - Chunks are concatenated by the client with no inserted whitespace. If the prior chunk ends with a non-whitespace character and your audio starts a new word, begin your output with a leading space. If a prior chunk ends mid-word (rare — VAD cut inside a word), continue spelling that word without restarting it.
 
-    # Insertion target — your output goes between two fixed pieces of text
+    # Insertion target
 
-    After the session, the client will produce: `<Text before cursor><full session output><Text after cursor>`. Your text must make this concatenation read as one natural piece. Three rules:
+    Your full session output is concatenated between two fixed strings: `<Text before cursor><output><Text after cursor>`. Decide these three rules once at the start of your output — not at each chunk seam inside a batched call:
 
-    **1. Start capitalization.** This rule applies to the FIRST word of your output for this request — whether you're transcribing one chunk or several in a batched call, you decide capitalization once at the very start, not at each chunk seam inside the batched output. If `Text before cursor` is empty, or its last non-whitespace character is `.`, `!`, or `?`, capitalize that first word as a new sentence. Otherwise — including endings like `,`, `:`, `—`, `;`, or no terminal punctuation at all — start in lowercase and continue the existing sentence.
+    1. **Start capitalization.** If `Text before cursor` is empty or ends with `.`, `!`, or `?`, capitalize the first word as a new sentence. Otherwise (ends with `,`, `:`, `;`, `—`, or no terminal punctuation), start in lowercase to continue the existing sentence.
+    2. **Whitespace boundaries.** Leading space iff `Text before cursor` ends with a non-whitespace character (unless audio continues a word mid-syllable). Trailing space iff `Text after cursor` is non-empty and starts non-whitespace. Never duplicate or eat whitespace.
+    3. **End punctuation.** If `Text after cursor` is empty or starts with a capital beginning a new sentence, close naturally with terminal punctuation. If it continues mid-sentence (lowercase / comma / conjunction), prefer a comma or no punctuation — the client may strip a trailing terminal mark.
 
-    **2. Whitespace boundaries.** Do not duplicate or eat whitespace.
-    - If `Text before cursor` is empty or ends with whitespace, do NOT begin your output with a leading space.
-    - If it ends with a non-whitespace character, DO begin your output with a leading space (unless audio clearly continues the same word mid-syllable).
-    - If `Text after cursor` is non-empty and starts with a non-whitespace character, end your final chunk with a trailing space. Otherwise, do not.
-
-    **3. End punctuation.** Match the register and continuation pattern of `Text after cursor`:
-    - If `Text after cursor` is empty, OR its first non-whitespace character is a capital letter starting a new sentence — close with terminal punctuation as you naturally would.
-    - If `Text after cursor` continues mid-sentence (starts with a lowercase word, a conjunction, a comma, or any continuation marker) — prefer ending the final chunk with a comma or no punctuation. The client may strip a trailing terminal mark if needed; do not panic if you emitted one.
-
-    `Text after cursor` is FIXED. Never modify, paraphrase, summarize, repeat, or echo it. Do not include any of its words in your output.
-
-    If `Insertion target` is empty or both `Text before cursor` and `Text after cursor` are empty, treat the session as opening a fresh sentence in an empty field.
+    `Text after cursor` is FIXED — never modify, paraphrase, summarise, repeat, or echo any of its words. If both `Text before cursor` and `Text after cursor` are empty, treat the session as opening a fresh sentence in an empty field.
 
     # Using on-screen context
 
