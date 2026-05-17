@@ -65,6 +65,12 @@ final class AppState {
     @ObservationIgnored fileprivate static let dictionaryEnabledKey = "notype.dictionaryEnabled"
 
     @ObservationIgnored private var hotkeyMonitor: HotkeyMonitor?
+
+    /// Current hotkey binding. Read at init from `UserDefaults` (falls
+    /// back to `.default` = Right Option). `applyHotkeyBinding(_:)` swaps
+    /// in a new binding live — used by the onboarding remap UI and the
+    /// future Settings shortcut picker.
+    @ObservationIgnored private(set) var hotkeyBinding: HotkeyBinding = .load()
     @ObservationIgnored private let permissions: PermissionsViewModel
     @ObservationIgnored private let hud: HUDController
     @ObservationIgnored private let gemini: GeminiClient
@@ -353,24 +359,43 @@ final class AppState {
     private func installHotkeyIfPossible() {
         guard hotkeyMonitor == nil else { return }
         let monitor = HotkeyMonitor(
+            binding:   hotkeyBinding,
             onPress:   { [weak self] in self?.handleHotkeyPress() },
             onRelease: { [weak self] in self?.handleHotkeyRelease() },
             onEscape:  { [weak self] in self?.cancelRecording() }
         )
         if monitor.start() {
             hotkeyMonitor = monitor
-            Self.log.info("hotkey installed")
+            Self.log.info("hotkey installed (\(self.hotkeyBinding.code, privacy: .public))")
         }
     }
 
     private func uninstallHotkey() {
-        guard hotkeyMonitor != nil else { return }
-        // The CGEventTap is already disabled by macOS at this point. We drop
-        // our reference; the underlying CFRunLoop thread parks idle (a few KB
-        // leaked per revoke/grant cycle — fine for the rare case of revoking
-        // permission with the app open).
+        guard let monitor = hotkeyMonitor else { return }
+        // Invalidate the tap + stop the dedicated runloop. Required for
+        // the rebind path — dropping the strong reference alone leaks
+        // the tap because the thread's `guard let self` strongly retains
+        // the monitor across `CFRunLoopRun`. The AX-revoke path also
+        // benefits: prior builds left a stranded runloop per revoke.
+        monitor.stop()
         hotkeyMonitor = nil
-        Self.log.info("hotkey uninstalled (perms revoked)")
+        Self.log.info("hotkey uninstalled")
+    }
+
+    /// Persist a new hotkey binding and reinstall the monitor against it.
+    /// Called by the onboarding shortcut screen's remap UI; safe to call
+    /// from any thread that hops back to `@MainActor`.
+    func applyHotkeyBinding(_ binding: HotkeyBinding) {
+        guard binding.isAllowedAsHotkey else { return }
+        guard binding != hotkeyBinding else { return }
+        hotkeyBinding = binding
+        binding.save()
+        // Re-create the underlying tap so the new binding's detection
+        // path takes effect. The old `HotkeyMonitor` instance is
+        // released; its CFRunLoop thread parks idle (matches the
+        // permissions-revoke path's leak — single-digit KB per swap).
+        uninstallHotkey()
+        installHotkeyIfPossible()
     }
 
     private func handleHotkeyPress() {

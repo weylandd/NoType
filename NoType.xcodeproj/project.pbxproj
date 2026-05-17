@@ -18,6 +18,7 @@
 		1360BAEB0DA44CE8B60A1AF0 /* CategoryResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C1BC42D455578DC7436789D /* CategoryResolverTests.swift */; };
 		17B80FF819A0E9FDF2E1134A /* GeminiClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7C9AEDB2C6A5F32D6870A5A /* GeminiClient.swift */; };
 		18C16507776B81CDFF6C9429 /* ErrorHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CD5FAA39C9FB564C0ACD614 /* ErrorHUD.swift */; };
+		1E45318BC76B3378CFC174ED /* HotkeyBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED9E83013132F9DAF21E4CCC /* HotkeyBinding.swift */; };
 		1F9E6C413FB5AE9A3CF7CE5D /* HotkeyMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F882349365E9F505405CE99 /* HotkeyMonitor.swift */; };
 		2239C947F1842F2E6E44A1EC /* OnboardingFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40FA8D4F920AE01822A1F8E6 /* OnboardingFlow.swift */; };
 		23CBDDE367AA932BBAA5CAA5 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 897BC728F83483F051ECEADD /* AppState.swift */; };
@@ -78,6 +79,7 @@
 		B85C1A349CAC419FD20A92BB /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29E59D400EB0DB210FEB5F20 /* KeychainStore.swift */; };
 		B8623AAD6C4BE923238CB8B4 /* MainWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9EC20BD91A3B32A8DD9E999 /* MainWindow.swift */; };
 		BA2C438913247ECE41086E2E /* OnboardingAPIKeyStep.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6651DC72507AC554BB645253 /* OnboardingAPIKeyStep.swift */; };
+		BD4124E3D7114983400844E5 /* MacKeyboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B799FEAFA7D4E09E9CCCFDD /* MacKeyboardView.swift */; };
 		BDF6F31ECF2CD4BA819CCD0F /* InstructionsContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4615F8E4F5EBCBA33CF0C35 /* InstructionsContext.swift */; };
 		BE4E130977C6AE7B5FC6CE0E /* PCMRingBufferTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DB3A3F97F363A200F24DBC0 /* PCMRingBufferTests.swift */; };
 		BE806FA429DFAA7C38C17128 /* PermissionsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A17B31D07203EABD873911B /* PermissionsViewModel.swift */; };
@@ -155,6 +157,7 @@
 		5316A3D8A94FCDA7D06609F5 /* AXAttr.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AXAttr.swift; sourceTree = "<group>"; };
 		54862A4A6851BE8C40376A68 /* AppIconView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppIconView.swift; sourceTree = "<group>"; };
 		559090DBB8787116AECE31F1 /* OnboardingHotkeyStep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingHotkeyStep.swift; sourceTree = "<group>"; };
+		5B799FEAFA7D4E09E9CCCFDD /* MacKeyboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacKeyboardView.swift; sourceTree = "<group>"; };
 		5BA11A2BBD85A6C70941E788 /* NoTypeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NoTypeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		5F5548FED169CE77A942BF7C /* ChunkBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChunkBuilderTests.swift; sourceTree = "<group>"; };
 		5FBA3BCF9E48D45A2C6CE0C0 /* InstructionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstructionsView.swift; sourceTree = "<group>"; };
@@ -221,6 +224,7 @@
 		E448F328437581126FA7536C /* PauseDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PauseDetector.swift; sourceTree = "<group>"; };
 		E4673F89249010485BAF4990 /* CategoryResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CategoryResolver.swift; sourceTree = "<group>"; };
 		E7C9AEDB2C6A5F32D6870A5A /* GeminiClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeminiClient.swift; sourceTree = "<group>"; };
+		ED9E83013132F9DAF21E4CCC /* HotkeyBinding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotkeyBinding.swift; sourceTree = "<group>"; };
 		EDE9F8818EBC3728E41B239F /* MicInputPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicInputPicker.swift; sourceTree = "<group>"; };
 		EFDC45D6025A918A7D76A25C /* TextInjector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextInjector.swift; sourceTree = "<group>"; };
 		F159E8C235DD94D991FE3771 /* DSComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DSComponents.swift; sourceTree = "<group>"; };
@@ -482,6 +486,7 @@
 		A58FDB4E84735CA34A5D97F1 /* Hotkey */ = {
 			isa = PBXGroup;
 			children = (
+				ED9E83013132F9DAF21E4CCC /* HotkeyBinding.swift */,
 				0F882349365E9F505405CE99 /* HotkeyMonitor.swift */,
 			);
 			path = Hotkey;
@@ -522,6 +527,7 @@
 		FB992EDADC2473DAAC1DACE6 /* Onboarding */ = {
 			isa = PBXGroup;
 			children = (
+				5B799FEAFA7D4E09E9CCCFDD /* MacKeyboardView.swift */,
 				751A53E6D8F45896F2AC04EE /* MicProbe.swift */,
 				67B8A431301F017C3202FC0D /* OnboardingChrome.swift */,
 				40FA8D4F920AE01822A1F8E6 /* OnboardingFlow.swift */,
@@ -665,12 +671,14 @@
 				4B9D03CEC35015E2D2EDE671 /* HistoryRowView.swift in Sources */,
 				27DA80160EA290A51A2D753D /* HistoryStore.swift in Sources */,
 				B044199618E6574685E8DE96 /* HomeView.swift in Sources */,
+				1E45318BC76B3378CFC174ED /* HotkeyBinding.swift in Sources */,
 				1F9E6C413FB5AE9A3CF7CE5D /* HotkeyMonitor.swift in Sources */,
 				BDF6F31ECF2CD4BA819CCD0F /* InstructionsContext.swift in Sources */,
 				C65C0FDD1118938CB2639805 /* InstructionsStore.swift in Sources */,
 				D9608ED683A1DC1A48002077 /* InstructionsView.swift in Sources */,
 				C20FE776EA6AFFE67FC0A189 /* JSONFileStorage.swift in Sources */,
 				B85C1A349CAC419FD20A92BB /* KeychainStore.swift in Sources */,
+				BD4124E3D7114983400844E5 /* MacKeyboardView.swift in Sources */,
 				B8623AAD6C4BE923238CB8B4 /* MainWindow.swift in Sources */,
 				5339AB400685621EF47922FC /* MenuBarIcon.swift in Sources */,
 				087A0F9F82BA4507A8F1BFCB /* MicInputPicker.swift in Sources */,
