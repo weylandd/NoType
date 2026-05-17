@@ -31,14 +31,39 @@ enum AccessibilityTree {
     ]
 
     private static let totalNodeBudget = 5_000
-    private static let perAppNodeBudget = 800
+    /// Modest active-app priority budget (R2). Active app gets ~1.4× the
+    /// non-active per-app cap. The bump is small enough that cross-window
+    /// signal (per ADR-009 — typical signal comes from neighbour windows
+    /// like the Slack sidebar or an open spec doc) is preserved, while
+    /// honouring the user intuition that the app they're typing into
+    /// deserves a slight edge. Earlier draft used 1200/500 (2.4×) which
+    /// over-rotated to active and starved exactly the cross-window case.
+    static let perAppNodeBudgetActive = 1_000
+    static let perAppNodeBudgetNonActive = 700
     private static let perWindowDepth = 6
     private static let perAppTimeout: TimeInterval = 0.1
     private static let maxValueLength = 2_000
 
+    /// Pure helper for `snapshot()`'s per-app budget assignment. Tested
+    /// directly in `AccessibilityTreeTests` — pinning the routing rules.
+    static func budgetForApp(bundleID: String, active activeBundleID: String?) -> Int {
+        guard let activeBundleID, activeBundleID == bundleID else {
+            return perAppNodeBudgetNonActive
+        }
+        return perAppNodeBudgetActive
+    }
+
     /// Captures the on-screen tree. Safe to call from any actor — the work
     /// is done off the caller's isolation domain via a task group.
-    static func snapshot() async -> RedactedAXSnapshot {
+    ///
+    /// `activeBundleID` is the frontmost app's bundle id at session start,
+    /// captured once by `RecordingSession.start` on `@MainActor` and passed
+    /// in as a parameter to eliminate the app-switch race that would arise
+    /// from re-reading `NSWorkspace.frontmostApplication` inside this
+    /// detached task. Pass `nil` (no frontmost app, or our own app was
+    /// frontmost and got filtered) to flatten the budget — every app then
+    /// gets `perAppNodeBudgetNonActive` and the active-first sort is a no-op.
+    static func snapshot(activeBundleID: String?) async -> RedactedAXSnapshot {
         guard AXIsProcessTrusted() else {
             // No Accessibility permission → no tree. Caller (RecordingSession)
             // still records audio; Gemini just gets the active-app hint.
@@ -50,10 +75,16 @@ enum AccessibilityTree {
             return RedactedAXSnapshot(apps: [])
         }
 
-        let dumps = await withTaskGroup(of: RedactedAppDump?.self) { group in
+        var dumps = await withTaskGroup(of: RedactedAppDump?.self) { group in
             for c in candidates {
+                let budget = budgetForApp(bundleID: c.bundleID, active: activeBundleID)
                 group.addTask {
-                    await dumpApp(pid: c.pid, name: c.name, bundleID: c.bundleID)
+                    await dumpApp(
+                        pid: c.pid,
+                        name: c.name,
+                        bundleID: c.bundleID,
+                        nodeBudget: budget
+                    )
                 }
             }
             var collected: [RedactedAppDump] = []
@@ -63,8 +94,20 @@ enum AccessibilityTree {
             return collected
         }
 
-        // Apply the global node budget. Counting uses lines as a proxy for
-        // nodes (one node ~= one line); good enough for capping.
+        // Active-first ordering — stable move-to-front, not a comparator
+        // sort (Swift's `Array.sort` isn't documented stable). Ensures the
+        // active app is never the one truncated when the global cap fires
+        // on a busy machine.
+        if let activeBundleID,
+           let idx = dumps.firstIndex(where: { $0.bundleID == activeBundleID }),
+           idx > 0 {
+            let active = dumps.remove(at: idx)
+            dumps.insert(active, at: 0)
+        }
+
+        // Apply the global rendered-line budget (R10). Counts lines, not
+        // nodes — filtering may reduce lines-per-walked-node, that's the
+        // intended efficiency gain.
         var totalNodes = 0
         var truncated = false
         var capped: [RedactedAppDump] = []
@@ -79,7 +122,7 @@ enum AccessibilityTree {
         }
 
         let result = RedactedAXSnapshot(apps: capped, truncated: truncated)
-        Self.log.info("ax snapshot: \(capped.count) apps, \(totalNodes) nodes, truncated=\(truncated)")
+        Self.log.info("ax snapshot: \(capped.count) apps, \(totalNodes) nodes, active=\(activeBundleID ?? "nil", privacy: .public), truncated=\(truncated)")
         return result
     }
 
@@ -126,10 +169,10 @@ enum AccessibilityTree {
     ///    step and at every window iteration, so the synchronous AX work
     ///    actually short-circuits instead of running to natural
     ///    completion in the background.
-    private static func dumpApp(pid: pid_t, name: String, bundleID: String) async -> RedactedAppDump? {
+    private static func dumpApp(pid: pid_t, name: String, bundleID: String, nodeBudget: Int) async -> RedactedAppDump? {
         await withTaskGroup(of: RedactedAppDump?.self) { group in
             group.addTask {
-                walkApp(pid: pid, name: name, bundleID: bundleID)
+                walkApp(pid: pid, name: name, bundleID: bundleID, nodeBudget: nodeBudget)
             }
             group.addTask {
                 try? await Task.sleep(for: .milliseconds(Int(perAppTimeout * 1000)))
@@ -206,7 +249,7 @@ enum AccessibilityTree {
     /// Synchronous tree walk for one app. Runs inside a task with the
     /// per-app timeout. Polls `Task.isCancelled` between windows so a
     /// fired timeout actually stops the walk, not just hides it.
-    private static func walkApp(pid: pid_t, name: String, bundleID: String) -> RedactedAppDump? {
+    private static func walkApp(pid: pid_t, name: String, bundleID: String, nodeBudget: Int) -> RedactedAppDump? {
         let appElement = AXUIElementCreateApplication(pid)
 
         if Task.isCancelled { return nil }
@@ -215,7 +258,7 @@ enum AccessibilityTree {
             return nil  // backgrounded app with no windows — skip
         }
 
-        var nodesRemaining = perAppNodeBudget
+        var nodesRemaining = nodeBudget
         var windowDumps: [RedactedWindowDump] = []
 
         for window in rawWindows {

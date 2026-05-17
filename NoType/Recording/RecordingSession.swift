@@ -288,10 +288,18 @@ final class RecordingSession {
         // latency budgets.
         let dictionaryEntries = dictionary.activeEntries
         let dictionaryReplacements = dictionary.replacements
+        // Capture `activeBundleID` once on @MainActor (already done above
+        // as `frontmost?.bundleIdentifier`) and pass it into the detached
+        // AX task. Eliminates the app-switch race that would arise from
+        // re-reading `NSWorkspace.frontmostApplication` inside the
+        // detached context. Mirrors the existing rationale on
+        // `InsertionTarget.knownTerminalBundleIDs` (parameter-passed
+        // identity vs round-trip through NSWorkspace).
+        let activeBundleID = frontmost?.bundleIdentifier
         contextTask = Task.detached(priority: .userInitiated) {
             let t0 = Date()
             async let treeOpt: RedactedAXSnapshot? = Self.withDeadline(ms: 1500) {
-                await AccessibilityTree.snapshot()
+                await AccessibilityTree.snapshot(activeBundleID: activeBundleID)
             }
             async let resolvedTarget: InsertionTarget = InsertionTarget.capture()
             async let resolvedOCR: RedactedScreenText? = Self.runOCRIfEnabled(
