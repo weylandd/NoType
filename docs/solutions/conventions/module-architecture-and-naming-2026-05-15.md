@@ -25,7 +25,7 @@ NoType's architecture rests on three coupled choices: SwiftUI's `Observation` fr
 
 SwiftUI views observe `@Observable` view-models via `@Environment(Foo.self)` (or a `let` stored property for non-injected references). Use `@Bindable` locally inside `body` when you need a `Binding` (e.g. `Picker(selection: $vm.mode)`).
 
-Current `@Observable` view-models: `AppState`, `PermissionsViewModel`, `OnboardingState`, `AppearanceController`. The `AudioDeviceManager.shared` singleton is also `@Observable`.
+Current `@Observable` view-models: `AppState`, `PermissionsViewModel`, `OnboardingState`, `AppearanceController`, `UpdateController`. The `AudioDeviceManager.shared` singleton is also `@Observable`.
 
 **Do not introduce new `ObservableObject` / `@Published` view-models.** They're incompatible with `@Environment(_:)` and force callers to mix patterns.
 
