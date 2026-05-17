@@ -12,6 +12,24 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
 
 ---
 
+## [0.1.7] — 2026-05-17
+
+UI polish release. One user-visible change.
+
+### Changed
+- **Main app window is now a fixed 1080×760 size** (#44). Home,
+  Instructions, and Dictionary tabs (plus the first-launch onboarding
+  wizard) live in a rarely-opened utility shell that didn't benefit
+  from a responsive layout. Locking the canvas simplifies the design
+  pass and removes a class of resize-related visual quirks. The lock
+  combines SwiftUI's `.windowResizability(.contentSize)` + explicit
+  min==max frame with an AppKit `NSViewRepresentable` that strips
+  `.resizable` from the underlying `NSWindow.styleMask` and pins
+  `min/maxSize` — the SwiftUI-only path proved unreliable on macOS 15
+  and 26 across Mission Control and display-reconfiguration events.
+
+---
+
 ## [0.1.6] — 2026-05-16
 
 Crash + reliability release. Four user-visible fixes targeting paths
