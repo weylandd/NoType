@@ -22,6 +22,31 @@
     <description>NoType release feed for Sparkle 2 auto-updates.</description>
     <language>en</language>
     <item>
+      <title>Version 0.1.7</title>
+      <pubDate>Sun, 17 May 2026 11:07:46 +0000</pubDate>
+      <sparkle:version>9</sparkle:version>
+      <sparkle:shortVersionString>0.1.7</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+UI polish release. One user-visible change.
+
+### Changed
+- **Main app window is now a fixed 1080×760 size** (#44). Home,
+  Instructions, and Dictionary tabs (plus the first-launch onboarding
+  wizard) live in a rarely-opened utility shell that didn't benefit
+  from a responsive layout. Locking the canvas simplifies the design
+  pass and removes a class of resize-related visual quirks. The lock
+  combines SwiftUI's `.windowResizability(.contentSize)` + explicit
+  min==max frame with an AppKit `NSViewRepresentable` that strips
+  `.resizable` from the underlying `NSWindow.styleMask` and pins
+  `min/maxSize` — the SwiftUI-only path proved unreliable on macOS 15
+  and 26 across Mission Control and display-reconfiguration events.
+      ]]></description>
+      <enclosure url="https://github.com/weylandd/NoType/releases/download/v0.1.7/NoType-0.1.7.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="xRum1SF0AA00EBx5M/+TlX6eZfIw3Qj9wygheaIIpfHP6ET7EAssH/R6w80ygHxKQM/4LVMG3tuem4RG+Jk/CQ==" length="6169557" />
+    </item>
+    <item>
       <title>Version 0.1.6</title>
       <pubDate>Sat, 16 May 2026 15:34:44 +0000</pubDate>
       <sparkle:version>8</sparkle:version>
