@@ -6,19 +6,18 @@ import XCTest
 /// appropriate prompt path and checks the fixture's `mustContain` /
 /// `mustNotContain` / `wordCountFloor` contract.
 ///
-/// **Gated by env vars — runs only when BOTH are set:**
+/// **Gated on API-key presence only.** Tests skip cleanly via
+/// `XCTSkip` when neither `NOTYPE_GEMINI_KEY` env var nor the
+/// `app.notype.tests.gemini` Keychain entry is set. On a dev machine
+/// with the Keychain entry configured (see
+/// `NoTypeTests/Fixtures/README.md`), the suite runs automatically on
+/// every `xcodebuild test`. To opt out for a specific run, pass
+/// `-skip-testing:NoTypeTests/PromptEvalTests`.
 ///
-/// - `NOTYPE_INTEGRATION=1`
-/// - `NOTYPE_GEMINI_KEY=<your key>`
-///
-/// Without those, every test in this file `XCTSkip`s cleanly. The
-/// standard `xcodebuild test` run does not hit the live API.
-///
-/// To run locally:
+/// To run locally (after one-shot Keychain setup):
 ///
 /// ```
-/// NOTYPE_INTEGRATION=1 NOTYPE_GEMINI_KEY=AIza... \
-///   xcodebuild test -project NoType.xcodeproj -scheme NoType \
+/// xcodebuild test -project NoType.xcodeproj -scheme NoType \
 ///   -only-testing:NoTypeTests/PromptEvalTests
 /// ```
 ///
@@ -57,7 +56,7 @@ final class PromptEvalTests: XCTestCase {
     // trims must preserve.
 
     func test_multiSentenceEN_full() async throws {
-        try PromptEvalHarness.skipIfNotIntegration()
+        try PromptEvalHarness.skipIfMissingKey()
         let fx = try PromptEvalHarness.fixture("multi_sentence_en", in: fixtures)
         let res = try await PromptEvalHarness.transcribe(
             fixture: fx,
@@ -70,7 +69,7 @@ final class PromptEvalTests: XCTestCase {
     }
 
     func test_multiSentenceDE_full() async throws {
-        try PromptEvalHarness.skipIfNotIntegration()
+        try PromptEvalHarness.skipIfMissingKey()
         let fx = try PromptEvalHarness.fixture("multi_sentence_de", in: fixtures)
         let res = try await PromptEvalHarness.transcribe(
             fixture: fx,
@@ -83,7 +82,7 @@ final class PromptEvalTests: XCTestCase {
     }
 
     func test_codeSwitchEnEs_full() async throws {
-        try PromptEvalHarness.skipIfNotIntegration()
+        try PromptEvalHarness.skipIfMissingKey()
         let fx = try PromptEvalHarness.fixture("code_switch_en_es", in: fixtures)
         let res = try await PromptEvalHarness.transcribe(
             fixture: fx,
@@ -96,7 +95,7 @@ final class PromptEvalTests: XCTestCase {
     }
 
     func test_singleWordAmbiguous_lite() async throws {
-        try PromptEvalHarness.skipIfNotIntegration()
+        try PromptEvalHarness.skipIfMissingKey()
         let fx = try PromptEvalHarness.fixture("single_word_ambiguous", in: fixtures)
         // 1.49 s — naturally lite.
         let res = try await PromptEvalHarness.transcribe(
@@ -110,7 +109,7 @@ final class PromptEvalTests: XCTestCase {
     }
 
     func test_pleaseSummarizeEN_full() async throws {
-        try PromptEvalHarness.skipIfNotIntegration()
+        try PromptEvalHarness.skipIfMissingKey()
         let fx = try PromptEvalHarness.fixture("please_summarize_en", in: fixtures)
         let res = try await PromptEvalHarness.transcribe(
             fixture: fx,
@@ -123,7 +122,7 @@ final class PromptEvalTests: XCTestCase {
     }
 
     func test_silenceOnly_full() async throws {
-        try PromptEvalHarness.skipIfNotIntegration()
+        try PromptEvalHarness.skipIfMissingKey()
         let fx = try PromptEvalHarness.fixture("silence_only", in: fixtures)
         let res = try await PromptEvalHarness.transcribe(
             fixture: fx,
@@ -139,7 +138,7 @@ final class PromptEvalTests: XCTestCase {
     }
 
     func test_longMonologueEN_full() async throws {
-        try PromptEvalHarness.skipIfNotIntegration()
+        try PromptEvalHarness.skipIfMissingKey()
         let fx = try PromptEvalHarness.fixture("long_monologue_en", in: fixtures)
         let res = try await PromptEvalHarness.transcribe(
             fixture: fx,
@@ -265,7 +264,7 @@ final class PromptEvalTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) async throws {
-        try PromptEvalHarness.skipIfNotIntegration()
+        try PromptEvalHarness.skipIfMissingKey()
         let fx = try PromptEvalHarness.fixture(fixtureID, in: fixtures)
         let res = try await PromptEvalHarness.transcribe(
             fixture: fx,

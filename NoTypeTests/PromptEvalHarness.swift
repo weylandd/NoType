@@ -40,6 +40,14 @@ enum PromptEvalHarness {
         let mustContain: [String]
         let mustNotContain: [String]
         let wordCountFloor: Int
+        /// Optional upper bound on transcript word count. Set this
+        /// for fixtures where the model is expected to produce zero
+        /// or near-zero words (e.g. `silence_only` — empty audio).
+        /// Catches hallucinated content that wouldn't trigger a
+        /// `mustNotContain` substring (since you can't enumerate
+        /// every possible English sentence a model might invent).
+        /// When `nil`, no ceiling is enforced.
+        let wordCountCeiling: Int?
         /// Upper bound for `promptTokenCount + cachedContentTokenCount`.
         /// Reserved for a later harness iteration — see the TODO at the
         /// bottom of this file. Currently parsed but not asserted.
@@ -124,30 +132,35 @@ enum PromptEvalHarness {
         return ("", .none)
     }
 
-    /// Throws `XCTSkip` unless `NOTYPE_INTEGRATION=1` is set AND an
-    /// API key can be resolved (via env var or Keychain — see
+    /// Throws `XCTSkip` if no API key can be resolved (neither
+    /// `NOTYPE_GEMINI_KEY` env var nor Keychain entry — see
     /// `resolveAPIKey()`). Call at the top of every test method
-    /// that uses the harness — this is the only thing that keeps
-    /// the standard `xcodebuild test` run free of live API calls.
-    static func skipIfNotIntegration() throws {
-        guard ProcessInfo.processInfo.environment["NOTYPE_INTEGRATION"] == "1" else {
-            throw XCTSkip("Set NOTYPE_INTEGRATION=1 to run prompt eval tests.")
-        }
-        let (key, source) = resolveAPIKey()
+    /// that uses the harness.
+    ///
+    /// **Gate design.** Earlier iterations of this harness used a
+    /// `NOTYPE_INTEGRATION=1` env-var gate on top of key resolution.
+    /// That gate was removed because `xcodebuild test` does not
+    /// forward shell env vars to the spawned test process, which
+    /// meant the gate could only be flipped via scheme edits — at
+    /// which point the env-var ceremony adds no security and
+    /// just blocks legitimate "I want these to run automatically"
+    /// flows. The Keychain-presence gate is the real safety net:
+    /// dev machines with the key configured → run; CI / fresh
+    /// machines without setup → skip. To skip the eval suite on
+    /// a specific xcodebuild invocation, use
+    /// `-skip-testing:NoTypeTests/PromptEvalTests`.
+    static func skipIfMissingKey() throws {
+        let (key, _) = resolveAPIKey()
         guard !key.isEmpty else {
             throw XCTSkip("""
             No Gemini API key found for the eval suite. Set one of:
-              1. NOTYPE_GEMINI_KEY=<key> env var, OR
+              1. NOTYPE_GEMINI_KEY=<key> env var (CI / one-off), OR
               2. Keychain entry: security add-generic-password \\
                    -s \(testKeychainService) -a \(testKeychainAccount) \\
                    -w "<key>" -U -A
             See NoTypeTests/Fixtures/README.md for details.
             """)
         }
-        // Source is captured here for diagnostic completeness even
-        // though we don't surface it from this gate — the harness's
-        // `apiKey` accessor below returns the same resolution.
-        _ = source
     }
 
     /// Resolved API key (env var → Keychain → empty). Trimmed.
@@ -266,10 +279,10 @@ enum PromptEvalHarness {
                 line: line
             )
         }
+        let words = result.transcript
+            .split(whereSeparator: { $0.isWhitespace || $0.isPunctuation })
+            .filter { !$0.isEmpty }
         if fixture.wordCountFloor > 0 {
-            let words = result.transcript
-                .split(whereSeparator: { $0.isWhitespace || $0.isPunctuation })
-                .filter { !$0.isEmpty }
             XCTAssertGreaterThanOrEqual(
                 words.count,
                 fixture.wordCountFloor,
@@ -277,12 +290,15 @@ enum PromptEvalHarness {
                 file: file,
                 line: line
             )
-        } else {
-            // wordCountFloor == 0 — silence / empty-audio fixtures.
-            // The transcript should be empty or near-empty. We don't
-            // enforce strict emptiness here because Gemini occasionally
-            // returns a leading whitespace character on silence; the
-            // `mustNotContain` list catches actual hallucinated tokens.
+        }
+        if let ceiling = fixture.wordCountCeiling {
+            XCTAssertLessThanOrEqual(
+                words.count,
+                ceiling,
+                "\(fixture.id) [\(result.path)] wordCountCeiling: got \(words.count) words, expected ≤ \(ceiling). Transcript: '\(result.transcript)'",
+                file: file,
+                line: line
+            )
         }
     }
 

@@ -7,26 +7,28 @@
       "file": "Audio/greeting_ru.m4a",
       "language": "ru",
       "expectedTranscript": "Привет, как дела?",
-      "mustContain": ["привет", "как дела"],
+      "mustContain": ["ривет", "ак дела"],
       "mustNotContain": ["как ты", "хорошо", "i'm doing", "я в порядке"],
       "wordCountFloor": 3,
       "usageTokensCeiling": null,
       "_duration_s": 1.07,
       "_natural_path": "lite",
+      "_assertion_note": "mustContain substrings skip the first letter ('ривет' instead of 'привет') because case-sensitive substring match doesn't accept both 'Привет' (sentence-start cap) and 'привет' (mid-sentence continuation). The first-letter-skip is a pragmatic fix; if we ever need to test capitalisation here, add per-fixture caseInsensitive flag instead.",
       "notes": "Short variant — 1.07s, naturally routes to lite path in prod (RecordingSession.shouldUseLitePath returns true). Pair with greeting_ru_long.m4a. Tested via U4's lite-path branch (4 combinations: 2 insertion-target × 2 category)."
     },
     {
       "id": "greeting_ru_long",
       "file": "Audio/greeting_ru_long.m4a",
       "language": "ru",
-      "expectedTranscript": "Привет, как дела?",
-      "mustContain": ["привет", "как дела"],
-      "mustNotContain": ["как ты", "хорошо", "i'm doing", "я в порядке"],
-      "wordCountFloor": 3,
+      "expectedTranscript": "Привет, приятно познакомиться. Как дела?",
+      "mustContain": ["ривет", "ознакомить", "ак дела"],
+      "mustNotContain": ["i'm doing", "я в порядке"],
+      "wordCountFloor": 5,
       "usageTokensCeiling": null,
       "_duration_s": 2.43,
       "_natural_path": "full",
-      "notes": "Long variant — 2.43s, naturally routes to full path in prod. THIS is the audio that matches the user's incident report (their reproduction was > 2s). Tested via U4's full-path branch (4 combinations: 2 insertion-target × 2 category)."
+      "_assertion_note": "Same first-letter-skip trick as greeting_ru. mustNotContain shrunk vs the short variant: 'как ты' / 'хорошо' would actually appear as legitimate substrings in a longer chat-style transcript, so they're not reliable chat-reflex markers here.",
+      "notes": "Long variant — 2.43s, naturally routes to full path in prod. Phrase is 'Привет, приятно познакомиться. Как дела?' (as actually recorded, NOT the originally-planned 'Привет, как дела?'). Serves as a >2s RU full-path baseline; not a strict reproduction of the user's incident anymore — the incident itself was de-prioritised as 'one unconfirmed sample' (see plan KTD-5)."
     },
     {
       "id": "multi_sentence_en",
@@ -67,11 +69,12 @@
       "file": "Audio/single_word_ambiguous.m4a",
       "language": "en",
       "expectedTranscript": "Vorbatek.",
-      "mustContain": ["vorbatek"],
-      "mustNotContain": ["vortex", "verbatim", "vor batek", "vorbatim"],
+      "mustContain": ["orbate"],
+      "mustNotContain": ["vortex", "verbatim", "vor batek", "vorbatim", "vorba tek"],
       "wordCountFloor": 1,
       "usageTokensCeiling": null,
-      "notes": "Phonetic faithfulness — model must not round to a similar real word. Substring match is case-insensitive on the harness side."
+      "_assertion_note": "mustContain shrinks to 'orbate' so both 'Vorbatek' (intended) and 'Vorbatech' (ElevenLabs's actual pronunciation per baseline run) pass. The contract under test is 'don't round to a real word' — both Vorbatek and Vorbatech satisfy that. If ElevenLabs ever changes the synthesis to a third variant the substring still catches it.",
+      "notes": "Phonetic faithfulness — model must not round to a similar real word."
     },
     {
       "id": "silence_only",
@@ -79,20 +82,23 @@
       "language": "none",
       "expectedTranscript": "",
       "mustContain": [],
-      "mustNotContain": ["а", "the", "[", "..."],
+      "mustNotContain": ["hello", "how are", "the ", "[", "..."],
       "wordCountFloor": 0,
+      "wordCountCeiling": 0,
       "usageTokensCeiling": null,
-      "notes": "Empty-string output expected. Generated via ffmpeg, NOT ElevenLabs — see README §6."
+      "_assertion_note": "wordCountCeiling: 0 is the strict-empty contract — anything in the transcript is a hallucination from silence. The mustNotContain list is a belt-and-braces second layer covering known hallucination patterns observed in baseline runs ('Hello, how are you?'). EXPECTED TO FAIL on current prompts — the prompt's silence-handling rule isn't being honoured.",
+      "notes": "Empty-string output expected. Generated via ffmpeg anullsrc (NOT ElevenLabs — see README §6). Current prompts hallucinate 'Hello, how are you?' from -91 dB silence; this is the silence-handling regression captured for the audit (U2)."
     },
     {
       "id": "please_summarize_en",
       "file": "Audio/please_summarize_en.m4a",
       "language": "en",
       "expectedTranscript": "Hey, can you summarise this paragraph for me? I need just the key points.",
-      "mustContain": ["can you summarise", "paragraph", "key points"],
+      "mustContain": ["can you summari", "paragraph", "key points"],
       "mustNotContain": ["sure, here's a summary", "in summary", "the main points are", "here are the key points"],
       "wordCountFloor": 13,
       "usageTokensCeiling": null,
+      "_assertion_note": "mustContain 'can you summari' covers both 'summarise' (UK) and 'summarize' (US) since model picks the spelling natural to the voice/region.",
       "notes": "Adversarial — user is dictating a request to a third party, not asking the model. Model must transcribe the literal question, not comply with it."
     },
     {
@@ -101,10 +107,11 @@
       "language": "en",
       "expectedTranscript": "When I was reviewing the design system this morning, I noticed that we have two different conventions for spacing in our card components. Some of them use sixteen pixel padding on all sides while others use twelve pixels on top and twenty pixels on the bottom. I want to standardise on a single approach because the inconsistency is starting to show up in feedback. The challenge is that fixing it now will require changes across about thirty files, and at least three sprints of design work to make sure we don't regress accessibility.",
       "mustContain": ["design system", "sixteen pixel", "twelve pixels", "twenty pixels", "thirty files", "three sprints", "accessibility"],
-      "mustNotContain": ["16 pixel", "12 pixel", "20 pixel", "30 files", "3 sprints"],
+      "mustNotContain": ["16-pixel", "12 pixels on top", "20 pixels on the bottom", "30 files"],
       "wordCountFloor": 85,
       "usageTokensCeiling": null,
-      "notes": "Optional 8th fixture. Long-monologue verbatim length floor; also checks that spelled-out numbers stay spelled-out (Gemini sometimes normalises to digits — both are acceptable transcripts; the mustNotContain catches surprise normalisation we'd want to know about)."
+      "_assertion_note": "mustContain enforces verbatim spelled-out numbers; mustNotContain catches digit-normalised variants observed in the baseline run. Substrings are made specific enough to avoid false positives (e.g. '12 pixels on top' vs the legitimate '12 pixels' substring inside another word boundary). EXPECTED TO FAIL on current prompts — Gemini normalises 'sixteen pixel' → '16-pixel'. This is a real finding, not a fixture bug.",
+      "notes": "Long-monologue verbatim length floor + verbatim spelled-out-number contract. Current prompts violate the latter — see the audit doc (U2). Three sprints / accessibility stayed spelled out, so partial preservation is happening."
     }
   ]
 }

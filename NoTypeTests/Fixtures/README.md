@@ -22,12 +22,29 @@ with a clear error — the harness does not silently resample.
 The eval tests need a Gemini API key to hit the live API. The harness
 resolves the key from two sources, **in priority order**:
 
-1. `NOTYPE_GEMINI_KEY` environment variable.
+1. `NOTYPE_GEMINI_KEY` environment variable (CI, one-off override).
 2. macOS Keychain entry: service `app.notype.tests.gemini`,
    account `default`.
 
-If neither is set, every test in `PromptEvalTests` `XCTSkip`s with the
-setup instructions printed inline.
+If neither is set, every test in `PromptEvalTests` `XCTSkip`s with
+the setup instructions printed inline.
+
+### Gate design — why no `NOTYPE_INTEGRATION=1` env var
+
+`xcodebuild test` does not forward shell env vars to the spawned
+test process. An earlier iteration of this harness used a
+`NOTYPE_INTEGRATION=1` gate on top of the key check — which meant
+the gate could only be flipped via scheme edits in `project.yml`,
+adding ceremony without security. The Keychain-presence gate is
+the real safety net:
+
+- **Dev machine with Keychain entry configured** → eval runs on
+  every `xcodebuild test`. Cost is ~$0.30 per full 15-test run on
+  Gemini 3.1 Flash-Lite; that's the price of automatic regression
+  coverage.
+- **CI / fresh machine without setup** → eval skips automatically.
+- **Want to skip on a specific run?** Pass
+  `-skip-testing:NoTypeTests/PromptEvalTests` to xcodebuild.
 
 ### Why a dedicated test Keychain entry
 
