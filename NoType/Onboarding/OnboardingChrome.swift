@@ -26,16 +26,35 @@ struct OnboardingChrome<Body: View, Footer: View>: View {
     var body: some View {
         VStack(spacing: 0) {
             topBar
-            Spacer(minLength: 0)
-            content()
-                .frame(maxWidth: contentMaxWidth)
-                .padding(.horizontal, DS.Space.s8)
-                .padding(.vertical, DS.Space.s7)
-                .frame(maxWidth: .infinity)
-            Spacer(minLength: 0)
+            // ViewThatFits picks the centered variant when the window
+            // has enough vertical room (the common case), and falls
+            // back to a ScrollView when content would otherwise clip
+            // below the fold — important on 13" MacBooks where the
+            // permissions step's stack of cards can push the Continue
+            // button past the window edge.
+            ViewThatFits(in: .vertical) {
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    contentColumn
+                    Spacer(minLength: 0)
+                }
+                ScrollView {
+                    contentColumn
+                }
+            }
             footerBar
         }
         .background(DS.Color.bgBase.ignoresSafeArea())
+    }
+
+    /// The step body, centered and inset. Extracted so both the
+    /// `ViewThatFits` branches above can share the same layout.
+    private var contentColumn: some View {
+        content()
+            .frame(maxWidth: contentMaxWidth)
+            .padding(.horizontal, DS.Space.s8)
+            .padding(.vertical, DS.Space.s7)
+            .frame(maxWidth: .infinity)
     }
 
     private var topBar: some View {
