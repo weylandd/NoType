@@ -108,8 +108,8 @@ struct NoTypeApp: App {
                 .task { updates.start() }
         }
         .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentMinSize)
-        .defaultSize(width: 1180, height: 820)
+        .windowResizability(.contentSize)
+        .defaultSize(width: 1080, height: 760)
         .defaultLaunchBehavior(
             OnboardingState.hasCompletedOnboarding ? .automatic : .presented
         )

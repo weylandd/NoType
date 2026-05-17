@@ -55,8 +55,17 @@ struct MainWindowView: View {
                 }
             }
         }
-        .frame(minWidth: 880, minHeight: 600)
+        // Both axes pinned (min == max). `.windowResizability(.contentSize)`
+        // on the scene only locks the window when the content reports
+        // identical min and max bounds — `.frame(width:height:)` alone is
+        // treated as an "ideal" hint and lets AppKit make the window
+        // resizable. See Apple Developer Forums thread 708177.
+        .frame(
+            minWidth: 1080, maxWidth: 1080,
+            minHeight: 760, maxHeight: 760
+        )
         .background(DS.Color.bgBase.ignoresSafeArea())
+        .background(FixedSizeWindowConfigurator(size: NSSize(width: 1080, height: 760)))
         .onAppear {
             NSApp.setActivationPolicy(.regular)
             NSApp.activate(ignoringOtherApps: true)
@@ -159,6 +168,70 @@ struct MainWindowView: View {
                 DictionaryView()
             }
         }
+    }
+}
+
+// MARK: - Fixed-size window configurator
+//
+// `.windowResizability(.contentSize)` + `.frame(width:height:)` on the
+// content is *meant* to lock the window, but in practice SwiftUI on
+// macOS 15/26 still forwards a `.resizable` style mask to AppKit, so
+// the user can drag the edges. We attach this helper as a background
+// view, walk up to the hosting NSWindow on appear, drop the resizable
+// bit, and pin `minSize == maxSize`. The window cannot grow or shrink
+// after this — exactly what we want for a rarely-opened utility shell.
+
+private struct FixedSizeWindowConfigurator: NSViewRepresentable {
+    let size: NSSize
+
+    func makeNSView(context: Context) -> NSView {
+        // `NSView.window` is nil at `makeNSView` time and stays nil
+        // until AppKit attaches the view to a window — a deferred
+        // `DispatchQueue.main.async` runs too early on the first beat
+        // for newly-created windows. We override `viewDidMoveToWindow`
+        // so the lock fires exactly when AppKit hands us a window.
+        WindowAwareView(targetSize: size)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        // Idempotent re-application — SwiftUI may rebuild the view
+        // hierarchy after onboarding finishes (the wizard branch swaps
+        // for the sidebar+pane branch) and we want the lock to survive.
+        guard let window = nsView.window else { return }
+        Self.lock(window: window, to: size)
+    }
+
+    fileprivate static func lock(window: NSWindow, to size: NSSize) {
+        window.styleMask.remove(.resizable)
+        window.minSize = size
+        window.maxSize = size
+        if window.frame.size != size {
+            var frame = window.frame
+            // AppKit origin is bottom-left; preserve top-left anchor.
+            let dy = frame.size.height - size.height
+            frame.size = size
+            frame.origin.y += dy
+            window.setFrame(frame, display: true)
+        }
+    }
+}
+
+private final class WindowAwareView: NSView {
+    private let targetSize: NSSize
+
+    init(targetSize: NSSize) {
+        self.targetSize = targetSize
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("WindowAwareView is created in code only.")
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let window else { return }
+        FixedSizeWindowConfigurator.lock(window: window, to: targetSize)
     }
 }
 
