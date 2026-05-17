@@ -1,0 +1,110 @@
+{
+  "_comment": "Metadata for prompt-eval audio fixtures. Schema documented in NoTypeTests/Fixtures/README.md. Values here are populated by the maintainer after recording — empty strings / nulls mark fields that still need to be set when the audio lands.",
+  "_schema_version": 1,
+  "fixtures": [
+    {
+      "id": "greeting_ru",
+      "file": "Audio/greeting_ru.m4a",
+      "language": "ru",
+      "expectedTranscript": "Привет, как дела?",
+      "mustContain": ["привет", "как дела"],
+      "mustNotContain": ["как ты", "хорошо", "i'm doing", "я в порядке"],
+      "wordCountFloor": 3,
+      "usageTokensCeiling": null,
+      "_duration_s": 1.07,
+      "_natural_path": "lite",
+      "notes": "Short variant — 1.07s, naturally routes to lite path in prod (RecordingSession.shouldUseLitePath returns true). Pair with greeting_ru_long.m4a. Tested via U4's lite-path branch (4 combinations: 2 insertion-target × 2 category)."
+    },
+    {
+      "id": "greeting_ru_long",
+      "file": "Audio/greeting_ru_long.m4a",
+      "language": "ru",
+      "expectedTranscript": "Привет, как дела?",
+      "mustContain": ["привет", "как дела"],
+      "mustNotContain": ["как ты", "хорошо", "i'm doing", "я в порядке"],
+      "wordCountFloor": 3,
+      "usageTokensCeiling": null,
+      "_duration_s": 2.43,
+      "_natural_path": "full",
+      "notes": "Long variant — 2.43s, naturally routes to full path in prod. THIS is the audio that matches the user's incident report (their reproduction was > 2s). Tested via U4's full-path branch (4 combinations: 2 insertion-target × 2 category)."
+    },
+    {
+      "id": "multi_sentence_en",
+      "file": "Audio/multi_sentence_en.m4a",
+      "language": "en",
+      "expectedTranscript": "I just finished reviewing the document. The structure looks solid, but a few sections need rewriting. I want to focus on the introduction first.",
+      "mustContain": ["finished reviewing", "structure looks solid", "need rewriting", "introduction first"],
+      "mustNotContain": [],
+      "wordCountFloor": 24,
+      "usageTokensCeiling": null,
+      "notes": "Verbatim length-floor coverage. Tightens U2 audit on the # Cleanup — strict whitelist section."
+    },
+    {
+      "id": "multi_sentence_de",
+      "file": "Audio/multi_sentence_de.m4a",
+      "language": "de",
+      "expectedTranscript": "Ich habe heute Morgen das Dokument durchgelesen. Die Struktur sieht solide aus, aber einige Abschnitte müssen überarbeitet werden. Ich möchte mich zuerst auf die Einleitung konzentrieren.",
+      "mustContain": ["Morgen", "Dokument", "durchgelesen", "Struktur", "Abschnitte", "überarbeitet", "Einleitung", "konzentrieren"],
+      "mustNotContain": ["morgen ", "dokument", "struktur ", "abschnitte ", "einleitung"],
+      "wordCountFloor": 23,
+      "usageTokensCeiling": null,
+      "_assertion_note": "mustContain is case-sensitive substring; the capitalised nouns enforce the verbatim-not-normalised contract. mustNotContain lists explicit lowercase variants (with trailing space so we don't false-match the lowercase suffix inside the correctly-capitalised word).",
+      "notes": "German noun-capitalisation contract. Also exercises the verbatim length floor on a non-English Latin script. Overlaps with DictionaryHarvester.nounCapitalizingLanguages carve-out."
+    },
+    {
+      "id": "code_switch_en_es",
+      "file": "Audio/code_switch_en_es.m4a",
+      "language": "es+en",
+      "expectedTranscript": "Vamos a revisar este pull request. Ya miré los cambios y creo que tenemos que mover la state machine a un actor separado.",
+      "mustContain": ["revisar", "pull request", "miré", "cambios", "state machine", "actor", "separado"],
+      "mustNotContain": ["solicitud", "máquina de estados", "agente separado", "solicitud de extracción"],
+      "wordCountFloor": 18,
+      "usageTokensCeiling": null,
+      "notes": "Spanish + English code-switch. Common pattern for Spanish-speaking dev users keeping technical terms in English. Any translation to Spanish equivalents (solicitud, máquina de estados, agente) is a regression."
+    },
+    {
+      "id": "single_word_ambiguous",
+      "file": "Audio/single_word_ambiguous.m4a",
+      "language": "en",
+      "expectedTranscript": "Vorbatek.",
+      "mustContain": ["vorbatek"],
+      "mustNotContain": ["vortex", "verbatim", "vor batek", "vorbatim"],
+      "wordCountFloor": 1,
+      "usageTokensCeiling": null,
+      "notes": "Phonetic faithfulness — model must not round to a similar real word. Substring match is case-insensitive on the harness side."
+    },
+    {
+      "id": "silence_only",
+      "file": "Audio/silence_only.m4a",
+      "language": "none",
+      "expectedTranscript": "",
+      "mustContain": [],
+      "mustNotContain": ["а", "the", "[", "..."],
+      "wordCountFloor": 0,
+      "usageTokensCeiling": null,
+      "notes": "Empty-string output expected. Generated via ffmpeg, NOT ElevenLabs — see README §6."
+    },
+    {
+      "id": "please_summarize_en",
+      "file": "Audio/please_summarize_en.m4a",
+      "language": "en",
+      "expectedTranscript": "Hey, can you summarise this paragraph for me? I need just the key points.",
+      "mustContain": ["can you summarise", "paragraph", "key points"],
+      "mustNotContain": ["sure, here's a summary", "in summary", "the main points are", "here are the key points"],
+      "wordCountFloor": 13,
+      "usageTokensCeiling": null,
+      "notes": "Adversarial — user is dictating a request to a third party, not asking the model. Model must transcribe the literal question, not comply with it."
+    },
+    {
+      "id": "long_monologue_en",
+      "file": "Audio/long_monologue_en.m4a",
+      "language": "en",
+      "expectedTranscript": "When I was reviewing the design system this morning, I noticed that we have two different conventions for spacing in our card components. Some of them use sixteen pixel padding on all sides while others use twelve pixels on top and twenty pixels on the bottom. I want to standardise on a single approach because the inconsistency is starting to show up in feedback. The challenge is that fixing it now will require changes across about thirty files, and at least three sprints of design work to make sure we don't regress accessibility.",
+      "mustContain": ["design system", "sixteen pixel", "twelve pixels", "twenty pixels", "thirty files", "three sprints", "accessibility"],
+      "mustNotContain": ["16 pixel", "12 pixel", "20 pixel", "30 files", "3 sprints"],
+      "wordCountFloor": 85,
+      "usageTokensCeiling": null,
+      "notes": "Optional 8th fixture. Long-monologue verbatim length floor; also checks that spelled-out numbers stay spelled-out (Gemini sometimes normalises to digits — both are acceptable transcripts; the mustNotContain catches surprise normalisation we'd want to know about)."
+    }
+  ]
+}
