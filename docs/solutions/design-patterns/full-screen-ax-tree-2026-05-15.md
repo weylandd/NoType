@@ -26,7 +26,7 @@ The walked tree is what disambiguates proper nouns / jargon during transcription
 
 ## Guidance
 
-**Walk the AX tree of all on-screen windows**, not just the focused one. Implementation lives in `NoType/Context/AccessibilityTree.swift`, walked in parallel via `withTaskGroup` with a per-app 100 ms wall-clock cap and a 5000-node global budget.
+**Walk the AX tree of all on-screen windows**, not just the focused one. Implementation lives in `NoType/Context/AccessibilityTree.swift`, walked in parallel via `withTaskGroup` with a per-app 100 ms wall-clock cap, a per-app rendered-lines budget that gives modest priority to the active app (**1000 lines active / 700 non-active**, ~1.4× ratio), and a 5000-line global budget. `applyGlobalCap` moves the active app to the front before truncating so it survives on a busy machine. The earlier draft used a 1200/500 split (2.4×); it over-rotated to active and starved the cross-window case below.
 
 ## Why This Matters
 
@@ -40,7 +40,7 @@ For natural-language dictation (the whole point of NoType), these cross-window s
 
 ## When to Apply
 
-- Every session. The contextTask runs once on press and stays bounded by the 5000-node global budget.
+- Every session. The contextTask runs once on press and stays bounded by the 5000-line global budget plus the per-app 1000/700 split.
 - Reconsider if: payload size pushes us past Gemini's input-token budget for high-density sessions, OR users report a security incident traceable to cross-window leakage. Both are mitigatable inside the current shape (tighten the budget; harden `SecureFieldMasker`) — full-screen → focused-only would be the last resort.
 
 ## Examples
