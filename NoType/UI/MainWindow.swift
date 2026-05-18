@@ -11,13 +11,12 @@ enum MainWindowMetrics {
     static let canvasSize = NSSize(width: 1080, height: 760)
 }
 
-/// Tabs available in the main window's left navigation. Only `home`
-/// exists today; the enum is structured so future tabs (settings,
-/// activity, etc.) can be added without touching the layout code.
+/// Tabs available in the main window's left navigation.
 enum MainTab: String, CaseIterable, Identifiable {
     case home
     case instructions
     case dictionary
+    case settings
 
     var id: String { rawValue }
 
@@ -26,6 +25,7 @@ enum MainTab: String, CaseIterable, Identifiable {
         case .home:         return "Home"
         case .instructions: return "Instructions"
         case .dictionary:   return "Dictionary"
+        case .settings:     return "Settings"
         }
     }
 
@@ -34,7 +34,30 @@ enum MainTab: String, CaseIterable, Identifiable {
         case .home:         return .home
         case .instructions: return .edit
         case .dictionary:   return .bookmark
+        case .settings:     return .settings
         }
+    }
+
+    /// Pure-function consumer for the cross-window
+    /// `pendingTabSelection` flag (popover gear → main window
+    /// navigation). Reads + clears the pending tab atomically and
+    /// returns the new effective `selectedTab` value. Used by
+    /// `MainWindowView` in both `.onAppear` and `scenePhase ==
+    /// .active`; extracted so it can be tested in isolation without
+    /// standing up a `Window` scene.
+    ///
+    /// Clear-first-apply-second order is load-bearing per plan §270 —
+    /// guards against a stale flag (set hours ago) hijacking an
+    /// unrelated window-open trigger (e.g. Sparkle banner click).
+    /// Even if `pending` is non-nil here we still clear it; the
+    /// caller can decide whether to apply.
+    static func consumePendingSelection(
+        pending: inout MainTab?,
+        current: MainTab
+    ) -> MainTab {
+        let captured = pending
+        pending = nil
+        return captured ?? current
     }
 }
 
@@ -49,6 +72,7 @@ struct MainWindowView: View {
     @Environment(PermissionsViewModel.self) private var permissions
     @Environment(AppearanceController.self) private var appearance
     @Environment(OnboardingState.self)      private var onboarding
+    @Environment(\.scenePhase)              private var scenePhase
 
     @State private var selectedTab: MainTab = .home
 
@@ -178,8 +202,40 @@ struct MainWindowView: View {
                 InstructionsView()
             case .dictionary:
                 DictionaryView()
+            case .settings:
+                SettingsTabView()
             }
         }
+        // Consume cross-window tab navigation requests (popover gear → Settings).
+        // Unconditional clear-then-apply per plan §270 — prevents a stale flag
+        // (set hours ago) from hijacking an unrelated window-open trigger:
+        //   1. snapshot pending
+        //   2. clear it (atomic w/ read)
+        //   3. apply if non-nil
+        // Three triggers, belt-and-braces:
+        //   - `.onAppear` — window first becomes visible (popover gear when
+        //     main window was hidden).
+        //   - `.onChange(of: scenePhase)` — window re-focused after popover
+        //     blur (popover gear when main window was already visible but
+        //     unfocused; macOS popovers normally blur the main window).
+        //   - `.onChange(of: pendingTabSelection)` — direct watcher for the
+        //     edge case where main window is already visible AND focused
+        //     when `openSettings()` fires (no scenePhase transition, but
+        //     the flag write itself is observable).
+        .onAppear { consumePendingTabSelection() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { consumePendingTabSelection() }
+        }
+        .onChange(of: appState.pendingTabSelection) { _, new in
+            if new != nil { consumePendingTabSelection() }
+        }
+    }
+
+    private func consumePendingTabSelection() {
+        selectedTab = MainTab.consumePendingSelection(
+            pending: &appState.pendingTabSelection,
+            current: selectedTab
+        )
     }
 }
 

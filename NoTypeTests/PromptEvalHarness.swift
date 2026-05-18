@@ -335,9 +335,10 @@ extension PromptEvalHarness {
 
     /// Default-shape `ContextSnapshot` — uncategorized app, empty
     /// user / category instructions, empty dictionary, empty
-    /// insertion target. Use this as the "neutral context" baseline
-    /// for fixtures that don't specifically test context interactions.
-    static func neutralContext() -> ContextSnapshot {
+    /// insertion target, empty user-languages. Use this as the
+    /// "neutral context" baseline for fixtures that don't
+    /// specifically test context interactions.
+    static func neutralContext(userLanguages: [String] = []) -> ContextSnapshot {
         ContextSnapshot(
             activeApp: AppInfo(name: "TestApp", bundleID: "app.notype.test.generic"),
             category: .uncategorized,
@@ -345,6 +346,7 @@ extension PromptEvalHarness {
             categoryInstruction: nil,
             dictionary: [],
             replacements: [],
+            userLanguages: userLanguages,
             tree: RedactedAXSnapshot(apps: []),
             insertionTarget: InsertionTarget(textBefore: "", textAfter: ""),
             screenText: nil
@@ -359,7 +361,8 @@ extension PromptEvalHarness {
         appName: String = "Telegram",
         bundle: String = "ru.keepcoder.Telegram",
         textBefore: String = "",
-        textAfter: String = ""
+        textAfter: String = "",
+        userLanguages: [String] = []
     ) -> ContextSnapshot {
         ContextSnapshot(
             activeApp: AppInfo(name: appName, bundleID: bundle),
@@ -368,6 +371,7 @@ extension PromptEvalHarness {
             categoryInstruction: AppCategory.messaging.defaultPrompt,
             dictionary: [],
             replacements: [],
+            userLanguages: userLanguages,
             tree: RedactedAXSnapshot(apps: []),
             insertionTarget: InsertionTarget(textBefore: textBefore, textAfter: textAfter),
             screenText: nil
@@ -381,7 +385,8 @@ extension PromptEvalHarness {
         appName: String = "TestApp",
         bundle: String = "app.notype.test.generic",
         textBefore: String = "",
-        textAfter: String = ""
+        textAfter: String = "",
+        userLanguages: [String] = []
     ) -> ContextSnapshot {
         ContextSnapshot(
             activeApp: AppInfo(name: appName, bundleID: bundle),
@@ -390,6 +395,7 @@ extension PromptEvalHarness {
             categoryInstruction: category == .uncategorized ? nil : category.defaultPrompt,
             dictionary: [],
             replacements: [],
+            userLanguages: userLanguages,
             tree: RedactedAXSnapshot(apps: []),
             insertionTarget: InsertionTarget(textBefore: textBefore, textAfter: textAfter),
             screenText: nil

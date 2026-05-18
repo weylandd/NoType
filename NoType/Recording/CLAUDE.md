@@ -69,6 +69,19 @@ Mid-session batches `await contextTask.value` fully — the user is clearly spea
 
 Three sibling tasks run in the context phase: `AccessibilityTree.snapshot()`, `InsertionTarget.capture()`, `ScreenCaptureContext.capture(...)` (only when Screen Recording permission is granted). Each under its own wall-clock cap; partial results survive. See `NoType/Context/CLAUDE.md` "Deadline contract".
 
+## SleepAssertion integration
+
+`AppState` owns a single `activeSleepAssertion: SleepAssertion?` (`@MainActor`-isolated, `final class` RAII wrapper around `IOPMAssertionCreateWithName`). Acquisition is gated by the `notype.preventSleepDuringRecording` toggle.
+
+- **Acquire** — `AppState.handleHotkeyPress` calls `acquireSleepAssertionIfNeeded()` after a successful `session.start()`. No-op when the toggle is off OR when an assertion already exists.
+- **Release** — `AppState.releaseSleepAssertion()` is wired into the three terminal session-end paths inside `finalizeRecording`/`cancelRecording`:
+  1. `finalizeRecording` success arm (after paste).
+  2. `finalizeRecording` catch arm (terminal error from `RecordingSession.stop()`).
+  3. `cancelRecording` (Esc / cancel binding / HUD close).
+- **Recoverable failures do NOT release** — partial-recovery flows (chunk markers, split-retry) keep the session alive, so the assertion survives until a terminal end path fires. The `CancellationError` catch arm of `finalizeRecording` deliberately doesn't double-release: `cancelRecording` already did it synchronously.
+
+The class is `final` for the deinit safety net only — `IOPMAssertionRelease` runs via `deinit` if the explicit `release()` was skipped (programmer mistake; the production paths always call `release()` first). Ownership lives on `AppState` rather than on the `RecordingSession` value type to avoid double-release if a session copy gets dropped during partial recovery — plan §304 / §314.
+
 ## Testing
 
 - `NoTypeTests/PauseDetectorTests.swift` — state-machine fixtures (synthetic VAD probability sequences, adaptive-threshold ladder mapping, long-monologue cuts, 180 s force-cut).

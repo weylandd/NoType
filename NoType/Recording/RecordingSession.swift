@@ -103,6 +103,16 @@ final class RecordingSession {
         /// Total chunks dispatched to Gemini (excludes sub-150 ms
         /// drops). `failedChunkCount <= dispatchedChunkCount`.
         let dispatchedChunkCount: Int
+        /// Sum of `TokenUsage` across every successful Gemini call
+        /// in this session (single-chunk, batched, lite, split-
+        /// retry). Failed calls (terminal or recoverable) contribute
+        /// nothing — the `*WithUsage` overload only returns on the
+        /// success path, so retried-then-succeeded calls already
+        /// carry only the final successful attempt's usage (matches
+        /// Gemini's per-response billing). Read by
+        /// `AppState.finalizeRecording` and folded into
+        /// `StatsStore.record(_:tokens:)` for per-day token totals.
+        let tokens: TokenUsage
 
         var hasFailures: Bool { failedChunkCount > 0 }
     }
@@ -162,6 +172,11 @@ final class RecordingSession {
     /// as `instructionsFrozen` — feeds `buildLiteSnapshot` for the
     /// short-session path.
     private var dictionaryFrozen: DictionaryContext = .empty
+    /// Frozen BCP-47 language codes captured at session start. Mirrors
+    /// `dictionaryFrozen` for the always-present `User languages:`
+    /// cache-prefix section. Frozen for the session's lifetime so the
+    /// Gemini cache prefix stays byte-stable across chunks.
+    private var userLanguagesFrozen: [String] = []
     private var contextTask: Task<ContextSnapshot, Never>?
     /// Mirror of `contextTask`'s eventual value, populated on the main
     /// actor the moment the snapshot is ready. Used by the **final-chunk**
@@ -215,6 +230,15 @@ final class RecordingSession {
     /// dispatch out-of-order). Stitched at `stop()` — each entry's
     /// `text ?? Self.failureMarker` becomes one piece of the output.
     private var responses: [ChunkResponse] = []
+    /// Per-session accumulator for Gemini token usage. Sums one
+    /// `TokenUsage` per successful `*WithUsage` call (single-chunk,
+    /// batched, lite, split-retry). Failed calls contribute nothing
+    /// (the only call sites that mutate this are the success arms).
+    /// `ChunkResponse` deliberately does NOT carry per-chunk
+    /// tokens — Gemini bills per-request and a batched response's
+    /// usage doesn't split cleanly across its chunks (plan §475 +
+    /// `TokenUsage` doc-comment).
+    private var sessionTokens: TokenUsage = .zero
     private var chunkCounter: Int = 0
     /// Set when a terminal error aborts the session (auth, blocked,
     /// encode failure, cancellation). `stop()` rethrows this — the
@@ -252,15 +276,23 @@ final class RecordingSession {
     /// invariant as `instructions`: captured once, never re-read mid-
     /// session, so an edit on the Dictionary tab between press and
     /// release doesn't perturb the in-flight session.
+    ///
+    /// `userLanguages` is a frozen snapshot of the user's preferred
+    /// dictation languages (BCP-47 codes) shipped in the always-present
+    /// `User languages:` cache-prefix section. Same invariant — read
+    /// once on the main actor as a local constant by AppState before
+    /// invoking `start`, never re-read mid-session.
     func start(
         apiKey: String,
         instructions: InstructionsContext,
-        dictionary: DictionaryContext
+        dictionary: DictionaryContext,
+        userLanguages: [String]
     ) throws {
         self.apiKey = apiKey
         self.replacementsFrozen = dictionary.replacements
         self.instructionsFrozen = instructions
         self.dictionaryFrozen = dictionary
+        self.userLanguagesFrozen = userLanguages
         let frontmost = NSWorkspace.shared.frontmostApplication
         sourceApp = frontmost
         startedAt = Date()
@@ -288,6 +320,10 @@ final class RecordingSession {
         // latency budgets.
         let dictionaryEntries = dictionary.activeEntries
         let dictionaryReplacements = dictionary.replacements
+        // Bind to a local constant so the detached task captures the
+        // value, not `self` (we're @MainActor and the task is detached
+        // / non-isolated).
+        let userLanguagesLocal = userLanguages
         // Capture `activeBundleID` once on @MainActor (already done above
         // as `frontmost?.bundleIdentifier`) and pass it into the detached
         // AX task. Guardrail against re-introducing an
@@ -332,6 +368,7 @@ final class RecordingSession {
                 categoryInstruction: categoryInstruction,
                 dictionary: dictionaryEntries,
                 replacements: dictionaryReplacements,
+                userLanguages: userLanguagesLocal,
                 tree: resolvedTree,
                 insertionTarget: target,
                 screenText: shouldAttachOCR ? ocr : nil
@@ -424,7 +461,8 @@ final class RecordingSession {
         }
         return SessionSummary(
             failedChunkCount: failed,
-            dispatchedChunkCount: total
+            dispatchedChunkCount: total,
+            tokens: sessionTokens
         )
     }
 
@@ -770,14 +808,14 @@ final class RecordingSession {
             : "chunks_\(encoded.first?.idx ?? -1)..\(encoded.last?.idx ?? -1)"
 
         do {
-            let text: String
+            let result: (text: String, tokens: TokenUsage)
             if snap.isLite {
                 // Lite path is reachable only via the discriminator in
                 // `processBatch` — guaranteed `encoded.count == 1` and
                 // `containsFinal == true` by construction (final-only
                 // batch, no successful priors, audio < 2 s).
                 let one = encoded[0]
-                text = try await gemini.transcribeShort(
+                result = try await gemini.transcribeShortWithUsage(
                     audio: one.audio,
                     mimeType: "audio/mp4",
                     context: snap.context,
@@ -785,7 +823,7 @@ final class RecordingSession {
                 )
             } else if encoded.count == 1 {
                 let one = encoded[0]
-                text = try await gemini.transcribe(
+                result = try await gemini.transcribeWithUsage(
                     audio: one.audio,
                     mimeType: "audio/mp4",
                     context: snap.context,
@@ -796,7 +834,7 @@ final class RecordingSession {
                 )
             } else {
                 Self.log.info("batching \(encoded.count) chunks (\(encoded.first?.idx ?? -1)..\(encoded.last?.idx ?? -1)) final=\(containsFinal)")
-                text = try await gemini.transcribeBatch(
+                result = try await gemini.transcribeBatchWithUsage(
                     audios: encoded.map { ($0.audio, "audio/mp4") },
                     context: snap.context,
                     priorTranscripts: snap.priors,
@@ -805,9 +843,10 @@ final class RecordingSession {
                     apiKey: snap.apiKey
                 )
             }
+            sessionTokens = sessionTokens + result.tokens
             responses.append(ChunkResponse(
                 chunkIndices: encoded.map { $0.idx },
-                text: text
+                text: result.text
             ))
         } catch {
             if Self.isTerminal(error) {
@@ -867,7 +906,7 @@ final class RecordingSession {
             // succeeded becomes context for the next one.
             let priors = currentPriors()
             do {
-                let text = try await gemini.transcribe(
+                let result = try await gemini.transcribeWithUsage(
                     audio: chunk.audio,
                     mimeType: "audio/mp4",
                     context: snap.context,
@@ -876,9 +915,10 @@ final class RecordingSession {
                     isFinal: chunk.isFinal,
                     apiKey: snap.apiKey
                 )
+                sessionTokens = sessionTokens + result.tokens
                 responses.append(ChunkResponse(
                     chunkIndices: [chunk.idx],
-                    text: text
+                    text: result.text
                 ))
             } catch {
                 if Self.isTerminal(error) {
@@ -967,10 +1007,17 @@ final class RecordingSession {
                 context = cached
                 Self.log.info("final batch: using cached context (ready=true)")
             } else {
-                context = ContextSnapshot.minimal(activeApp: AppInfo(
-                    name: sourceApp?.localizedName ?? "Unknown",
-                    bundleID: sourceApp?.bundleIdentifier ?? "unknown.bundle"
-                ))
+                // Pass `userLanguagesFrozen` so the `User languages:`
+                // cache-prefix part stays byte-stable across chunks of
+                // the same session even on this quick-release fallback.
+                // `buildLiteSnapshot` already threads the same value.
+                context = ContextSnapshot.minimal(
+                    activeApp: AppInfo(
+                        name: sourceApp?.localizedName ?? "Unknown",
+                        bundleID: sourceApp?.bundleIdentifier ?? "unknown.bundle"
+                    ),
+                    userLanguages: userLanguagesFrozen
+                )
                 Self.log.info("final batch: context not ready, using minimal fallback")
             }
             isLite = false
@@ -978,10 +1025,13 @@ final class RecordingSession {
             context = await task.value
             isLite = false
         } else {
-            context = ContextSnapshot.minimal(activeApp: AppInfo(
-                name: sourceApp?.localizedName ?? "Unknown",
-                bundleID: sourceApp?.bundleIdentifier ?? "unknown.bundle"
-            ))
+            context = ContextSnapshot.minimal(
+                activeApp: AppInfo(
+                    name: sourceApp?.localizedName ?? "Unknown",
+                    bundleID: sourceApp?.bundleIdentifier ?? "unknown.bundle"
+                ),
+                userLanguages: userLanguagesFrozen
+            )
             isLite = false
         }
         return ChunkSnapshot(context: context, priors: currentPriors(), apiKey: apiKey, isLite: isLite)
@@ -1031,6 +1081,7 @@ final class RecordingSession {
             categoryInstruction: categoryInstruction,
             dictionary: dictionaryFrozen.activeEntries,
             replacements: dictionaryFrozen.replacements,
+            userLanguages: userLanguagesFrozen,
             tree: RedactedAXSnapshot(apps: []),
             insertionTarget: target,
             screenText: nil

@@ -530,6 +530,15 @@ struct ContextSnapshot: Sendable, Equatable {
     /// single source of truth at paste time, mirroring how the
     /// insertion target is captured once and reused at `stop()`.
     let replacements: [DictionaryReplacement]
+    /// BCP-47 language codes the user expects to dictate in. Shipped
+    /// in the `User languages:` cache-prefix section. Empty array →
+    /// section body is `(empty)`; the section itself is always
+    /// present so the prefix shape stays stable across sessions (and
+    /// across chunks of one session). Captured from
+    /// `AppState.outputLanguages` at session start and frozen — same
+    /// invariant as `dictionary` and the instructions snapshot. See
+    /// plan `2026-05-18-001-feat-settings-screen-plan.md` §584-646.
+    let userLanguages: [String]
     let tree: RedactedAXSnapshot
     let insertionTarget: InsertionTarget
     /// Optional OCR fallback for the active window. Populated only when
@@ -538,7 +547,8 @@ struct ContextSnapshot: Sendable, Equatable {
     /// custom-NSText cases). When set, the Gemini request builder appends
     /// `screenText.formattedForPrompt()` inside the existing `On-screen context:`
     /// prompt part — no new top-level prompt section is introduced, so the
-    /// cached-prefix shape (up to 7 text parts) stays intact.
+    /// cached-prefix shape (up to 9 text parts post-`User languages:` —
+    /// see `NoType/Gemini/CLAUDE.md` invariant 3) stays intact.
     let screenText: RedactedScreenText?
 
     init(
@@ -548,6 +558,7 @@ struct ContextSnapshot: Sendable, Equatable {
         categoryInstruction: String?,
         dictionary: [String] = [],
         replacements: [DictionaryReplacement] = [],
+        userLanguages: [String] = [],
         tree: RedactedAXSnapshot,
         insertionTarget: InsertionTarget,
         screenText: RedactedScreenText? = nil
@@ -558,6 +569,7 @@ struct ContextSnapshot: Sendable, Equatable {
         self.categoryInstruction = categoryInstruction
         self.dictionary = dictionary
         self.replacements = replacements
+        self.userLanguages = userLanguages
         self.tree = tree
         self.insertionTarget = insertionTarget
         self.screenText = screenText
@@ -568,11 +580,19 @@ struct ContextSnapshot: Sendable, Equatable {
     /// Collapses to the minimum stable shape: `Category: uncategorized`,
     /// no user instruction, no category instruction, empty dictionary,
     /// no replacements, empty tree, empty insertion target. Cache-prefix-
-    /// wise this is the 6-text-part case (App+Category, User dictionary,
-    /// Insertion target, On-screen context, Prior chunks, per-call
-    /// instruction) — the dictionary section is always present but
-    /// renders `(empty)` when no entries.
-    static func minimal(activeApp: AppInfo) -> ContextSnapshot {
+    /// wise this is the 7-text-part case (App+Category, User languages,
+    /// User dictionary, Insertion target, On-screen context, Prior chunks,
+    /// per-call instruction) — the dictionary and languages sections are
+    /// always present but render `(empty)` when no entries.
+    ///
+    /// **`userLanguages` parameter (added post-U7):** the caller passes
+    /// `userLanguagesFrozen` when constructing a final-chunk minimal
+    /// snapshot, so the `User languages:` cache-prefix part stays
+    /// byte-stable across chunks of the same session even on the
+    /// quick-release path. Defaults to `[]` for non-session callers
+    /// (tests, the dictionary/instructions doc-strings that name this
+    /// factory as the "empty" baseline).
+    static func minimal(activeApp: AppInfo, userLanguages: [String] = []) -> ContextSnapshot {
         ContextSnapshot(
             activeApp: activeApp,
             category: .uncategorized,
@@ -580,6 +600,7 @@ struct ContextSnapshot: Sendable, Equatable {
             categoryInstruction: nil,
             dictionary: [],
             replacements: [],
+            userLanguages: userLanguages,
             tree: RedactedAXSnapshot(apps: []),
             insertionTarget: .empty,
             screenText: nil

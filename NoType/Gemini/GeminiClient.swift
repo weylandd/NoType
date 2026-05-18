@@ -271,6 +271,35 @@ actor GeminiClient {
         isFinal: Bool,
         apiKey: String
     ) async throws -> String {
+        try await transcribeWithUsage(
+            audio: audio,
+            mimeType: mimeType,
+            context: context,
+            priorTranscripts: priorTranscripts,
+            chunkIndex: chunkIndex,
+            isFinal: isFinal,
+            apiKey: apiKey
+        ).text
+    }
+
+    /// Token-aware variant of `transcribe`. Returns the transcript
+    /// AND the `TokenUsage` Gemini billed for this single response.
+    /// Added in U5 (plan 2026-05-18-001 §473) — production path
+    /// (`RecordingSession`) switches to the `*WithUsage` overloads
+    /// so session-level token aggregation is honest. Existing
+    /// `transcribe(...)` stays as a backwards-compat shim
+    /// (PromptEvalHarness reads `lastUsage` directly post-call,
+    /// untouched). Path (a) per plan recommendation — smaller blast
+    /// radius than renaming the existing return types.
+    func transcribeWithUsage(
+        audio: Data,
+        mimeType: String,
+        context: ContextSnapshot,
+        priorTranscripts: [String],
+        chunkIndex: Int,
+        isFinal: Bool,
+        apiKey: String
+    ) async throws -> (text: String, tokens: TokenUsage) {
         let instruction = isFinal
             ? Self.finalChunkInstruction(chunkIndex: chunkIndex)
             : Self.midChunkInstruction(chunkIndex: chunkIndex)
@@ -308,6 +337,22 @@ actor GeminiClient {
         context: ContextSnapshot,
         apiKey: String
     ) async throws -> String {
+        try await transcribeShortWithUsage(
+            audio: audio,
+            mimeType: mimeType,
+            context: context,
+            apiKey: apiKey
+        ).text
+    }
+
+    /// Token-aware variant of `transcribeShort`. See
+    /// `transcribeWithUsage` for the path-(a) rationale.
+    func transcribeShortWithUsage(
+        audio: Data,
+        mimeType: String,
+        context: ContextSnapshot,
+        apiKey: String
+    ) async throws -> (text: String, tokens: TokenUsage) {
         let instruction = Self.liteChunkInstruction()
         return try await sendRequest(
             audios: [(audio, mimeType)],
@@ -342,6 +387,32 @@ actor GeminiClient {
         isFinal: Bool,
         apiKey: String
     ) async throws -> String {
+        try await transcribeBatchWithUsage(
+            audios: audios,
+            context: context,
+            priorTranscripts: priorTranscripts,
+            chunkIndices: chunkIndices,
+            isFinal: isFinal,
+            apiKey: apiKey
+        ).text
+    }
+
+    /// Token-aware variant of `transcribeBatch`. Returns the
+    /// transcript covering every chunk in the batch AND the single
+    /// per-request `TokenUsage` Gemini billed. Tokens are **not**
+    /// divided across chunks — Gemini's billing model is
+    /// per-response, and synthesising a per-chunk split would be a
+    /// guess (see `TokenUsage` doc-comment). The caller (a
+    /// `RecordingSession` sender) records one `TokenUsage` per
+    /// Gemini call and sums at session end.
+    func transcribeBatchWithUsage(
+        audios: [(data: Data, mimeType: String)],
+        context: ContextSnapshot,
+        priorTranscripts: [String],
+        chunkIndices: [Int],
+        isFinal: Bool,
+        apiKey: String
+    ) async throws -> (text: String, tokens: TokenUsage) {
         precondition(audios.count == chunkIndices.count, "audios / indices mismatch")
         precondition(audios.count > 1, "use transcribe(audio:...) for single chunks")
         let instruction = Self.batchedChunkInstruction(indices: chunkIndices, isFinal: isFinal)
@@ -362,7 +433,7 @@ actor GeminiClient {
 
     /// Pure: assemble the request body for either a single chunk or a
     /// batched call. Exposed (internal) so `GeminiRequestBuilderTests`
-    /// can pin the cached-prefix shape — up to 7 textual sections in this
+    /// can pin the cached-prefix shape — up to 9 textual sections in this
     /// exact order with these exact labels, then N audio inline_data
     /// parts. Two sections are conditionally omitted:
     /// - `User instruction:` — omitted iff `context.userInstruction` is
@@ -402,6 +473,7 @@ actor GeminiClient {
         // see the doc-comment above — but every other section is always
         // present, with `(none yet)` / `(empty)` / empty-quoted bodies
         // when empty.
+        let languagesText = formatUserLanguages(context.userLanguages)
         let dictionaryText = formatUserDictionary(context.dictionary)
         var parts: [GeminiAPI.Part] = [.text(appLine)]
         if !context.userInstruction.isEmpty {
@@ -411,6 +483,7 @@ actor GeminiClient {
            !categoryInstruction.isEmpty {
             parts.append(.text("Category instruction:\n\(categoryInstruction)"))
         }
+        parts.append(.text(languagesText))
         parts.append(.text(dictionaryText))
         parts.append(.text(insertionText))
         parts.append(.text(screenText))
@@ -445,8 +518,8 @@ actor GeminiClient {
     /// - Using `systemPromptLite` for the `system_instruction`.
     ///
     /// Resulting part order: App+Category → optional User instruction →
-    /// optional Category instruction → User dictionary → Insertion target
-    /// → per-call instruction → audio. Pinned by
+    /// optional Category instruction → User languages → User dictionary
+    /// → Insertion target → per-call instruction → audio. Pinned by
     /// `GeminiRequestBuilderTests.test_litePrompt_*`.
     static func buildLiteRequestBody(
         audio: Data,
@@ -458,6 +531,7 @@ actor GeminiClient {
             "App: \(context.activeApp.name) (\(context.activeApp.bundleID))\n" +
             "Category: \(context.category.rawValue)"
         let insertionText = formatInsertionTarget(context.insertionTarget)
+        let languagesText = formatUserLanguages(context.userLanguages)
         let dictionaryText = formatUserDictionary(context.dictionary)
 
         var parts: [GeminiAPI.Part] = [.text(appLine)]
@@ -468,6 +542,7 @@ actor GeminiClient {
            !categoryInstruction.isEmpty {
             parts.append(.text("Category instruction:\n\(categoryInstruction)"))
         }
+        parts.append(.text(languagesText))
         parts.append(.text(dictionaryText))
         parts.append(.text(insertionText))
         parts.append(.text(instruction))
@@ -507,7 +582,7 @@ actor GeminiClient {
         mayBeEmpty: Bool,
         apiKey: String,
         useLitePrompt: Bool = false
-    ) async throws -> String {
+    ) async throws -> (text: String, tokens: TokenUsage) {
         let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedKey.isEmpty else { throw GeminiError.missingKey }
 
@@ -578,7 +653,7 @@ actor GeminiClient {
         logID: String,
         attempt: Int,
         mayBeEmpty: Bool
-    ) async throws -> String {
+    ) async throws -> (text: String, tokens: TokenUsage) {
         let networkStart = Date()
         let data: Data
         let response: URLResponse
@@ -664,7 +739,7 @@ actor GeminiClient {
         #endif
 
         Self.log.info("\(logID) length=\(trimmed.count) network=\(networkMs)ms attempt=\(attempt)")
-        return trimmed
+        return (trimmed, TokenUsage(from: parsed.usageMetadata))
     }
 
     /// Classifies a Gemini error into a retry decision. `delayMs == nil`
@@ -728,6 +803,20 @@ actor GeminiClient {
           Text before cursor: "\(quote(t.textBefore))"
           Text after cursor: "\(quote(t.textAfter))"
         """
+    }
+
+    /// Renders the `User languages:` section. Always 2 lines (label +
+    /// body), even when the user picked no languages (`(empty)` body)
+    /// — same byte-stable cached-prefix contract as `User dictionary:`
+    /// (dropping it across sessions where the value differs would
+    /// invalidate the implicit cache). Codes are the user's
+    /// `AppState.outputLanguages` (BCP-47), frozen at session start
+    /// per plan `2026-05-18-001-feat-settings-screen-plan.md` §584-646.
+    static func formatUserLanguages(_ codes: [String]) -> String {
+        if codes.isEmpty {
+            return "User languages:\n  (empty)"
+        }
+        return "User languages:\n  " + codes.joined(separator: ", ")
     }
 
     /// Renders the `User dictionary:` section. Always 2 lines (label +
@@ -858,7 +947,7 @@ actor GeminiClient {
 
     # Context is never a source of words
 
-    The audio is the ONLY source of words in your output. Every other section you receive — `App`, `Category`, `User instruction`, `Category instruction`, `User dictionary`, `Insertion target`, `On-screen context` (including the `Screen text (OCR — active window)` sub-block), `Prior chunks (this session)` — exists for disambiguation, formatting, and continuity. None is a content pool. If a token did not come out of the speaker's mouth in THIS chunk's audio, it must not appear in your output.
+    The audio is the ONLY source of words in your output. Every other section you receive — `App`, `Category`, `User instruction`, `Category instruction`, `User languages`, `User dictionary`, `Insertion target`, `On-screen context` (including the `Screen text (OCR — active window)` sub-block), `Prior chunks (this session)` — exists for disambiguation, formatting, and continuity. None is a content pool. If a token did not come out of the speaker's mouth in THIS chunk's audio, it must not appear in your output.
 
     Forbidden, in any language:
 
@@ -912,6 +1001,10 @@ actor GeminiClient {
     The audio always wins over the on-screen context. Never insert any phrase from `On-screen context` that the speaker did not actually say.
 
     The `On-screen context` part may additionally contain a section labelled `Screen text (OCR — active window)` after the accessibility tree. This is text recognised optically from a screenshot of the user's active window — used as a fallback when the accessibility tree returned no usable content for that app (typical for Electron, web-views, and custom text views). When present, treat it with the same disambiguation rules as the AX tree above: it is for spelling proper nouns and jargon only. Audio still wins. Never quote, paraphrase, or echo OCR text in your output.
+
+    # User languages
+
+    The `User languages:` section is a comma-separated list of BCP-47 codes (e.g. `ru, en, ja`) the user expects to dictate in. Use it as a language-recognition hint when the audio is ambiguous between phonetically similar words in different languages, or when a short utterance leaves the spoken language under-determined. The audio still wins absolutely: never substitute a hinted language for what the speaker actually said, and never refuse to transcribe content in an unlisted language. When the body is `(empty)`, ignore the section entirely — language detection falls back to the audio alone.
 
     # User dictionary
 
@@ -968,7 +1061,7 @@ actor GeminiClient {
 
     # Audio is the ONLY source of words
 
-    `App`, `Category`, instructions, `User dictionary`, and `Insertion target` exist for disambiguation only. **None is a content pool.** NEVER emit any substring of `Text before cursor` or `Text after cursor`. NEVER emit a dictionary entry, instruction word, or section label that the speaker did not actually say. When uncertain whether a token came from audio or context, omit it — false inclusions are far worse than false omissions. Your own language-model predictions are not a source either: never extend, smooth, or complete the audio with words you did not hear — at the start, middle, or end. An abruptly ending sentence is correct.
+    `App`, `Category`, instructions, `User languages`, `User dictionary`, and `Insertion target` exist for disambiguation only. **None is a content pool.** NEVER emit any substring of `Text before cursor` or `Text after cursor`. NEVER emit a dictionary entry, instruction word, or section label that the speaker did not actually say. When uncertain whether a token came from audio or context, omit it — false inclusions are far worse than false omissions. Your own language-model predictions are not a source either: never extend, smooth, or complete the audio with words you did not hear — at the start, middle, or end. An abruptly ending sentence is correct.
 
     When the audio is a made-up or unfamiliar token the speaker actually pronounced (invented name, nonsense syllable, unfamiliar acronym, single interjection), transcribe it phonetically in the surrounding language's orthography. Do NOT round it to a similar-sounding word from any context section. Phonetic faithfulness wins over context autocompletion every time.
 
@@ -985,6 +1078,10 @@ actor GeminiClient {
     3. **End punctuation:** if `Text after cursor` is empty or starts with a capital starting a new sentence, close naturally. If it continues mid-sentence (lowercase, comma, conjunction), prefer a comma or no punctuation.
 
     `Text after cursor` is FIXED. Never modify, echo, paraphrase, or include any of its words in your output.
+
+    # User languages
+
+    `User languages:` lists BCP-47 codes (e.g. `ru, en`) the user expects to dictate in. Use it as a language-recognition hint when the audio is ambiguous; audio always wins, and content in an unlisted language is still transcribed verbatim. When `(empty)`, ignore.
 
     # User dictionary
 

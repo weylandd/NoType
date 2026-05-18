@@ -13,7 +13,7 @@ Per-app categorization, the categorizer's storage, and the AX search override li
 
 1. **One Gemini request in flight per session** (a batched call is the unit of work, not chunks individually). → `solutions/architecture-patterns/serial-gemini-actor-2026-05-15.md`.
 2. **Local concatenation, never re-emit.** Each call returns only its own chunk's text. → `solutions/design-patterns/local-chunk-concatenation-2026-05-15.md`.
-3. **Cache-friendly part ordering is load-bearing.** The 6 / 7 / 8 user-message text parts have fixed labels and a fixed order. Pinned by `GeminiRequestBuilderTests`.
+3. **Cache-friendly part ordering is load-bearing.** The 7 / 8 / 9 user-message text parts have fixed labels and a fixed order. Pinned by `GeminiRequestBuilderTests`.
 4. **API key in `x-goog-api-key` header, never in URL.** Stops URL captures (proxy traces, `URLError.failingURL`, OS-level URLSession logs) from leaking the key.
 5. **Transcription requests ship without `tools`.** `googleSearch` is enabled only for `classifyApp`. Pinned by `test_transcriptionRequest_doesNotIncludeTools`.
 6. **Anti-completion clause is present in both prompts.** Anchor phrase `"Never extend, smooth, or complete"` is intentionally unique. Pinned by `test_systemPrompts_pinAntiCompletionClause`.
@@ -25,7 +25,7 @@ Per-app categorization, the categorizer's storage, and the AX search override li
 - **Do not ask the model to re-emit the full transcript.** Output tokens are 6× input tokens; re-emission defeats caching.
 - **Do not drop a non-optional section when it's empty.** Empty `Insertion target` keeps both quoted strings; empty `Prior chunks` keeps `(none yet)`. Removing → prefix-shape change → cache miss.
 - **Do not toggle an optional section's omission mid-session.** `User instruction` / `Category instruction` are frozen in `ContextSnapshot` at session start. Re-reading mid-session would shift the part count between chunks.
-- **Do not rephrase section labels.** The system instruction references them by exact name (`Insertion target`, `Text before cursor`, `Text after cursor`, `Category`, `User instruction`, `Category instruction`, `On-screen context`, `Prior chunks (this session)`).
+- **Do not rephrase section labels.** The system instruction references them by exact name (`Insertion target`, `Text before cursor`, `Text after cursor`, `Category`, `User instruction`, `Category instruction`, `User languages`, `User dictionary`, `On-screen context`, `Prior chunks (this session)`).
 - **Do not move `system_instruction` content into a `user` part.** Different cache key.
 - **Do not promote the OCR sub-block to a top-level prompt part.** It lives inside `On-screen context:`; promoting changes the part count and breaks the contract pinned by `test_partOrderAndLabels_stableWithAndWithoutOCR`.
 - **Lite path is single-audio by construction.** `precondition(audios.count == 1)` when `useLitePrompt: true`. Don't batch through the lite path.
@@ -38,13 +38,14 @@ User-message text parts ship in this fixed order:
 1. `App:` / `Category:` — always present.
 2. `User instruction:` — omitted iff empty (frozen at session start).
 3. `Category instruction:` — omitted iff nil (frozen at session start; typical for `.uncategorized`).
-4. `User dictionary:` — always present; body `(empty)` when no entries.
-5. `Insertion target:` — with `Text before cursor:` / `Text after cursor:` sub-lines.
-6. `On-screen context:` — AX tree + optional OCR sub-block when `screenText` is set.
-7. `Prior chunks (this session):` — body `(none yet)` on the first chunk.
-8. Per-call instruction line.
+4. `User languages:` — always present; body `(empty)` when no languages picked. Frozen at session start from `AppState.outputLanguages`.
+5. `User dictionary:` — always present; body `(empty)` when no entries.
+6. `Insertion target:` — with `Text before cursor:` / `Text after cursor:` sub-lines.
+7. `On-screen context:` — AX tree + optional OCR sub-block when `screenText` is set.
+8. `Prior chunks (this session):` — body `(none yet)` on the first chunk.
+9. Per-call instruction line.
 
-Then audio `inline_data` parts (1..N for batched calls). The **lite path** drops parts 6 and 7 entirely (different cache namespace at Gemini, by design).
+Then audio `inline_data` parts (1..N for batched calls). The **lite path** drops parts 7 and 8 entirely (different cache namespace at Gemini, by design).
 
 ## Generation config
 

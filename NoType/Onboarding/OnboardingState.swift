@@ -37,17 +37,26 @@ final class OnboardingState {
     private(set) var currentStep:  Step
     private(set) var furthestStep: Step
 
+    /// Backing `UserDefaults` for read / write of the three onboarding
+    /// keys. Defaults to `.standard` in production. Injectable so unit
+    /// tests can use an isolated suite — otherwise `goNext()` and
+    /// `resetWizard()` would poison the host process's standard
+    /// defaults (this test bundle is application-hosted in `NoType.app`,
+    /// so `UserDefaults.standard` inside a test = `app.notype` on disk).
+    private let defaults: UserDefaults
+
     var isComplete:   Bool { currentStep == .complete }
     var isOnboarding: Bool { !isComplete }
 
-    init() {
-        if UserDefaults.standard.bool(forKey: Self.completeKey) {
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        if defaults.bool(forKey: Self.completeKey) {
             self.currentStep  = .complete
             self.furthestStep = .complete
             return
         }
-        let curr = UserDefaults.standard.object(forKey: Self.currentStepKey) as? Int
-        let furt = UserDefaults.standard.object(forKey: Self.furthestStepKey) as? Int
+        let curr = defaults.object(forKey: Self.currentStepKey) as? Int
+        let furt = defaults.object(forKey: Self.furthestStepKey) as? Int
         self.currentStep  = Step(rawValue: curr ?? 0) ?? .welcome
         self.furthestStep = Step(rawValue: max(curr ?? 0, furt ?? 0)) ?? .welcome
     }
@@ -62,7 +71,7 @@ final class OnboardingState {
             furthestStep = next
         }
         if next == .complete {
-            UserDefaults.standard.set(true, forKey: Self.completeKey)
+            defaults.set(true, forKey: Self.completeKey)
         }
         persist()
     }
@@ -78,7 +87,33 @@ final class OnboardingState {
     }
 
     private func persist() {
-        UserDefaults.standard.set(currentStep.rawValue,  forKey: Self.currentStepKey)
-        UserDefaults.standard.set(furthestStep.rawValue, forKey: Self.furthestStepKey)
+        defaults.set(currentStep.rawValue,  forKey: Self.currentStepKey)
+        defaults.set(furthestStep.rawValue, forKey: Self.furthestStepKey)
+    }
+
+    /// Reopen the onboarding wizard from `welcome` without losing the
+    /// user's saved API key, hotkey binding, or selected microphone.
+    ///
+    /// Called by the Settings → General → "Reset onboarding" button
+    /// (plan §305, AE9). Only the three onboarding UserDefaults keys
+    /// are cleared. The wizard's API-key step detects the existing
+    /// Keychain entry and skips revalidation when the pre-filled value
+    /// is unchanged — see `OnboardingAPIKeyStep.continueTapped`'s
+    /// "Resume path" branch. That keeps a user with a known-good key
+    /// from being trapped on the API-key step.
+    func resetWizard() {
+        Self.resetWizardDefaults(in: defaults)
+        currentStep  = .welcome
+        furthestStep = .welcome
+    }
+
+    /// Side-effect-only counterpart of `resetWizard()` — clears the
+    /// three onboarding keys in any `UserDefaults` instance. Exposed
+    /// so tests can verify on an isolated suite without touching the
+    /// process-wide standard defaults.
+    nonisolated static func resetWizardDefaults(in defaults: UserDefaults) {
+        defaults.removeObject(forKey: currentStepKey)
+        defaults.removeObject(forKey: furthestStepKey)
+        defaults.removeObject(forKey: completeKey)
     }
 }

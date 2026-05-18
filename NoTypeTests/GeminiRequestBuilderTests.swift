@@ -5,13 +5,15 @@ import XCTest
 /// labels of these parts are load-bearing for the implicit-cache discount
 /// — see `NoType/Gemini/CLAUDE.md` and ADR I3 in `docs/architecture.md`.**
 ///
-/// The cached prefix is now up to 8 textual sections (was 7 before
-/// `User dictionary:` was introduced in ADR-016). Two sections are
+/// The cached prefix is now up to 9 textual sections (was 8 before
+/// `User languages:` was introduced in U7 of plan
+/// `2026-05-18-001-feat-settings-screen-plan.md`). Two sections are
 /// conditionally omitted: `User instruction:` when empty, `Category
 /// instruction:` when nil (typical for `.uncategorized`). The
-/// `User dictionary:` section is **always present** even when the
-/// dictionary is empty (body renders as `(empty)`); dropping it would
-/// invalidate cache across sessions where the dictionary differs.
+/// `User dictionary:` and `User languages:` sections are **always
+/// present** even when their bodies are empty (body renders as
+/// `(empty)`); dropping either would invalidate cache across sessions
+/// where the value differs.
 ///
 /// If a test in this file changes, the cache invariant changed → reviewer
 /// must explicitly bless it.
@@ -20,9 +22,9 @@ final class GeminiRequestBuilderTests: XCTestCase {
     // MARK: - Fixtures
 
     /// Default fixture: uncategorized + no user instruction + empty
-    /// dictionary. Produces the 6-text-part shape (App+Category, User
-    /// dictionary, Insertion target, On-screen context, Prior chunks,
-    /// per-call instruction).
+    /// dictionary + empty languages. Produces the 7-text-part shape
+    /// (App+Category, User languages, User dictionary, Insertion target,
+    /// On-screen context, Prior chunks, per-call instruction).
     private func ctx(
         appName: String = "Slack",
         bundle: String = "com.tinyspeck.slackmacgap",
@@ -30,6 +32,7 @@ final class GeminiRequestBuilderTests: XCTestCase {
         userInstruction: String = "",
         categoryInstruction: String? = nil,
         dictionary: [String] = [],
+        userLanguages: [String] = [],
         before: String = "",
         after: String = "",
         screenText: RedactedScreenText? = nil
@@ -41,6 +44,7 @@ final class GeminiRequestBuilderTests: XCTestCase {
             categoryInstruction: categoryInstruction,
             dictionary: dictionary,
             replacements: [],
+            userLanguages: userLanguages,
             tree: RedactedAXSnapshot(apps: []),
             insertionTarget: InsertionTarget(textBefore: before, textAfter: after),
             screenText: screenText
@@ -48,13 +52,15 @@ final class GeminiRequestBuilderTests: XCTestCase {
     }
 
     /// Full-shape fixture: non-empty user instruction + classified
-    /// category with its prompt resolved + non-empty dictionary.
-    /// Produces the 8-text-part shape.
+    /// category with its prompt resolved + non-empty dictionary + empty
+    /// languages (so the always-present `User languages:` section
+    /// renders `(empty)` by default). Produces the 9-text-part shape.
     private func fullCtx(
         category: AppCategory = .messaging,
         userInstruction: String = "always sign off with 'Best,'",
         categoryInstruction: String = "Messaging formatting: keep it short.",
         dictionary: [String] = ["NoType", "Anthropic"],
+        userLanguages: [String] = [],
         before: String = "",
         after: String = "",
         screenText: RedactedScreenText? = nil
@@ -64,6 +70,7 @@ final class GeminiRequestBuilderTests: XCTestCase {
             userInstruction: userInstruction,
             categoryInstruction: categoryInstruction,
             dictionary: dictionary,
+            userLanguages: userLanguages,
             before: before,
             after: after,
             screenText: screenText
@@ -105,7 +112,7 @@ final class GeminiRequestBuilderTests: XCTestCase {
 
     // MARK: - Minimum shape (no user, uncategorized, empty dict)
 
-    func test_minimumShape_sixPartsInOrder() {
+    func test_minimumShape_sevenPartsInOrder() {
         let body = GeminiClient.buildRequestBody(
             audios: [(Data([0x00]), "audio/mp4")],
             context: ctx(before: "Hi ", after: " then"),
@@ -113,16 +120,17 @@ final class GeminiRequestBuilderTests: XCTestCase {
             instruction: GeminiClient.midChunkInstruction(chunkIndex: 1)
         )
         let texts = textParts(body)
-        XCTAssertEqual(texts.count, 6,
-            "uncategorized + empty user instruction + empty dictionary collapses to the 6-text-part shape")
+        XCTAssertEqual(texts.count, 7,
+            "uncategorized + empty user instruction + empty dictionary + empty languages collapses to the 7-text-part shape")
         XCTAssertTrue(texts[0].hasPrefix("App: "))
         XCTAssertTrue(texts[0].contains("Category: uncategorized"),
             "first part must carry the Category line")
-        XCTAssertTrue(texts[1].hasPrefix("User dictionary:"))
-        XCTAssertTrue(texts[2].hasPrefix("Insertion target:"))
-        XCTAssertTrue(texts[3].hasPrefix("On-screen context:"))
-        XCTAssertTrue(texts[4].hasPrefix("Prior chunks (this session):"))
-        XCTAssertTrue(texts[5].hasPrefix("Now transcribe chunk_"))
+        XCTAssertTrue(texts[1].hasPrefix("User languages:"))
+        XCTAssertTrue(texts[2].hasPrefix("User dictionary:"))
+        XCTAssertTrue(texts[3].hasPrefix("Insertion target:"))
+        XCTAssertTrue(texts[4].hasPrefix("On-screen context:"))
+        XCTAssertTrue(texts[5].hasPrefix("Prior chunks (this session):"))
+        XCTAssertTrue(texts[6].hasPrefix("Now transcribe chunk_"))
         XCTAssertEqual(inlineCount(body), 1)
     }
 
@@ -141,28 +149,30 @@ final class GeminiRequestBuilderTests: XCTestCase {
 
     // MARK: - Full shape (8 parts, both optional sections present)
 
-    func test_fullShape_eightPartsInOrder() {
+    func test_fullShape_ninePartsInOrder() {
         let body = GeminiClient.buildRequestBody(
             audios: [(Data([0x00]), "audio/mp4")],
-            context: fullCtx(before: "Hi ", after: " then"),
+            context: fullCtx(userLanguages: ["ru", "en"], before: "Hi ", after: " then"),
             priorTranscripts: [],
             instruction: GeminiClient.midChunkInstruction(chunkIndex: 1)
         )
         let texts = textParts(body)
-        XCTAssertEqual(texts.count, 8,
-            "non-empty user instruction + non-nil category instruction + non-empty dictionary → 8 text parts")
+        XCTAssertEqual(texts.count, 9,
+            "non-empty user instruction + non-nil category instruction + non-empty dictionary + non-empty languages → 9 text parts")
         XCTAssertTrue(texts[0].hasPrefix("App: "))
         XCTAssertTrue(texts[0].contains("Category: messaging"))
         XCTAssertTrue(texts[1].hasPrefix("User instruction:"))
         XCTAssertTrue(texts[1].contains("always sign off"))
         XCTAssertTrue(texts[2].hasPrefix("Category instruction:"))
         XCTAssertTrue(texts[2].contains("Messaging formatting"))
-        XCTAssertTrue(texts[3].hasPrefix("User dictionary:"))
-        XCTAssertTrue(texts[3].contains("NoType, Anthropic"))
-        XCTAssertTrue(texts[4].hasPrefix("Insertion target:"))
-        XCTAssertTrue(texts[5].hasPrefix("On-screen context:"))
-        XCTAssertTrue(texts[6].hasPrefix("Prior chunks (this session):"))
-        XCTAssertTrue(texts[7].hasPrefix("Now transcribe chunk_"))
+        XCTAssertTrue(texts[3].hasPrefix("User languages:"))
+        XCTAssertTrue(texts[3].contains("ru, en"))
+        XCTAssertTrue(texts[4].hasPrefix("User dictionary:"))
+        XCTAssertTrue(texts[4].contains("NoType, Anthropic"))
+        XCTAssertTrue(texts[5].hasPrefix("Insertion target:"))
+        XCTAssertTrue(texts[6].hasPrefix("On-screen context:"))
+        XCTAssertTrue(texts[7].hasPrefix("Prior chunks (this session):"))
+        XCTAssertTrue(texts[8].hasPrefix("Now transcribe chunk_"))
     }
 
     func test_userInstruction_appearsBeforeCategoryInstruction() {
@@ -181,7 +191,7 @@ final class GeminiRequestBuilderTests: XCTestCase {
             "user instruction must appear before category instruction (user wins on conflicts)")
     }
 
-    func test_userDictionary_appearsAfterCategoryInstruction_beforeInsertionTarget() {
+    func test_userDictionary_appearsAfterUserLanguages_beforeInsertionTarget() {
         let body = GeminiClient.buildRequestBody(
             audios: [(Data([0x00]), "audio/mp4")],
             context: fullCtx(),
@@ -189,16 +199,127 @@ final class GeminiRequestBuilderTests: XCTestCase {
             instruction: GeminiClient.midChunkInstruction(chunkIndex: 1)
         )
         let texts = textParts(body)
-        let categoryIdx = indexOfPart(prefix: "Category instruction:", in: texts)
+        let langIdx = indexOfPart(prefix: "User languages:", in: texts)
         let dictIdx = indexOfPart(prefix: "User dictionary:", in: texts)
         let insertIdx = indexOfPart(prefix: "Insertion target:", in: texts)
-        XCTAssertNotNil(categoryIdx)
+        XCTAssertNotNil(langIdx)
         XCTAssertNotNil(dictIdx)
         XCTAssertNotNil(insertIdx)
-        XCTAssertLessThan(categoryIdx!, dictIdx!,
-            "User dictionary must appear after Category instruction")
+        XCTAssertLessThan(langIdx!, dictIdx!,
+            "User dictionary must appear after User languages")
         XCTAssertLessThan(dictIdx!, insertIdx!,
             "User dictionary must appear before Insertion target")
+    }
+
+    // MARK: - User languages section (U7)
+
+    func test_userLanguages_appearsAfterCategoryInstruction_beforeUserDictionary() {
+        let body = GeminiClient.buildRequestBody(
+            audios: [(Data([0x00]), "audio/mp4")],
+            context: fullCtx(userLanguages: ["ru", "en"]),
+            priorTranscripts: [],
+            instruction: GeminiClient.midChunkInstruction(chunkIndex: 1)
+        )
+        let texts = textParts(body)
+        let categoryIdx = indexOfPart(prefix: "Category instruction:", in: texts)
+        let langIdx = indexOfPart(prefix: "User languages:", in: texts)
+        let dictIdx = indexOfPart(prefix: "User dictionary:", in: texts)
+        XCTAssertNotNil(categoryIdx)
+        XCTAssertNotNil(langIdx)
+        XCTAssertNotNil(dictIdx)
+        XCTAssertLessThan(categoryIdx!, langIdx!,
+            "User languages must appear after Category instruction")
+        XCTAssertLessThan(langIdx!, dictIdx!,
+            "User languages must appear before User dictionary")
+    }
+
+    func test_userLanguages_emptyRendersEmptyBody_sectionStillPresent() {
+        let body = GeminiClient.buildRequestBody(
+            audios: [(Data([0]), "audio/mp4")],
+            context: ctx(userLanguages: []),
+            priorTranscripts: [],
+            instruction: GeminiClient.midChunkInstruction(chunkIndex: 1)
+        )
+        let texts = textParts(body)
+        let lang = try? XCTUnwrap(texts.first { $0.hasPrefix("User languages:") })
+        XCTAssertEqual(lang, "User languages:\n  (empty)",
+            "empty languages renders as `(empty)`, section is never dropped")
+    }
+
+    func test_userLanguages_rendersCommaSeparated() {
+        let body = GeminiClient.buildRequestBody(
+            audios: [(Data([0]), "audio/mp4")],
+            context: ctx(userLanguages: ["ru", "en", "ja"]),
+            priorTranscripts: [],
+            instruction: GeminiClient.midChunkInstruction(chunkIndex: 1)
+        )
+        let texts = textParts(body)
+        let lang = try? XCTUnwrap(texts.first { $0.hasPrefix("User languages:") })
+        XCTAssertEqual(lang, "User languages:\n  ru, en, ja")
+    }
+
+    func test_userLanguages_singleLanguageNoTrailingComma() {
+        let body = GeminiClient.buildRequestBody(
+            audios: [(Data([0]), "audio/mp4")],
+            context: ctx(userLanguages: ["ru"]),
+            priorTranscripts: [],
+            instruction: GeminiClient.midChunkInstruction(chunkIndex: 1)
+        )
+        let texts = textParts(body)
+        let lang = try? XCTUnwrap(texts.first { $0.hasPrefix("User languages:") })
+        XCTAssertEqual(lang, "User languages:\n  ru")
+    }
+
+    func test_userLanguages_cjkAndThaiRoundTrip() {
+        // UTF-8 stability for CJK + Thai BCP-47 codes (no encoding drift).
+        let body = GeminiClient.buildRequestBody(
+            audios: [(Data([0]), "audio/mp4")],
+            context: ctx(userLanguages: ["zh", "ja", "ko", "th"]),
+            priorTranscripts: [],
+            instruction: GeminiClient.midChunkInstruction(chunkIndex: 1)
+        )
+        let texts = textParts(body)
+        let lang = try? XCTUnwrap(texts.first { $0.hasPrefix("User languages:") })
+        XCTAssertEqual(lang, "User languages:\n  zh, ja, ko, th")
+    }
+
+    func test_userLanguages_byteStable_betweenChunks_ofSameSession() {
+        let langs = ["ru", "en"]
+        let bodyA = GeminiClient.buildRequestBody(
+            audios: [(Data([0]), "audio/mp4")],
+            context: fullCtx(userLanguages: langs),
+            priorTranscripts: ["a"],
+            instruction: GeminiClient.midChunkInstruction(chunkIndex: 2)
+        )
+        let bodyB = GeminiClient.buildRequestBody(
+            audios: [(Data([0]), "audio/mp4")],
+            context: fullCtx(userLanguages: langs),
+            priorTranscripts: ["a", "b"],
+            instruction: GeminiClient.midChunkInstruction(chunkIndex: 3)
+        )
+        let a = textParts(bodyA)
+        let b = textParts(bodyB)
+        let aIdx = indexOfPart(prefix: "User languages:", in: a)!
+        let bIdx = indexOfPart(prefix: "User languages:", in: b)!
+        XCTAssertEqual(a[aIdx], b[bIdx],
+            "User languages section must be byte-stable across chunks of the same session")
+    }
+
+    func test_userLanguages_appearsInLitePath() {
+        let body = GeminiClient.buildLiteRequestBody(
+            audio: Data([0x00]),
+            mimeType: "audio/mp4",
+            context: ctx(userLanguages: ["en"]),
+            instruction: GeminiClient.liteChunkInstruction()
+        )
+        let texts = textParts(body)
+        let langIdx = indexOfPart(prefix: "User languages:", in: texts)
+        let dictIdx = indexOfPart(prefix: "User dictionary:", in: texts)
+        XCTAssertNotNil(langIdx, "lite path must keep User languages section")
+        XCTAssertNotNil(dictIdx)
+        XCTAssertLessThan(langIdx!, dictIdx!,
+            "User languages must appear before User dictionary in the lite path too")
+        XCTAssertTrue(texts[langIdx!].contains("en"))
     }
 
     // MARK: - Conditional omission
@@ -215,11 +336,13 @@ final class GeminiRequestBuilderTests: XCTestCase {
             instruction: GeminiClient.midChunkInstruction(chunkIndex: 1)
         )
         let texts = textParts(body)
-        XCTAssertEqual(texts.count, 7,
-            "empty user instruction omits the User instruction section (7 parts: app+cat instr+dict+target+screen+priors+instr)")
+        XCTAssertEqual(texts.count, 8,
+            "empty user instruction omits the User instruction section (8 parts: app+cat instr+langs+dict+target+screen+priors+instr)")
         XCTAssertNil(indexOfPart(prefix: "User instruction:", in: texts),
             "User instruction section must be absent when empty")
         XCTAssertNotNil(indexOfPart(prefix: "Category instruction:", in: texts))
+        XCTAssertNotNil(indexOfPart(prefix: "User languages:", in: texts),
+            "User languages section must always be present")
         XCTAssertNotNil(indexOfPart(prefix: "User dictionary:", in: texts),
             "User dictionary section must always be present")
     }
@@ -236,11 +359,13 @@ final class GeminiRequestBuilderTests: XCTestCase {
             instruction: GeminiClient.midChunkInstruction(chunkIndex: 1)
         )
         let texts = textParts(body)
-        XCTAssertEqual(texts.count, 7,
-            "nil category instruction omits the Category instruction section (7 parts)")
+        XCTAssertEqual(texts.count, 8,
+            "nil category instruction omits the Category instruction section (8 parts)")
         XCTAssertNotNil(indexOfPart(prefix: "User instruction:", in: texts))
         XCTAssertNil(indexOfPart(prefix: "Category instruction:", in: texts),
             "Category instruction section must be absent when nil")
+        XCTAssertNotNil(indexOfPart(prefix: "User languages:", in: texts),
+            "User languages section must always be present")
         XCTAssertNotNil(indexOfPart(prefix: "User dictionary:", in: texts),
             "User dictionary section must always be present")
         XCTAssertTrue(texts[0].contains("Category: uncategorized"))
@@ -439,15 +564,16 @@ final class GeminiRequestBuilderTests: XCTestCase {
     }
 
     func test_byteStable_betweenChunks_ofSameSession() {
-        // Same context (user instruction + category + dictionary frozen
-        // for the session) — parts 0..6 must be byte-equal between
-        // chunks N and N+1, with part 6 (priors) growing monotonically.
-        // Only the per-call instruction differs.
+        // Same context (user instruction + category + dictionary +
+        // languages frozen for the session) — parts 0..7 must be byte-
+        // equal between chunks N and N+1, with part 7 (priors) growing
+        // monotonically. Only the per-call instruction differs.
         let context = fullCtx(
             category: .email,
             userInstruction: "use plain language",
             categoryInstruction: "Email: greet and sign off.",
-            dictionary: ["Anthropic"]
+            dictionary: ["Anthropic"],
+            userLanguages: ["en", "ru"]
         )
         let bodyN = GeminiClient.buildRequestBody(
             audios: [(Data([0]), "audio/mp4")],
@@ -463,15 +589,15 @@ final class GeminiRequestBuilderTests: XCTestCase {
         )
         let n = textParts(bodyN)
         let n1 = textParts(bodyN1)
-        XCTAssertEqual(n.count, 8)
-        XCTAssertEqual(n1.count, 8)
-        for i in 0..<6 {
+        XCTAssertEqual(n.count, 9)
+        XCTAssertEqual(n1.count, 9)
+        for i in 0..<7 {
             XCTAssertEqual(n[i], n1[i],
                 "part \(i) must be byte-stable across chunks of the same session")
         }
-        XCTAssertTrue(n1[6].hasPrefix(n[6]),
+        XCTAssertTrue(n1[7].hasPrefix(n[7]),
             "priors must extend monotonically between consecutive chunks")
-        XCTAssertNotEqual(n[7], n1[7], "per-call instruction differs by chunk number")
+        XCTAssertNotEqual(n[8], n1[8], "per-call instruction differs by chunk number")
     }
 
     // MARK: - Insertion target rendering
@@ -526,21 +652,22 @@ final class GeminiRequestBuilderTests: XCTestCase {
         ]
         let body = GeminiClient.buildRequestBody(
             audios: audios,
-            context: fullCtx(before: "Hi ", after: " then"),
+            context: fullCtx(userLanguages: ["en"], before: "Hi ", after: " then"),
             priorTranscripts: ["earlier text"],
             instruction: GeminiClient.batchedChunkInstruction(indices: [2, 3, 4], isFinal: true)
         )
         let texts = textParts(body)
-        XCTAssertEqual(texts.count, 8, "full-shape prefix has 8 text parts regardless of audio count")
+        XCTAssertEqual(texts.count, 9, "full-shape prefix has 9 text parts regardless of audio count")
         XCTAssertEqual(inlineCount(body), 3, "3 inline_data parts for a 3-chunk batch")
         XCTAssertTrue(texts[0].hasPrefix("App: "))
         XCTAssertTrue(texts[1].hasPrefix("User instruction:"))
         XCTAssertTrue(texts[2].hasPrefix("Category instruction:"))
-        XCTAssertTrue(texts[3].hasPrefix("User dictionary:"))
-        XCTAssertTrue(texts[4].hasPrefix("Insertion target:"))
-        XCTAssertTrue(texts[5].hasPrefix("On-screen context:"))
-        XCTAssertTrue(texts[6].hasPrefix("Prior chunks (this session):"))
-        XCTAssertTrue(texts[7].hasPrefix("Now transcribe chunks "))
+        XCTAssertTrue(texts[3].hasPrefix("User languages:"))
+        XCTAssertTrue(texts[4].hasPrefix("User dictionary:"))
+        XCTAssertTrue(texts[5].hasPrefix("Insertion target:"))
+        XCTAssertTrue(texts[6].hasPrefix("On-screen context:"))
+        XCTAssertTrue(texts[7].hasPrefix("Prior chunks (this session):"))
+        XCTAssertTrue(texts[8].hasPrefix("Now transcribe chunks "))
     }
 
     func test_singleVsBatch_prefixIsByteIdentical_throughPriors() {
@@ -608,14 +735,16 @@ final class GeminiRequestBuilderTests: XCTestCase {
     }
 
     func test_partOrderAndLabels_stableWithAndWithoutOCR() {
-        // Full-prefix fixture exercises the 8-part shape — User
-        // dictionary section is always present at index 3 (after the
-        // two optional `*_instruction` sections), and the OCR sub-block
-        // lives inside the `On-screen context:` part regardless.
+        // Full-prefix fixture exercises the 9-part shape — User
+        // languages and User dictionary sections are both always
+        // present (at indices 3 and 4 after the two optional
+        // `*_instruction` sections), and the OCR sub-block lives
+        // inside the `On-screen context:` part regardless.
         let prefixesFullShape = [
             "App: ",
             "User instruction:",
             "Category instruction:",
+            "User languages:",
             "User dictionary:",
             "Insertion target:",
             "On-screen context:",
@@ -624,12 +753,12 @@ final class GeminiRequestBuilderTests: XCTestCase {
         for screenText in [nil, ocrFixture()] {
             let body = GeminiClient.buildRequestBody(
                 audios: [(Data([0]), "audio/mp4")],
-                context: fullCtx(screenText: screenText),
+                context: fullCtx(userLanguages: ["en"], screenText: screenText),
                 priorTranscripts: [],
                 instruction: GeminiClient.midChunkInstruction(chunkIndex: 1)
             )
             let texts = textParts(body)
-            XCTAssertEqual(texts.count, 8, "full-prefix shape always has 8 text parts")
+            XCTAssertEqual(texts.count, 9, "full-prefix shape always has 9 text parts")
             for (i, prefix) in prefixesFullShape.enumerated() {
                 XCTAssertTrue(texts[i].hasPrefix(prefix),
                     "part \(i) must start with '\(prefix)' (screenText=\(screenText == nil ? "nil" : "set"))")
@@ -642,7 +771,7 @@ final class GeminiRequestBuilderTests: XCTestCase {
     func test_encodedJSON_partsOrderSurvivesEncoding() throws {
         let body = GeminiClient.buildRequestBody(
             audios: [(Data([0xAB]), "audio/mp4")],
-            context: fullCtx(before: "before ", after: " after"),
+            context: fullCtx(userLanguages: ["en"], before: "before ", after: " after"),
             priorTranscripts: [],
             instruction: GeminiClient.midChunkInstruction(chunkIndex: 1)
         )
@@ -652,17 +781,18 @@ final class GeminiRequestBuilderTests: XCTestCase {
         let user = try XCTUnwrap(contents.first)
         let parts = try XCTUnwrap(user["parts"] as? [[String: Any]])
 
-        // 8 text parts + 1 inline_data = 9
-        XCTAssertEqual(parts.count, 9)
+        // 9 text parts + 1 inline_data = 10
+        XCTAssertEqual(parts.count, 10)
         XCTAssertTrue((parts[0]["text"] as? String)?.hasPrefix("App: ") ?? false)
         XCTAssertTrue((parts[1]["text"] as? String)?.hasPrefix("User instruction:") ?? false)
         XCTAssertTrue((parts[2]["text"] as? String)?.hasPrefix("Category instruction:") ?? false)
-        XCTAssertTrue((parts[3]["text"] as? String)?.hasPrefix("User dictionary:") ?? false)
-        XCTAssertTrue((parts[4]["text"] as? String)?.hasPrefix("Insertion target:") ?? false)
-        XCTAssertTrue((parts[5]["text"] as? String)?.hasPrefix("On-screen context:") ?? false)
-        XCTAssertTrue((parts[6]["text"] as? String)?.hasPrefix("Prior chunks (this session):") ?? false)
-        XCTAssertTrue((parts[7]["text"] as? String)?.hasPrefix("Now transcribe chunk_") ?? false)
-        XCTAssertNotNil(parts[8]["inline_data"])
+        XCTAssertTrue((parts[3]["text"] as? String)?.hasPrefix("User languages:") ?? false)
+        XCTAssertTrue((parts[4]["text"] as? String)?.hasPrefix("User dictionary:") ?? false)
+        XCTAssertTrue((parts[5]["text"] as? String)?.hasPrefix("Insertion target:") ?? false)
+        XCTAssertTrue((parts[6]["text"] as? String)?.hasPrefix("On-screen context:") ?? false)
+        XCTAssertTrue((parts[7]["text"] as? String)?.hasPrefix("Prior chunks (this session):") ?? false)
+        XCTAssertTrue((parts[8]["text"] as? String)?.hasPrefix("Now transcribe chunk_") ?? false)
+        XCTAssertNotNil(parts[9]["inline_data"])
     }
 
     // MARK: - Tools / classifier (negative)
@@ -720,9 +850,10 @@ final class GeminiRequestBuilderTests: XCTestCase {
     }
 
     func test_litePrompt_minimumShape_fivePartsInOrder() {
-        // Uncategorized + no user instruction + empty dictionary →
-        // App+Category, User dictionary, Insertion target, instruction,
-        // audio. Five textual parts + one inline_data.
+        // Uncategorized + no user instruction + empty dictionary +
+        // empty languages → App+Category, User languages, User
+        // dictionary, Insertion target, instruction, audio. Five
+        // textual parts + one inline_data.
         let body = GeminiClient.buildLiteRequestBody(
             audio: Data([0x00]),
             mimeType: "audio/mp4",
@@ -730,37 +861,40 @@ final class GeminiRequestBuilderTests: XCTestCase {
             instruction: GeminiClient.liteChunkInstruction()
         )
         let texts = textParts(body)
-        XCTAssertEqual(texts.count, 4,
-            "lite minimum: App+Category, User dictionary, Insertion target, instruction (4 text parts)")
+        XCTAssertEqual(texts.count, 5,
+            "lite minimum: App+Category, User languages, User dictionary, Insertion target, instruction (5 text parts)")
         XCTAssertTrue(texts[0].hasPrefix("App: "))
         XCTAssertTrue(texts[0].contains("Category: uncategorized"))
-        XCTAssertTrue(texts[1].hasPrefix("User dictionary:"))
-        XCTAssertTrue(texts[2].hasPrefix("Insertion target:"))
-        XCTAssertTrue(texts[3].hasPrefix("Transcribe the audio."),
+        XCTAssertTrue(texts[1].hasPrefix("User languages:"))
+        XCTAssertTrue(texts[2].hasPrefix("User dictionary:"))
+        XCTAssertTrue(texts[3].hasPrefix("Insertion target:"))
+        XCTAssertTrue(texts[4].hasPrefix("Transcribe the audio."),
             "lite per-call instruction starts with 'Transcribe the audio.'")
         XCTAssertEqual(inlineCount(body), 1)
     }
 
-    func test_litePrompt_fullShape_sixPartsInOrder() {
+    func test_litePrompt_fullShape_sevenPartsInOrder() {
         // Classified category + non-empty user instruction + non-empty
-        // dictionary → App+Category, User instruction, Category
-        // instruction, User dictionary, Insertion target, instruction.
-        // Six textual parts + one inline_data.
+        // dictionary + non-empty languages → App+Category, User
+        // instruction, Category instruction, User languages, User
+        // dictionary, Insertion target, instruction. Seven textual
+        // parts + one inline_data.
         let body = GeminiClient.buildLiteRequestBody(
             audio: Data([0x00]),
             mimeType: "audio/mp4",
-            context: fullCtx(before: "Hi ", after: " then"),
+            context: fullCtx(userLanguages: ["en"], before: "Hi ", after: " then"),
             instruction: GeminiClient.liteChunkInstruction()
         )
         let texts = textParts(body)
-        XCTAssertEqual(texts.count, 6,
-            "lite full: +User instruction, +Category instruction → 6 text parts")
+        XCTAssertEqual(texts.count, 7,
+            "lite full: +User instruction, +Category instruction → 7 text parts")
         XCTAssertTrue(texts[0].hasPrefix("App: "))
         XCTAssertTrue(texts[1].hasPrefix("User instruction:"))
         XCTAssertTrue(texts[2].hasPrefix("Category instruction:"))
-        XCTAssertTrue(texts[3].hasPrefix("User dictionary:"))
-        XCTAssertTrue(texts[4].hasPrefix("Insertion target:"))
-        XCTAssertTrue(texts[5].hasPrefix("Transcribe the audio."))
+        XCTAssertTrue(texts[3].hasPrefix("User languages:"))
+        XCTAssertTrue(texts[4].hasPrefix("User dictionary:"))
+        XCTAssertTrue(texts[5].hasPrefix("Insertion target:"))
+        XCTAssertTrue(texts[6].hasPrefix("Transcribe the audio."))
         XCTAssertEqual(inlineCount(body), 1)
     }
 

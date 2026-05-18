@@ -27,6 +27,8 @@ But the Home tab does need usage stats (total words, time saved, per-day buckets
 
 **Local-only carve-out:** `StatsStore` (`~/Library/Application Support/NoType/stats.json`) keeps lifetime aggregates that drive the Home tab — total words, session count, per-day buckets, per-app totals. **It never leaves the device.** No network call ever touches this file. It's derived counts only — no transcripts, no audio, no PII.
 
+**Token-usage extension (v4 schema, added by plan 2026-05-18-001 / U5):** the same `DayBucket` shape now also carries `tokenInput / tokenOutput / tokenCached` — Gemini's per-response token billing folded per local-calendar day. Same carve-out rules apply unchanged: token aggregates are local-only, never sent to Gemini, never persisted anywhere outside `stats.json`, and **never decremented on `deleteHistoryEntry`** (matches the long-standing rule for word counts — per-row history deletion is a transcript-preview redaction, not an analytics rewrite; a user who clears history doesn't accidentally zero out yesterday's billing summary). The Settings tab's API section reads these via `StatsSnapshot.tokenTotals(overLastDays:)` for the Today / 7d / 30d / All windows + derived cache hit rate; that read stays inside the process boundary.
+
 ## Why This Matters
 
 - **OSS positioning.** A user can `nettop -p NoType` and see exactly what we send; the answer should be "API calls to Gemini, that's it, nothing else".
@@ -43,16 +45,16 @@ But the Home tab does need usage stats (total words, time saved, per-day buckets
 
 **The carve-out in code:** `StatsStore` doesn't import `URLSession`, doesn't import `Network`, has no networking surface. It's pure file I/O + in-memory aggregation. The only writers are `AppState.finalizeRecording` (post-session) and the read path is the Home tab's `appState.statsSummary` mirror.
 
-**StatsStore schema** (no transcripts, derived counts only — `NoType/History/StatsStore.swift`):
+**StatsSnapshot schema** (no transcripts, derived counts only — `NoType/History/StatsStore.swift`, v4):
 
 ```swift
 struct StatsSnapshot: Codable, Sendable, Equatable {
-    var version: Int
+    var version: Int            // current 4 — v3 → v4 migration is purely additive
     var totalWords: Int
     var totalSessions: Int
     var totalDurationSeconds: Double
     var totalDurationWords: Int
-    var dayBuckets:    [String: DayBucket]
+    var dayBuckets:    [String: DayBucket]   // DayBucket carries tokenInput/Output/Cached in v4
     var appBuckets:    [String: AppBucket]
     var dayAppBuckets: [String: [String: DayBucket]]
 }

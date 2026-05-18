@@ -127,6 +127,35 @@ final class UpdateController {
         phase = .idle
     }
 
+    /// User asked for a manual check from Settings → Updates. Thin wrapper
+    /// around `SPUUpdater.checkForUpdates()` — Sparkle drives the existing
+    /// driver callbacks, so phase transitions through `.checking` → `.idle`
+    /// (no update) or `.checking` → `.available(...)` exactly like the
+    /// scheduled 24 h check.
+    func checkForUpdates() {
+        updater.checkForUpdates()
+    }
+
+    /// User clicked the X chip on the `.available` banner. Tells Sparkle
+    /// to mark this specific appcast version as skipped — Sparkle persists
+    /// the choice and won't surface the same version again on subsequent
+    /// scheduled checks. A newer version will still trigger the banner.
+    ///
+    /// Mirrors `dismiss()` but dispatches `.skip` instead of `.dismiss`
+    /// so the choice is durable across launches. No-op when the slot is
+    /// empty (banner not in `.available` state).
+    func skipThisVersion() {
+        guard let reply = pendingUpdateReply else {
+            log.debug("skipThisVersion called with no pending reply — ignoring")
+            return
+        }
+        pendingUpdateReply = nil
+        pendingInstallReply = nil
+        pendingCancellation = nil
+        reply(.skip)
+        phase = .idle
+    }
+
     // MARK: - Driver callbacks (called from UpdateUserDriver; see access note above)
 
     func setPhase(_ newPhase: Phase) {

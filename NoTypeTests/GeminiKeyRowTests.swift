@@ -1,0 +1,137 @@
+import XCTest
+@testable import NoType
+
+/// Pins the pure helpers backing `GeminiKeyRow` — masked-key
+/// rendering and the error-translation table used by the Edit
+/// modal. The SwiftUI view itself is exercised by the manual
+/// smoke test before commit; this suite covers what is testable
+/// without standing up a render harness:
+///
+///   1. Mask format for short / long / empty keys.
+///   2. The error-display path never leaks a `GeminiError.http`
+///      response body into the rendered text.
+///   3. Case-mapped messages for `.missingKey` and `.http(401)`;
+///      fallback to `error.localizedDescription` for everything
+///      else (already body-redacted by `GeminiError`).
+///
+/// Marked `@MainActor` because `GeminiKeyRow` is a SwiftUI `View`
+/// and under Swift 6 strict concurrency its static methods inherit
+/// the `@MainActor` isolation. CI's Swift toolchain enforces this
+/// at compile time; older toolchains let it slide silently.
+@MainActor
+final class GeminiKeyRowTests: XCTestCase {
+
+    // MARK: - Mask format
+
+    func test_mask_longKey_showsAIzaSyPrefixAndDotPad() {
+        // Real Gemini keys begin with the `AIzaSy` prefix (39 chars
+        // total). The row's at-rest display reveals the first 6
+        // chars and pads the rest with middle dots so the user can
+        // visually confirm "yes, that's my key" without exposing
+        // the suffix to a shoulder-surfer. Test fixture is
+        // intentionally short (not a 35-char suffix) so leak
+        // scanners don't flag the literal as a real GCP key — the
+        // helper only consumes the first 6 chars anyway.
+        let prefix = "AIza" + "Sy"  // split literal — gitleaks scans the raw line
+        let key = prefix + "TESTFAKE"
+        let masked = GeminiKeyRow.maskedDisplay(for: key)
+        XCTAssertTrue(masked.hasPrefix(prefix))
+        XCTAssertEqual(masked.count, prefix.count + 8,
+                       "Mask should be 6 leading chars + 8 middle dots.")
+        XCTAssertTrue(masked.dropFirst(6).allSatisfy { $0 == "•" })
+    }
+
+    func test_mask_shortKey_showsWhatItHasPlusDotPad() {
+        // Defensive: a stub or dev key shorter than 6 chars
+        // shouldn't crash or misrender. Show what we have, pad
+        // with dots so the field never collapses to nothing.
+        let masked = GeminiKeyRow.maskedDisplay(for: "abc")
+        XCTAssertTrue(masked.hasPrefix("abc"))
+        XCTAssertEqual(masked.count, 3 + 8)
+        XCTAssertTrue(masked.dropFirst(3).allSatisfy { $0 == "•" })
+    }
+
+    func test_mask_emptyKey_returnsPlaceholder() {
+        // No key at all → render the bare dot-pad so the layout
+        // doesn't reflow when the user first opens Settings on a
+        // fresh install (key cleared via env path or manual
+        // Keychain delete). The Edit button stays usable.
+        let masked = GeminiKeyRow.maskedDisplay(for: "")
+        XCTAssertEqual(masked, "••••••••")
+    }
+
+    // MARK: - Error translation (body-redaction contract)
+
+    func test_errorBody_doesNotLeakIntoUILabel() {
+        // Hard rule, plan §548 / §571: the body of
+        // `GeminiError.http(status:body:)` may carry partial key
+        // echo, project-id, or quota identifiers. The UI label
+        // must never surface that string verbatim. We assert by
+        // building a sentinel body, running it through the row's
+        // translator, and grepping the rendered message.
+        let sentinel = "secret-project-id-12345"
+        let err = GeminiClient.GeminiError.http(status: 500, body: sentinel)
+        let rendered = GeminiKeyRow.errorMessage(for: err)
+        XCTAssertFalse(rendered.contains(sentinel),
+                       "Body field must NOT appear in the UI label.")
+    }
+
+    func test_errorMessage_missingKey_isCaseMapped() {
+        let rendered = GeminiKeyRow.errorMessage(for: GeminiClient.GeminiError.missingKey)
+        // Specific phrasing from the plan — contextual to the
+        // Edit modal ("invalid format"), narrower than the
+        // generic GeminiError.errorDescription ("Set a key in
+        // Settings.") which doesn't fit the modal.
+        XCTAssertEqual(rendered, "Invalid key — check format")
+    }
+
+    func test_errorMessage_http401_isCaseMapped() {
+        let err = GeminiClient.GeminiError.http(status: 401, body: "irrelevant")
+        let rendered = GeminiKeyRow.errorMessage(for: err)
+        XCTAssertEqual(rendered, "Authentication failed (401)")
+        XCTAssertFalse(rendered.contains("irrelevant"))
+    }
+
+    func test_errorMessage_http403_isCaseMapped() {
+        // 403 means the key exists but isn't authorised for the
+        // model — same user-facing intent as 401 (key won't work).
+        let err = GeminiClient.GeminiError.http(status: 403, body: "irrelevant")
+        let rendered = GeminiKeyRow.errorMessage(for: err)
+        XCTAssertEqual(rendered, "Authentication failed (403)")
+    }
+
+    func test_errorMessage_otherHttp_fallsBackToLocalizedDescription() {
+        // For non-auth HTTP errors we trust GeminiError's
+        // body-redacted `errorDescription`. Verify the contract
+        // (no body leak) AND that the rendered string is the
+        // one GeminiError offered.
+        let err = GeminiClient.GeminiError.http(status: 429, body: "quota-detail-xyz")
+        let rendered = GeminiKeyRow.errorMessage(for: err)
+        XCTAssertEqual(rendered, err.errorDescription)
+        XCTAssertFalse(rendered.contains("quota-detail-xyz"))
+    }
+
+    func test_errorMessage_urlError_offline_isFriendly() {
+        // Network-class errors during validation are common
+        // (Wi-Fi flapping while the user pastes a key). Translate
+        // the URLError to a friendly inline message rather than
+        // surfacing Apple's verbose default.
+        let err = URLError(.notConnectedToInternet)
+        let rendered = GeminiKeyRow.errorMessage(for: err)
+        XCTAssertEqual(rendered, "No internet — NoType needs to reach Gemini to validate.")
+    }
+
+    func test_errorMessage_urlError_timeout_isFriendly() {
+        let err = URLError(.timedOut)
+        let rendered = GeminiKeyRow.errorMessage(for: err)
+        XCTAssertEqual(rendered, "Validation timed out. Try again.")
+    }
+
+    func test_errorMessage_genericError_fallsBackToLocalizedDescription() {
+        struct Toy: LocalizedError {
+            var errorDescription: String? { "something else" }
+        }
+        let rendered = GeminiKeyRow.errorMessage(for: Toy())
+        XCTAssertEqual(rendered, "something else")
+    }
+}

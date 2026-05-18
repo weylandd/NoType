@@ -48,10 +48,21 @@ final class HotkeyMonitor: @unchecked Sendable {
         case none
     }
 
-    private let binding:   HotkeyBinding
-    private let onPress:   @MainActor @Sendable () -> Void
-    private let onRelease: @MainActor @Sendable () -> Void
-    private let onEscape:  @MainActor @Sendable () -> Void
+    private let binding:        HotkeyBinding
+    private let cancelBinding:  HotkeyBinding
+    private let onPress:        @MainActor @Sendable () -> Void
+    private let onRelease:      @MainActor @Sendable () -> Void
+    private let onEscape:       @MainActor @Sendable () -> Void
+
+    /// `keyDown` virtual-key code that triggers the cancel callback.
+    /// Resolved from `cancelBinding.virtualKeyCode` at init; falls back
+    /// to `Self.escapeKeyCode` (53) so a malformed cancel binding can
+    /// never accidentally make the cancel path unreachable. `AppState`
+    /// validates that the new cancel binding satisfies
+    /// `isAllowedAsCancelBinding` before applying, so in practice this
+    /// fallback only protects against an `init` path that bypasses
+    /// validation.
+    private let cancelKeyCode:  Int64
 
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
@@ -79,15 +90,18 @@ final class HotkeyMonitor: @unchecked Sendable {
     private var isActive: Bool = true
 
     init(
-        binding:   HotkeyBinding = .default,
-        onPress:   @escaping @MainActor @Sendable () -> Void,
-        onRelease: @escaping @MainActor @Sendable () -> Void,
-        onEscape:  @escaping @MainActor @Sendable () -> Void
+        binding:        HotkeyBinding = .default,
+        cancelBinding:  HotkeyBinding = HotkeyBinding(code: "Escape"),
+        onPress:        @escaping @MainActor @Sendable () -> Void,
+        onRelease:      @escaping @MainActor @Sendable () -> Void,
+        onEscape:       @escaping @MainActor @Sendable () -> Void
     ) {
-        self.binding   = binding
-        self.onPress   = onPress
-        self.onRelease = onRelease
-        self.onEscape  = onEscape
+        self.binding       = binding
+        self.cancelBinding = cancelBinding
+        self.cancelKeyCode = cancelBinding.virtualKeyCode ?? Self.escapeKeyCode
+        self.onPress       = onPress
+        self.onRelease     = onRelease
+        self.onEscape      = onEscape
     }
 
     /// Try to install the tap. Returns `false` if Accessibility isn't granted yet.
@@ -248,11 +262,13 @@ final class HotkeyMonitor: @unchecked Sendable {
         let keycode = event.getIntegerValueField(.keyboardEventKeycode)
 
         if type == .keyDown {
-            // Escape cancels an in-flight recording session. AppState
-            // gates on `currentSession != nil` so a stray Escape press
-            // when no session is running is a harmless no-op. The event
-            // still passes through to the focused app (`.listenOnly`).
-            if keycode == Self.escapeKeyCode {
+            // Cancel binding (default Escape) aborts an in-flight
+            // recording session. AppState gates on `currentSession != nil`
+            // so a stray press when no session is running is a harmless
+            // no-op. The event still passes through to the focused app
+            // (`.listenOnly`). The cancel keycode is resolved once at
+            // init time from the configured `cancelBinding`.
+            if keycode == cancelKeyCode {
                 let onEscape = self.onEscape
                 Task { @MainActor [weak self] in
                     guard self?.isActive == true else { return }
