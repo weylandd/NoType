@@ -3,7 +3,7 @@ title: Settings Screen — Implementation Progress
 plan: docs/plans/2026-05-18-001-feat-settings-screen-plan.md
 branch: feat/settings-screen
 status: in-progress
-last_updated: 2026-05-18
+last_updated: 2026-05-18 (U2 shipped)
 ---
 
 # Settings Screen — Implementation Progress
@@ -20,7 +20,7 @@ Entry-point convention for follow-up sessions: pick the next pending unit in dep
 |---|---|---|---|---|
 | U1. Settings UI scaffold + sidebar tab + DS section primitives | §246-289 | ✅ Shipped | `511b941` | 4th sidebar tab, 5 empty section blocks, `DSSettingsSection` / `DSSettingsRow` primitives, popover gear restored, `pendingTabSelection` cross-window flag, dead `SettingsView.swift` deleted, 10 `MainTabTests` |
 | U5. StatsStore v3→v4 + TokenUsage + per-session token recording | §462-520 | ✅ Shipped | `8610f8a` | Path (a) — new `*WithUsage` overloads alongside existing `transcribe*`. `healIfPreV4` purely additive (no field zeroing). 18 new tests (11 `TokenUsageTests` + 7 `StatsStoreTests` extensions). Carve-out doc extended for tokens |
-| U2. General — Login Items / Sleep prevention / Reset onboarding | §291-338 | ⏳ Pending | — | Depends on U1 (done). P2 resolved per user: skip-revalidation-if-unchanged for Reset-onboarding invalid-Keychain-key trap |
+| U2. General — Login Items / Sleep prevention / Reset onboarding | §291-338 | ✅ Shipped | _next commit_ | Theme picker / Open at login (SMAppService) / Prevent sleep (IOPMAssertion-RAII via `SleepAssertion`, AppState-owned) / Reset onboarding (confirmationDialog → `OnboardingState.resetWizard`). 12 new tests (4 SleepAssertion, 4 LoginItemController, 4 OnboardingState). P2 trap closed — existing resume-card path in `OnboardingAPIKeyStep` already skips `validateKey` when the pre-filled value is unchanged |
 | U3. Shortcuts — hotkey binding picker / Recording mode / Cancel shortcut | §341-396 | ⏳ Pending | — | Depends on U1 (done). Hotkey invariant 2 weakening for Hold+Space is load-bearing — secondary `.defaultTap` Space-only CGEventTap |
 | U4. Microphone & Audio — Core Audio HAL rewrite (R16 reframed) | §399-458 | ⏳ Pending | — | Depends on U1 (done). ~1-2 weeks of work. Characterization-first per execution note. Requires hardware smoke on AirPods + Music for primary success criterion |
 | U6. API section — Gemini key Edit + windowed token stats | §524-578 | ⏳ Pending | — | Depends on U1 (done) **and U5 (done)** — both met, ready to start |
@@ -38,7 +38,6 @@ Entry-point convention for follow-up sessions: pick the next pending unit in dep
 - No load-bearing prompt / schema changes (cache-prefix part-count untouched).
 
 **Alternatives if a different unit makes sense:**
-- **U2** if user wants quick functional wins (Theme picker / Login Items / Reset onboarding) before deeper work.
 - **U3** if hotkey ergonomics are a felt pain (Hold+Space mode, custom cancel shortcut).
 - **U7** if cache-prefix work feels timely (test-first overhead is bounded — the part-count change is one of the more contained schema changes in the plan).
 - **U4** is the largest single unit; tackle when there's a multi-day window with hardware (AirPods + Music) available for the R16-reframed smoke.
@@ -53,6 +52,14 @@ Entry-point convention for follow-up sessions: pick the next pending unit in dep
 - **`pendingTabSelection` consume helper extracted as `MainTab.consumePendingSelection(pending:current:)`** — pure function, testable in isolation, used by `MainWindowView.consumePendingTabSelection`. Original plan §270 inline-clear-then-apply expanded into a static helper so tests can pin the atomic clear-first-apply-second invariant without standing up a `Window` scene.
 - **SwiftUI render tests deferred** — no snapshot-testing infrastructure in repo. `MainTabTests` covers the testable surface (enum membership/ordering/labels/icons + the pure consume helper). Visual fidelity verified via interactive smoke (user signed off 2026-05-18).
 - **`DS.Font.title()` does not exist** — used `.system(size: 18, weight: .semibold)` for the section title, mirroring `HomeView.header` pattern.
+
+### U2 (session 2026-05-18)
+
+- **`SleepAssertion` ownership lives on `AppState`, not `RecordingSession`.** `acquireSleepAssertionIfNeeded()` is called from `AppState.handleHotkeyPress` after a successful `session.start()` (not from `RecordingSession.start()` itself). Cleaner — keeps the IOKit handle on `@MainActor`, decouples RecordingSession from AppState, and there's no risk of double-release from session value-copies during partial-recovery flows. `releaseSleepAssertion()` is wired into the three end paths in AppState: `finalizeRecording` success arm, `finalizeRecording` catch-error arm, and `cancelRecording`. The CancellationError catch arm intentionally doesn't release because `cancelRecording` already did so synchronously when the user hit Esc.
+- **P2 resolution required no new code in `OnboardingAPIKeyStep`.** The existing resume-card path at `OnboardingAPIKeyStep.continueTapped` (lines 311-315) already calls `onboarding.goNext()` without invoking `validateKey` when `!isEditing && savedKey != nil`. So the user clicks "Reset" → wizard reopens at welcome → walks to API-key step → sees the resume card (key pre-filled) → Continue → no live validation call → step advances. Trap from §823 was already closed by U1's keychain UX work; just confirmed by code reading.
+- **`LoginItemController.refresh()` called from `SettingsTabView.onAppear`.** `SMAppService` has no KVO/publisher surface so we re-read on every Settings-tab appearance. Belt and braces: the controller also refreshes immediately after every `register`/`unregister` call inside `setEnabled(_:)`.
+- **`SystemSettingsPane` not extended for Login Items.** Login Items uses a different deep-link scheme (`x-apple.systempreferences:com.apple.LoginItems-Settings.extension`, not `com.apple.preference.security?Privacy_*`). Pulling it into the existing enum would either bloat the case body (per-case base URL) or weaken the type signal ("this enum covers Privacy panes"). Inline string + `nonisolated static let` on `LoginItemController` is the smaller change, and the string is test-pinned in `LoginItemControllerTests`.
+- **`SMAppService.Status.notFound` collapsed into `.notRegistered`** in the display-side `LoginItemStatus` enum. Both render as "Off" — the SDK distinction is internal classification only.
 
 ### U5 (session 2026-05-18)
 
@@ -73,7 +80,7 @@ Items the implementation surfaced that need attention in the relevant follow-up 
 
 3. **U7 cache-prefix part count change** (carryover from plan §470-472). `GeminiRequestBuilderTests` pins the current part count (6 minimum / 8 full); adding `User languages:` at position 4 will break ≥5 tests. Plan execution note already calls this out — start U7 by updating fixtures + adding new positioning tests FIRST, then modify `buildRequestBody` / `buildLiteRequestBody`.
 
-4. **U2 SleepAssertion ownership in AppState** (plan §304 / §314). Single-ownership of `activeSleepAssertion: SleepAssertion?` on `AppState` (not on the value-type `RecordingSession`) is load-bearing — RecordingSession copies during partial-recovery would otherwise risk double-release of the IOKit handle. Honor this when implementing U2.
+4. ~~**U2 SleepAssertion ownership in AppState** (plan §304 / §314).~~ **Closed by U2 (this session).** `AppState.activeSleepAssertion` is `@MainActor`-isolated single-owner; acquire/release wired into the three session-end paths. No partial-recovery double-release risk.
 
 5. **U3 RecordingMode `.effective(stored:hotkey:)` pure helper** (plan §370). Stored UserDefaults value is preserved across hotkey rebinds; effective mode auto-downgrades to `.hold` when stored `.holdSpacebarLock` collides with a non-modifier hotkey. AppState's `handleHotkeyPress` must use **effective**, not stored, mode. Pinned by a new `RecordingModeEffectiveTests` matrix.
 
@@ -87,8 +94,11 @@ Items the implementation surfaced that need attention in the relevant follow-up 
 | `TokenUsageTests` | 11 | `.zero` identity; `+` componentwise / commutative / associative; mapping from JSON-decoded `UsageMetadata` (all fields, missing cached, fully empty, nil payload); Codable round-trip |
 | `StatsStoreTests` (additions) | 7 | `test_healIfPreV4_preservesV3Duration` (test-first); single-session + multi-session token accumulation; empty-bundle day-only-bucket; persistence round-trip; windowed `tokenTotals` (last7 / last30 / all / empty / 400d ancient) |
 | `RecordingSessionPartialRecoveryTests` (additions) | 1 | `SessionSummary.tokens` round-trip |
+| `SleepAssertionTests` | 4 | init acquires non-zero IOPMAssertion handle; `release()` flips `isReleased` flag; `release()` idempotent; `deinit` safety net works for callers who forget |
+| `LoginItemControllerTests` | 4 | `SMAppService.Status` → `LoginItemStatus` mapping (incl. `.notFound` → `.notRegistered` collapse); `isEnabled` / `requiresApproval` predicates; deep-link URL string pinned |
+| `OnboardingStateTests` | 4 | `resetWizard` clears all three onboarding keys; preserves hotkey binding + selected mic UID; idempotent on cleared defaults; instance `currentStep` returns to `.welcome` |
 
-**Net:** 569 / 569 pass excluding live-API `PromptEvalTests`.
+**Net:** 581 / 581 pass excluding live-API `PromptEvalTests`.
 
 ---
 
@@ -102,4 +112,4 @@ Items the implementation surfaced that need attention in the relevant follow-up 
 
 ## Open P2 / scope items still to resolve
 
-- **U2 Reset onboarding — invalid Keychain key trap** (plan §823). User resolved 2026-05-18: option (a) skip-revalidation-if-unchanged. Implement: wizard's API-key step skips the live `validateKey` call when the user hasn't edited the pre-filled value (format-only check passes). Add the chosen behavior to AE9 acceptance criteria when implementing U2.
+_(All P2 items from the original review walkthrough are now closed — see status matrix above for what shipped.)_

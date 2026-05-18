@@ -137,6 +137,36 @@ final class AppState {
     @ObservationIgnored private var cachedAPIKey: String?
     @ObservationIgnored private var apiKeyLoaded = false
 
+    /// "Prevent sleep while recording" toggle from the Settings → General
+    /// section. Default `false` — most sessions are short enough that
+    /// the system never reaches its idle-sleep threshold. UserDefaults-
+    /// backed via `notype.preventSleepDuringRecording`. When true,
+    /// `RecordingSession.start()` reaches into `acquireSleepAssertionIfNeeded()`
+    /// and `stop()` / `cancel()` / terminal-error paths release.
+    var preventSleepDuringRecording: Bool {
+        didSet {
+            UserDefaults.standard.set(
+                preventSleepDuringRecording,
+                forKey: Self.preventSleepKey
+            )
+        }
+    }
+
+    @ObservationIgnored fileprivate static let preventSleepKey = "notype.preventSleepDuringRecording"
+
+    /// `@MainActor`-isolated owner of the currently-held `SleepAssertion`.
+    /// Single source of truth — kept on `AppState` rather than
+    /// `RecordingSession` because the session is a value-style type that
+    /// can be copied across partial-recovery flows; double-releasing the
+    /// IOKit handle from two copies would log a warning at best.
+    @ObservationIgnored private var activeSleepAssertion: SleepAssertion?
+
+    /// `SMAppService.mainApp` wrapper for the Settings → General →
+    /// "Open at login" toggle. Owned at the AppState layer so the
+    /// status mirror survives Settings tab transitions and is
+    /// observable from anywhere in the SwiftUI tree.
+    let loginItemController: LoginItemController
+
     var isRecording: Bool {
         if case .recording = recordingState { return true }
         return false
@@ -162,6 +192,8 @@ final class AppState {
         self.appCategorizer = appCategorizer
         self.dictionaryStore = dictionaryStore
         self.onboarding = onboarding
+        self.preventSleepDuringRecording = UserDefaults.standard.bool(forKey: Self.preventSleepKey)
+        self.loginItemController = LoginItemController()
 
         Task { @MainActor [weak self] in
             await self?.refreshHistory()
@@ -545,6 +577,7 @@ final class AppState {
         let startedAt = Date()
         pressStartedAt = startedAt
         recordingState = .recording(startedAt: startedAt)
+        acquireSleepAssertionIfNeeded()
         let target = NSWorkspace.shared.frontmostApplication?.localizedName ?? "Active app"
         hud.showRecordingHUD(
             startedAt: startedAt,
@@ -635,6 +668,7 @@ final class AppState {
                     self.history.removeFirst(self.history.count - 10)
                 }
                 self.recordingState = .idle
+                self.releaseSleepAssertion()
                 self.hud.hideTranscribingHUD()
                 if sessionSummary.hasFailures {
                     Self.log.warning(
@@ -670,13 +704,16 @@ final class AppState {
             } catch is CancellationError {
                 // User-initiated abort via Escape during `.sending`.
                 // `cancelRecording` already cleared state, hid the HUD,
-                // and nilled `currentSession`. Nothing else to do.
+                // and nilled `currentSession`. Nothing else to do —
+                // including the sleep assertion, which `cancelRecording`
+                // already released on the synchronous Escape path.
                 Self.log.info("transcription cancelled by user")
             } catch {
                 Self.log.error("session stop failed: \(error.localizedDescription, privacy: .public)")
                 guard self.currentSession === session, case .sending = self.recordingState else { return }
                 self.currentSession = nil
                 self.recordingState = .idle
+                self.releaseSleepAssertion()
                 self.hud.hideTranscribingHUD()
                 self.surfaceError(.sessionFailure(error))
             }
@@ -710,6 +747,7 @@ final class AppState {
         doubleTapTimeout?.cancel()
         doubleTapTimeout = nil
         recordingState = .idle
+        releaseSleepAssertion()
         // Both calls are idempotent; we hide whichever HUD is currently
         // up (recording HUD during `.recording`, transcribing HUD during
         // `.sending`).
@@ -723,6 +761,43 @@ final class AppState {
         Task { @MainActor in
             await session.cancel()
         }
+    }
+
+    // MARK: - Sleep assertion
+
+    /// Acquire a `kIOPMAssertPreventUserIdleSystemSleep` assertion for
+    /// the duration of the active recording session, iff the user has
+    /// toggled `preventSleepDuringRecording` on. Idempotent — repeated
+    /// calls during one session are no-ops because the existing
+    /// assertion already covers it.
+    ///
+    /// Single ownership rule: only `AppState` ever touches
+    /// `activeSleepAssertion`. `RecordingSession` does NOT see this
+    /// type — keeps the IOKit handle on the @MainActor side and
+    /// sidesteps any double-release risk from session value-copies
+    /// during partial-recovery flows (architecture invariant 6).
+    func acquireSleepAssertionIfNeeded() {
+        guard preventSleepDuringRecording else { return }
+        guard activeSleepAssertion == nil else { return }
+        do {
+            activeSleepAssertion = try SleepAssertion(reason: "NoType active recording")
+            Self.log.info("sleep assertion acquired")
+        } catch {
+            Self.log.warning("sleep assertion acquire failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Release the active sleep assertion, if any. Idempotent — safe
+    /// to call from every session-end path (success, terminal error,
+    /// user cancel) even when no assertion was acquired (because the
+    /// user has the toggle off, or assertion creation failed silently).
+    /// Recoverable-only chunk failures (markers) MUST NOT call this
+    /// — the session is still live.
+    func releaseSleepAssertion() {
+        guard let assertion = activeSleepAssertion else { return }
+        assertion.release()
+        activeSleepAssertion = nil
+        Self.log.info("sleep assertion released")
     }
 
     /// Hand the categorizer a closure that bounces back to MainActor and

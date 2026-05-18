@@ -81,4 +81,30 @@ final class OnboardingState {
         UserDefaults.standard.set(currentStep.rawValue,  forKey: Self.currentStepKey)
         UserDefaults.standard.set(furthestStep.rawValue, forKey: Self.furthestStepKey)
     }
+
+    /// Reopen the onboarding wizard from `welcome` without losing the
+    /// user's saved API key, hotkey binding, or selected microphone.
+    ///
+    /// Called by the Settings → General → "Reset onboarding" button
+    /// (plan §305, AE9). Only the three onboarding UserDefaults keys
+    /// are cleared. The wizard's API-key step detects the existing
+    /// Keychain entry and skips revalidation when the pre-filled value
+    /// is unchanged — see `OnboardingAPIKeyStep.continueTapped`'s
+    /// "Resume path" branch. That keeps a user with a known-good key
+    /// from being trapped on the API-key step.
+    func resetWizard() {
+        Self.resetWizardDefaults(in: .standard)
+        currentStep  = .welcome
+        furthestStep = .welcome
+    }
+
+    /// Side-effect-only counterpart of `resetWizard()` — clears the
+    /// three onboarding keys in any `UserDefaults` instance. Exposed
+    /// so tests can verify on an isolated suite without touching the
+    /// process-wide standard defaults.
+    nonisolated static func resetWizardDefaults(in defaults: UserDefaults) {
+        defaults.removeObject(forKey: currentStepKey)
+        defaults.removeObject(forKey: furthestStepKey)
+        defaults.removeObject(forKey: completeKey)
+    }
 }
