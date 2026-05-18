@@ -7,9 +7,33 @@ import SwiftUI
 /// utility. NSWorkspace also pings us with `applicationShouldHandleReopen`
 /// when the user double-clicks the dock-less app icon; we use that to
 /// pop the main window if it's been closed.
+///
+/// `applicationWillTerminate(_:)` is the canonical hook for the
+/// orderly-quit path triggered by the popover's Quit button
+/// (`NSApp.terminate(nil)` in `HistoryPopover`). It does NOT fire on
+/// crash / kill — for that, the assertion classes' `deinit` is the
+/// safety net (e.g. `MusicInterruption.deinit` restores mute). Used to
+/// run the `MusicInterruption` mute-restore *synchronously* before the
+/// process exits so the user's system isn't left stranded on mute when
+/// the deinit chain may not run reliably under `NSApp.terminate`. Any
+/// AppState-side handler is registered via `terminationHandler` after
+/// the `@NSApplicationDelegateAdaptor` instantiates this class.
 final class NoTypeAppDelegate: NSObject, NSApplicationDelegate {
+    /// Runs from `applicationWillTerminate(_:)` on the main thread,
+    /// synchronously before the process exits. Used by `AppState` to
+    /// release the `MusicInterruption` assertion if one is held — see
+    /// the class doc-comment for why.
+    var terminationHandler: (@MainActor () -> Void)?
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // AppKit guarantees this fires on the main thread before the
+        // process dies, so the synchronous `releaseMusicInterruption()`
+        // call gets to roll back the CoreAudio mute write before exit.
+        MainActor.assumeIsolated { terminationHandler?() }
     }
 }
 
@@ -61,6 +85,18 @@ struct NoTypeApp: App {
         _updates    = State(wrappedValue: UpdateController())
     }
 
+    /// Bind the termination handler once at scene-graph build time so
+    /// the user's mute state always gets restored on `NSApp.terminate(nil)`
+    /// (popover's Quit button). The delegate retains the closure; the
+    /// closure retains the State-wrapped `appState`, which is the same
+    /// instance the rest of the app uses. Idempotent — re-binding the
+    /// same closure on every body invalidation is harmless.
+    private func wireTerminationHandler() {
+        appDelegate.terminationHandler = { [appState] in
+            appState.releaseMusicInterruption()
+        }
+    }
+
     var body: some Scene {
         // Tray icon is suppressed entirely while the wizard is pending.
         // No menu-bar surface should exist before the user has agreed
@@ -106,6 +142,11 @@ struct NoTypeApp: App {
                 // to — `start()` from MainWindowView's lifecycle fits that.
                 // Idempotent: the controller no-ops if started already.
                 .task { updates.start() }
+                // Register the orderly-quit handler that releases the
+                // MusicInterruption assertion before exit so the user's
+                // mute state survives `NSApp.terminate(nil)` from the
+                // popover's Quit button.
+                .task { wireTerminationHandler() }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)

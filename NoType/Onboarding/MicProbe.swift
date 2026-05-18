@@ -26,6 +26,24 @@ import OSLog
 final class MicProbe: @unchecked Sendable {
     private static let log = Logger(subsystem: "app.notype", category: "onboarding.mic")
 
+    /// MicProbe-local error namespace. Lives here (not on
+    /// `AudioRecorder.AudioError`) because the probe rides on
+    /// `AVAudioEngine` for the onboarding spectrum meter while the
+    /// production recorder is pure HAL — the two surface different
+    /// failure modes and one shared enum would be a misleading
+    /// "tagged union of unrelated paths".
+    enum Error: Swift.Error, LocalizedError {
+        case engineStartFailed(Swift.Error)
+        case converterCreateFailed
+
+        var errorDescription: String? {
+            switch self {
+            case .engineStartFailed(let e): "Couldn't start audio engine: \(e.localizedDescription)"
+            case .converterCreateFailed:    "Couldn't create audio converter."
+            }
+        }
+    }
+
     private let engine = AVAudioEngine()
     private let lock = NSLock()
     private var converter: AVAudioConverter?
@@ -124,7 +142,7 @@ final class MicProbe: @unchecked Sendable {
         let input = engine.inputNode
         let inFmt = input.outputFormat(forBus: 0)
         guard inFmt.sampleRate > 0, inFmt.channelCount > 0 else {
-            throw AudioRecorder.AudioError.converterCreateFailed
+            throw MicProbe.Error.converterCreateFailed
         }
         guard let outFmt = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -132,10 +150,10 @@ final class MicProbe: @unchecked Sendable {
             channels: 1,
             interleaved: false
         ) else {
-            throw AudioRecorder.AudioError.converterCreateFailed
+            throw MicProbe.Error.converterCreateFailed
         }
         guard let conv = AVAudioConverter(from: inFmt, to: outFmt) else {
-            throw AudioRecorder.AudioError.converterCreateFailed
+            throw MicProbe.Error.converterCreateFailed
         }
         self.inputFormat = inFmt
         self.outputFormat = outFmt
@@ -156,7 +174,7 @@ final class MicProbe: @unchecked Sendable {
         } catch {
             input.removeTap(onBus: 0)
             tapInstalled = false
-            throw AudioRecorder.AudioError.engineStartFailed(error)
+            throw MicProbe.Error.engineStartFailed(error)
         }
     }
 

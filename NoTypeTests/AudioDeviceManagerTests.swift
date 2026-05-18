@@ -340,4 +340,66 @@ final class AudioDeviceManagerTests: XCTestCase {
         defaults.set("not-a-bool", forKey: "notype.preferBuiltInOverBluetooth")
         XCTAssertTrue(AudioDeviceManager.loadPreferBuiltInOverBluetooth(from: defaults))
     }
+
+    // MARK: - HAL stream-format helpers (consumed by AudioRecorder's HAL path)
+
+    /// Build a synthetic interleaved-float32 ASBD at an arbitrary
+    /// sample rate / channel count for round-trip testing.
+    /// `AVAudioFormat(streamDescription:)` accepts the standard
+    /// representations Core Audio hands us for built-in / USB / BT
+    /// devices on macOS — float32, non-interleaved is the universal
+    /// shape today; 16-bit-int devices still exist in the wild but
+    /// `AVAudioConverter` handles both.
+    private func makeFloat32ASBD(
+        sampleRate: Double,
+        channels: UInt32,
+        interleaved: Bool
+    ) -> AudioStreamBasicDescription {
+        let bytesPerSample: UInt32 = 4
+        var flags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked
+        if !interleaved {
+            flags |= kAudioFormatFlagIsNonInterleaved
+        }
+        let framesPerPacket: UInt32 = 1
+        let bytesPerFrame = interleaved ? bytesPerSample * channels : bytesPerSample
+        return AudioStreamBasicDescription(
+            mSampleRate: sampleRate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: flags,
+            mBytesPerPacket: bytesPerFrame * framesPerPacket,
+            mFramesPerPacket: framesPerPacket,
+            mBytesPerFrame: bytesPerFrame,
+            mChannelsPerFrame: channels,
+            mBitsPerChannel: bytesPerSample * 8,
+            mReserved: 0
+        )
+    }
+
+    func test_avAudioFormat_roundsTripStandardBuiltInMic_44100Mono() {
+        // Most MacBook built-in mics report 44.1 kHz mono float32.
+        let asbd = makeFloat32ASBD(sampleRate: 44_100, channels: 1, interleaved: false)
+        let fmt = AudioDeviceManager.avAudioFormat(from: asbd)
+        XCTAssertNotNil(fmt)
+        XCTAssertEqual(fmt?.sampleRate, 44_100)
+        XCTAssertEqual(fmt?.channelCount, 1)
+        XCTAssertEqual(fmt?.commonFormat, .pcmFormatFloat32)
+    }
+
+    func test_avAudioFormat_roundsTripUSBMic_48000Mono() {
+        // Many USB mics ship 48 kHz native.
+        let asbd = makeFloat32ASBD(sampleRate: 48_000, channels: 1, interleaved: false)
+        let fmt = AudioDeviceManager.avAudioFormat(from: asbd)
+        XCTAssertEqual(fmt?.sampleRate, 48_000)
+        XCTAssertEqual(fmt?.channelCount, 1)
+    }
+
+    func test_avAudioFormat_roundsTripStereoDevice() {
+        // Aggregate / stereo USB interfaces — AVAudioConverter will
+        // downmix to mono in our 16 kHz mono output, but the HAL
+        // adapter must preserve the source's channel count so the
+        // bufferListNoCopy alignment matches the actual bytes.
+        let asbd = makeFloat32ASBD(sampleRate: 48_000, channels: 2, interleaved: false)
+        let fmt = AudioDeviceManager.avAudioFormat(from: asbd)
+        XCTAssertEqual(fmt?.channelCount, 2)
+    }
 }
