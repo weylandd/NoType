@@ -59,6 +59,14 @@ struct HotkeyBinding: Codable, Equatable, Sendable {
     /// `CGEventFlags.rawValue`, not as ordinary keyDown/keyUp events.
     var isModifier: Bool { Self.modifierBits[code] != nil }
 
+    /// Alias for `isModifier` exposed under the name UI code reads
+    /// against — picker gating for Hold+Space mode, runtime guard in
+    /// `RecordingMode.effective(stored:hotkey:)`. Same predicate; the
+    /// dedicated name documents intent at the call site ("this key is
+    /// in the modifier class — safe to combine with a Space lock"
+    /// vs "this is a Modifier and triggers `flagsChanged`").
+    var isModifierClass: Bool { isModifier }
+
     /// `NX_DEVICE*KEYMASK` bit in `CGEventFlags.rawValue`. Returns nil
     /// for non-modifier keys (they use `virtualKeyCode` instead).
     var modifierBit: UInt64? { Self.modifierBits[code] }
@@ -77,6 +85,26 @@ struct HotkeyBinding: Codable, Equatable, Sendable {
             return false
         default:
             return isModifier || virtualKeyCode != nil
+        }
+    }
+
+    /// Allowed as the **cancel** shortcut for an in-flight recording.
+    /// Permits Escape (the default and a natural fit for "abort"),
+    /// rejects modifiers (a modifier-only "cancel" is ergonomically
+    /// odd — flickers on any incidental modifier press during typing)
+    /// and the reserved keys.
+    ///
+    /// The "cancel ≠ recording" collision check lives one layer up in
+    /// `AppState.applyCancelHotkeyBinding(_:)` so the validator can
+    /// surface an inline error referring to the user's current
+    /// recording binding by name.
+    var isAllowedAsCancelBinding: Bool {
+        switch code {
+        case "Power", "CapsLock", "":
+            return false
+        default:
+            // Non-modifier keys only — see header for why.
+            return !isModifier && virtualKeyCode != nil
         }
     }
 

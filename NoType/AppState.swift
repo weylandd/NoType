@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import os
 import OSLog
 import SwiftUI
 
@@ -98,6 +99,21 @@ final class AppState {
     /// in a new binding live — used by the onboarding remap UI and the
     /// future Settings shortcut picker.
     @ObservationIgnored private(set) var hotkeyBinding: HotkeyBinding = .load()
+
+    /// Cancel shortcut for an in-flight recording session. Read at init
+    /// from `UserDefaults` (falls back to Escape). `applyCancelHotkeyBinding(_:)`
+    /// swaps it live, rebuilding the underlying `HotkeyMonitor` against
+    /// the new binding. Persistence key: `notype.cancelHotkey.bindingCode`.
+    /// Restricted to non-modifier keys (see `HotkeyBinding.isAllowedAsCancelBinding`).
+    @ObservationIgnored private(set) var cancelHotkeyBinding: HotkeyBinding = AppState.loadCancelHotkey()
+
+    @ObservationIgnored static let cancelHotkeyDefaultsKey = "notype.cancelHotkey.bindingCode"
+
+    fileprivate static func loadCancelHotkey() -> HotkeyBinding {
+        let stored = UserDefaults.standard.string(forKey: cancelHotkeyDefaultsKey) ?? ""
+        let candidate = HotkeyBinding(code: stored.isEmpty ? "Escape" : stored)
+        return candidate.isAllowedAsCancelBinding ? candidate : HotkeyBinding(code: "Escape")
+    }
     @ObservationIgnored private let permissions: PermissionsViewModel
     @ObservationIgnored private let hud: HUDController
     @ObservationIgnored private let gemini: GeminiClient
@@ -147,6 +163,24 @@ final class AppState {
     /// locked, releases of the hotkey are ignored — the session keeps
     /// running. Next press flips back to false and stops the session.
     @ObservationIgnored private var lockedRecording = false
+
+    /// Lock-protected mirror of "Hold+Space lock should fire right
+    /// now": the recording hotkey is held, the session is in
+    /// `.recording`, and we aren't already locked (and the hotkey
+    /// isn't Space itself — pressing your own hotkey-as-Space would
+    /// be ambiguous). Read from the secondary `SpacebarLockMonitor`
+    /// tap thread; written from `@MainActor`-isolated handlers via
+    /// `updateSpacebarLockEnabled()` whenever any input to the
+    /// predicate changes.
+    @ObservationIgnored fileprivate nonisolated let spacebarLockEnabled =
+        OSAllocatedUnfairLock<Bool>(initialState: false)
+
+    /// Secondary `.defaultTap` CGEventTap installed for the duration
+    /// of an active session. Consumes Space when the predicate above
+    /// reads true and fires `handleSpacebarLockTrigger()`. See
+    /// `NoType/Hotkey/SpacebarLockMonitor.swift` for the rationale
+    /// behind the narrow invariant-2 weakening.
+    @ObservationIgnored private var spacebarLockMonitor: SpacebarLockMonitor?
 
     /// Cached Gemini API key — populated on first access from `SecretStore`.
     /// Re-reads only happen via `updateAPIKey`.
@@ -434,14 +468,15 @@ final class AppState {
     private func installHotkeyIfPossible() {
         guard hotkeyMonitor == nil else { return }
         let monitor = HotkeyMonitor(
-            binding:   hotkeyBinding,
+            binding:       hotkeyBinding,
+            cancelBinding: cancelHotkeyBinding,
             onPress:   { [weak self] in self?.handleHotkeyPress() },
             onRelease: { [weak self] in self?.handleHotkeyRelease() },
             onEscape:  { [weak self] in self?.cancelRecording() }
         )
         if monitor.start() {
             hotkeyMonitor = monitor
-            Self.log.info("hotkey installed (\(self.hotkeyBinding.code, privacy: .public))")
+            Self.log.info("hotkey installed (record=\(self.hotkeyBinding.code, privacy: .public) cancel=\(self.cancelHotkeyBinding.code, privacy: .public))")
         }
     }
 
@@ -484,6 +519,50 @@ final class AppState {
         installHotkeyIfPossible()
     }
 
+    /// Outcome of applying a new cancel binding. Surfaces validation
+    /// failure to the UI inline (refused mid-session, collision with
+    /// the recording hotkey, unsupported key class). Mirrors the
+    /// silent-refuse pattern of `applyHotkeyBinding(_:)` but with
+    /// explicit feedback because the Settings sheet needs to tell
+    /// the user *why* their pick was rejected.
+    enum CancelBindingApplyResult: Equatable, Sendable {
+        case applied
+        case noChange
+        case rejectedDuringRecording
+        case rejectedCollidesWithRecordingHotkey
+        case rejectedDisallowedKey
+    }
+
+    /// Persist a new cancel-recording binding and reinstall the
+    /// underlying monitor. Refused mid-session for the same reason as
+    /// `applyHotkeyBinding(_:)` — tearing the tap down drops the
+    /// release event for any currently-held key. The cancel-vs-record
+    /// collision check (`newBinding.code == hotkeyBinding.code`) is
+    /// the only validation the recording-hotkey path doesn't need.
+    @discardableResult
+    func applyCancelHotkeyBinding(_ binding: HotkeyBinding) -> CancelBindingApplyResult {
+        guard binding.isAllowedAsCancelBinding else { return .rejectedDisallowedKey }
+        if binding.code == hotkeyBinding.code {
+            return .rejectedCollidesWithRecordingHotkey
+        }
+        guard binding != cancelHotkeyBinding else { return .noChange }
+        guard case .idle = recordingState else {
+            Self.log.warning("applyCancelHotkeyBinding refused while recordingState != .idle")
+            return .rejectedDuringRecording
+        }
+        cancelHotkeyBinding = binding
+        UserDefaults.standard.set(binding.code, forKey: Self.cancelHotkeyDefaultsKey)
+        // Rebuild monitor so the new cancel keycode takes effect.
+        uninstallHotkey()
+        installHotkeyIfPossible()
+        // Defensive — cancel binding changes can flip the
+        // Hold+Space gate (e.g. cancel = Space suppresses lock).
+        // Rebind is refused mid-session, so in practice this just
+        // keeps the predicate honest if the rebuild added a session.
+        updateSpacebarLockEnabled()
+        return .applied
+    }
+
     private func handleHotkeyPress() {
         // Onboarding step 4 (hotkey check) intercepts presses to drive
         // its own UI without starting a recording session. The CGEventTap
@@ -518,6 +597,7 @@ final class AppState {
             awaitingSecondTap = false
             doubleTapTimeout?.cancel()
             doubleTapTimeout = nil
+            updateSpacebarLockEnabled()
             finalizeRecording()
             return
         }
@@ -612,6 +692,8 @@ final class AppState {
         pressStartedAt = startedAt
         recordingState = .recording(startedAt: startedAt)
         acquireSleepAssertionIfNeeded()
+        installSpacebarLockTapIfNeeded()
+        updateSpacebarLockEnabled()
         let target = NSWorkspace.shared.frontmostApplication?.localizedName ?? "Active app"
         hud.showRecordingHUD(
             startedAt: startedAt,
@@ -631,15 +713,22 @@ final class AppState {
         }
 
         // Locked sessions don't react to releases — the user has
-        // committed to "record until I tap again", so the session stays
-        // alive and we just swallow the release event.
-        if lockedRecording { return }
+        // committed to "record until I tap again", so the session
+        // stays alive. We still clear `pressStartedAt` + recompute
+        // the Hold+Space predicate so the secondary tap stops
+        // consuming Space the moment the user releases the hotkey.
+        if lockedRecording {
+            pressStartedAt = nil
+            updateSpacebarLockEnabled()
+            return
+        }
 
         guard case .recording = recordingState else { return }
 
         let now = Date()
         let pressDuration = pressStartedAt.map { now.timeIntervalSince($0) } ?? .infinity
         pressStartedAt = nil
+        updateSpacebarLockEnabled()
 
         // Hold release: standard end-of-session flow.
         if pressDuration > tapMaxDuration {
@@ -702,7 +791,9 @@ final class AppState {
                     self.history.removeFirst(self.history.count - 10)
                 }
                 self.recordingState = .idle
+                self.lockedRecording = false
                 self.releaseSleepAssertion()
+                self.uninstallSpacebarLockTap()
                 self.hud.hideTranscribingHUD()
                 if sessionSummary.hasFailures {
                     Self.log.warning(
@@ -747,7 +838,9 @@ final class AppState {
                 guard self.currentSession === session, case .sending = self.recordingState else { return }
                 self.currentSession = nil
                 self.recordingState = .idle
+                self.lockedRecording = false
                 self.releaseSleepAssertion()
+                self.uninstallSpacebarLockTap()
                 self.hud.hideTranscribingHUD()
                 self.surfaceError(.sessionFailure(error))
             }
@@ -782,6 +875,7 @@ final class AppState {
         doubleTapTimeout = nil
         recordingState = .idle
         releaseSleepAssertion()
+        uninstallSpacebarLockTap()
         // Both calls are idempotent; we hide whichever HUD is currently
         // up (recording HUD during `.recording`, transcribing HUD during
         // `.sending`).
@@ -832,6 +926,88 @@ final class AppState {
         assertion.release()
         activeSleepAssertion = nil
         Self.log.info("sleep assertion released")
+    }
+
+    // MARK: - Hold+Space lock (secondary CGEventTap)
+
+    /// Install the secondary `.defaultTap` that consumes Space when
+    /// the recording hotkey is held mid-session. No-op when the
+    /// recording hotkey IS Space — Hold+Space-on-Space is ambiguous
+    /// (the secondary tap would consume the user's own hotkey).
+    /// Idempotent — repeated calls during one session are no-ops
+    /// because `spacebarLockMonitor` is already set.
+    private func installSpacebarLockTapIfNeeded() {
+        guard spacebarLockMonitor == nil else { return }
+        guard hotkeyBinding.code != "Space" else {
+            Self.log.info("hold+space lock disabled — recording hotkey IS Space")
+            return
+        }
+        let predicate: @Sendable () -> Bool = { [enabled = spacebarLockEnabled] in
+            enabled.withLock { $0 }
+        }
+        let monitor = SpacebarLockMonitor(
+            shouldLockOnSpace: predicate,
+            onLock: { [weak self] in self?.handleSpacebarLockTrigger() }
+        )
+        if monitor.start() {
+            spacebarLockMonitor = monitor
+            Self.log.info("hold+space lock tap installed")
+        }
+    }
+
+    /// Tear down the secondary tap. Called from every session-end
+    /// path: finalize success, finalize error, cancel.
+    private func uninstallSpacebarLockTap() {
+        guard let monitor = spacebarLockMonitor else { return }
+        monitor.stop()
+        spacebarLockMonitor = nil
+        spacebarLockEnabled.withLock { $0 = false }
+        Self.log.info("hold+space lock tap uninstalled")
+    }
+
+    /// Recompute the lock-protected predicate the secondary tap
+    /// reads. Called from every state transition that affects any
+    /// of the three inputs: press / release of the recording hotkey,
+    /// session start / end, lock event. Cheap — one bool write
+    /// under an unfair lock.
+    fileprivate func updateSpacebarLockEnabled() {
+        let isRecording: Bool
+        if case .recording = recordingState { isRecording = true } else { isRecording = false }
+        // Hold+Space lock is suppressed when either the recording
+        // hotkey or the cancel binding IS Space — both cases would
+        // give Space ambiguous meaning (own-hotkey-consumed-by-self
+        // or simultaneously-cancel-and-lock through two taps on the
+        // same `.headInsertEventTap`). In those configurations
+        // Space's other role wins; Hold+Space silently disables.
+        let spaceOwnedElsewhere =
+            hotkeyBinding.code == "Space" ||
+            cancelHotkeyBinding.code == "Space"
+        let value = isRecording
+                 && pressStartedAt != nil
+                 && !lockedRecording
+                 && !spaceOwnedElsewhere
+        spacebarLockEnabled.withLock { $0 = value }
+    }
+
+    /// Main-actor handler fired by the secondary tap when Space is
+    /// consumed during a held recording. Mirrors the lock side of
+    /// the existing double-tap path: set `lockedRecording = true`,
+    /// cancel any pending double-tap timeout, recompute the
+    /// predicate so the next Space goes through.
+    private func handleSpacebarLockTrigger() {
+        // Defensive — the predicate already filtered, but a race
+        // between the tap thread reading and the main actor
+        // changing state could in theory still let one stale lock
+        // request slip through. Re-check.
+        guard case .recording = recordingState else { return }
+        guard !lockedRecording else { return }
+        guard pressStartedAt != nil else { return }
+        lockedRecording = true
+        awaitingSecondTap = false
+        doubleTapTimeout?.cancel()
+        doubleTapTimeout = nil
+        updateSpacebarLockEnabled()
+        Self.log.info("hold+space → locked recording")
     }
 
     /// Hand the categorizer a closure that bounces back to MainActor and

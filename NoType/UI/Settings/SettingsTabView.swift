@@ -19,6 +19,8 @@ struct SettingsTabView: View {
     @State private var showResetConfirm = false
     @State private var loginItemBusy = false
     @State private var showDeleteAllConfirm = false
+    @State private var showRecordingRebind = false
+    @State private var showCancelRebind = false
 
     var body: some View {
         @Bindable var appState = appState
@@ -38,8 +40,7 @@ struct SettingsTabView: View {
                 }
 
                 DSSettingsSection(title: "Shortcuts") {
-                    // Filled by U3 (Hotkey binding, Recording mode, Cancel shortcut)
-                    sectionPlaceholder()
+                    shortcutsSectionBody()
                 }
 
                 DSSettingsSection(title: "Microphone & Audio") {
@@ -94,6 +95,37 @@ struct SettingsTabView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Your usage stats (session counts, word totals, token usage, and app breakdown) will be preserved.")
+        }
+        .sheet(isPresented: $showRecordingRebind) {
+            ShortcutRebindSheet(
+                kind: .recording,
+                currentBinding: appState.hotkeyBinding,
+                onCancel: { showRecordingRebind = false },
+                onCapture: { binding in
+                    appState.applyHotkeyBinding(binding)
+                    return nil
+                }
+            )
+        }
+        .sheet(isPresented: $showCancelRebind) {
+            ShortcutRebindSheet(
+                kind: .cancel,
+                currentBinding: appState.cancelHotkeyBinding,
+                onCancel: { showCancelRebind = false },
+                onCapture: { binding in
+                    let result = appState.applyCancelHotkeyBinding(binding)
+                    switch result {
+                    case .applied, .noChange:
+                        return nil
+                    case .rejectedDuringRecording:
+                        return "Can't change the cancel shortcut while a recording is in flight."
+                    case .rejectedCollidesWithRecordingHotkey:
+                        return "This key is already your recording shortcut — pick a different one."
+                    case .rejectedDisallowedKey:
+                        return "This key isn't allowed as a cancel shortcut."
+                    }
+                }
+            )
         }
     }
 
@@ -210,6 +242,79 @@ struct SettingsTabView: View {
             .padding(.vertical, DS.Space.s2)
     }
 
+    // MARK: - Shortcuts section (U3 Phase 1)
+    //
+    // Two rebindable shortcuts + an explanation of how the press /
+    // release / double-tap state machine works. Hold+Space lock is a
+    // Phase 2 extension — the explanation here covers what actually
+    // ships today.
+
+    @ViewBuilder
+    private func shortcutsSectionBody() -> some View {
+        recordingShortcutRow()
+        DSSeparator()
+        cancelShortcutRow()
+        DSSeparator()
+        shortcutsExplanation()
+    }
+
+    private func recordingShortcutRow() -> some View {
+        DSSettingsRow(
+            title: "Recording shortcut",
+            subtitle: "Hold to record · double-tap or hold + Space to lock the session."
+        ) {
+            HStack(spacing: DS.Space.s3) {
+                ShortcutPill(binding: appState.hotkeyBinding)
+                DSSecondaryButton(label: "Change") {
+                    showRecordingRebind = true
+                }
+                .disabled(appState.recordingState != .idle)
+            }
+        }
+    }
+
+    private func cancelShortcutRow() -> some View {
+        DSSettingsRow(
+            title: "Cancel shortcut",
+            subtitle: "Press this key during a recording to abort without pasting. Default: Escape."
+        ) {
+            HStack(spacing: DS.Space.s3) {
+                ShortcutPill(binding: appState.cancelHotkeyBinding)
+                DSSecondaryButton(label: "Change") {
+                    showCancelRebind = true
+                }
+                .disabled(appState.recordingState != .idle)
+            }
+        }
+    }
+
+    private func shortcutsExplanation() -> some View {
+        VStack(alignment: .leading, spacing: DS.Space.s2) {
+            Text("How recording works")
+                .font(DS.Font.bodySM(.semibold))
+                .foregroundStyle(DS.Color.textPrimary)
+            ExplanationBullet(
+                heading: "Hold to record",
+                text: "Press and hold the recording shortcut, release to finalize and paste."
+            )
+            ExplanationBullet(
+                heading: "Double-tap to lock",
+                text: "Tap the shortcut twice within 300 ms to keep recording hands-free. Tap once more to finalize and paste."
+            )
+            ExplanationBullet(
+                heading: "Hold + Space to lock",
+                text: "While holding the recording shortcut, press Space to lock the session — release and Space won't type into the focused app. Tap the shortcut to finalize and paste."
+            )
+            ExplanationBullet(
+                heading: "Cancel",
+                text: "Press the cancel shortcut at any time to abort the in-flight recording without pasting."
+            )
+        }
+        .padding(.horizontal, DS.Space.s4)
+        .padding(.vertical, DS.Space.s3 + 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     // MARK: - System section (U7)
     //
     // Paste restore delay (`PasteSettings.restoreDelayMs`) lives in
@@ -267,5 +372,56 @@ struct SettingsTabView: View {
 
     private static var currentVersionString: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+    }
+}
+
+// MARK: - Shortcut row helpers
+
+/// Inline pill rendering a `HotkeyBinding` for the Settings rows.
+/// Matches the compact size used in the rebind sheet so the row + the
+/// sheet's captured-key chip read as the same surface.
+private struct ShortcutPill: View {
+    let binding: HotkeyBinding
+
+    var body: some View {
+        Text(binding.displayWord)
+            .font(.system(size: 12, weight: .medium, design: .monospaced))
+            .foregroundStyle(DS.Color.textPrimary)
+            .padding(.horizontal, DS.Space.s2 + 2)
+            .padding(.vertical, 4)
+            .background(
+                DS.Color.bgSurface,
+                in: RoundedRectangle(cornerRadius: DS.Radius.sm)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: DS.Radius.sm)
+                    .strokeBorder(DS.Color.borderSubtle, lineWidth: DS.Border.hairline)
+            )
+            .accessibilityLabel(binding.displayWord)
+    }
+}
+
+/// Single bullet inside the "How recording works" explanation block.
+/// Heading and body wrap on overflow so the section keeps a stable
+/// width regardless of localised copy length.
+private struct ExplanationBullet: View {
+    let heading: String
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: DS.Space.s2) {
+            Text("•")
+                .font(DS.Font.bodySM())
+                .foregroundStyle(DS.Color.textTertiary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(heading)
+                    .font(DS.Font.bodySM(.medium))
+                    .foregroundStyle(DS.Color.textSecondary)
+                Text(text)
+                    .font(DS.Font.bodySM())
+                    .foregroundStyle(DS.Color.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }
