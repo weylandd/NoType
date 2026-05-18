@@ -3,7 +3,7 @@ title: Settings Screen — Implementation Progress
 plan: docs/plans/2026-05-18-001-feat-settings-screen-plan.md
 branch: feat/settings-screen
 status: in-progress
-last_updated: 2026-05-18 (U2 shipped)
+last_updated: 2026-05-18 (U6 shipped)
 ---
 
 # Settings Screen — Implementation Progress
@@ -23,7 +23,7 @@ Entry-point convention for follow-up sessions: pick the next pending unit in dep
 | U2. General — Login Items / Sleep prevention / Reset onboarding | §291-338 | ✅ Shipped | _next commit_ | Theme picker / Open at login (SMAppService) / Prevent sleep (IOPMAssertion-RAII via `SleepAssertion`, AppState-owned) / Reset onboarding (confirmationDialog → `OnboardingState.resetWizard`). 12 new tests (4 SleepAssertion, 4 LoginItemController, 4 OnboardingState). P2 trap closed — existing resume-card path in `OnboardingAPIKeyStep` already skips `validateKey` when the pre-filled value is unchanged |
 | U3. Shortcuts — hotkey binding picker / Recording mode / Cancel shortcut | §341-396 | ⏳ Pending | — | Depends on U1 (done). Hotkey invariant 2 weakening for Hold+Space is load-bearing — secondary `.defaultTap` Space-only CGEventTap |
 | U4. Microphone & Audio — Core Audio HAL rewrite (R16 reframed) | §399-458 | ⏳ Pending | — | Depends on U1 (done). ~1-2 weeks of work. Characterization-first per execution note. Requires hardware smoke on AirPods + Music for primary success criterion |
-| U6. API section — Gemini key Edit + windowed token stats | §524-578 | ⏳ Pending | — | Depends on U1 (done) **and U5 (done)** — both met, ready to start |
+| U6. API section — Gemini key Edit + windowed token stats | §524-578 | ✅ Shipped | _next commit_ | `GeminiKeyRow` (masked `AIzaSy••••••••` + Edit sheet → validate-then-save reusing existing `validateGeminiKey` + `updateAPIKey`) / `TokenStatsPanel` (Today/7d/30d/All × Input/Output/Cached/Cache hit rate, divide-by-zero → `—`). Section unconditional in v1; `// TODO: when SaaS mode lands…` comment retained. 18 new tests (9 `GeminiKeyRowTests` + 9 `TokenStatsPanelTests`). Body-leak invariant pinned by `test_errorBody_doesNotLeakIntoUILabel` |
 | U7. System — Output language / Delete all / Paste delay + cache-prefix integration | §584-646 | ⏳ Pending | — | Depends on U1 (done). Cache-prefix part-count change will break ≥5 `GeminiRequestBuilderTests` — test-first per execution note |
 | U8. Updates — Check button + per-version skip via X chip | §650-707 | ⏳ Pending | — | Depends on U1 (done). Manual smoke against EdDSA-signed staged release before removing `Updates/CLAUDE.md` Hard rule |
 
@@ -31,15 +31,14 @@ Entry-point convention for follow-up sessions: pick the next pending unit in dep
 
 ## Recommended next session entry point
 
-**U6 (API section — Gemini key Edit modal + windowed token stats panel).** Lowest-friction next unit because:
-- All dependencies satisfied (U1 + U5 both shipped).
-- Plan is concrete: 2 new files (`GeminiKeyRow.swift`, `TokenStatsPanel.swift`), small AppState delta.
-- Consumes U5's `StatsSnapshot.tokenTotals(overLastDays:)` directly.
-- No load-bearing prompt / schema changes (cache-prefix part-count untouched).
+**U7 (System section — Output language + Delete all + Paste delay + cache-prefix integration).** Recommended next because:
+- Adds the most user-visible polish surface still missing (output-language picker + the destructive "Delete all transcripts" affordance).
+- Cache-prefix part-count change is contained — test-first: extend `GeminiRequestBuilderTests` fixtures + add the 5 new positioning tests BEFORE modifying `buildRequestBody` / `buildLiteRequestBody`.
+- Same dependency profile as U6 (just U1 — done). No hardware smoke needed.
 
 **Alternatives if a different unit makes sense:**
-- **U3** if hotkey ergonomics are a felt pain (Hold+Space mode, custom cancel shortcut).
-- **U7** if cache-prefix work feels timely (test-first overhead is bounded — the part-count change is one of the more contained schema changes in the plan).
+- **U3** if hotkey ergonomics are a felt pain (Hold+Space mode, custom cancel shortcut). Recording-mode `.effective(stored:hotkey:)` helper from carryover item #5 lands here.
+- **U8** for a quick win — Updates section is the smallest remaining unit (Sparkle "Check now" button + per-version skip chip).
 - **U4** is the largest single unit; tackle when there's a multi-day window with hardware (AirPods + Music) available for the R16-reframed smoke.
 
 ---
@@ -60,6 +59,14 @@ Entry-point convention for follow-up sessions: pick the next pending unit in dep
 - **`LoginItemController.refresh()` called from `SettingsTabView.onAppear`.** `SMAppService` has no KVO/publisher surface so we re-read on every Settings-tab appearance. Belt and braces: the controller also refreshes immediately after every `register`/`unregister` call inside `setEnabled(_:)`.
 - **`SystemSettingsPane` not extended for Login Items.** Login Items uses a different deep-link scheme (`x-apple.systempreferences:com.apple.LoginItems-Settings.extension`, not `com.apple.preference.security?Privacy_*`). Pulling it into the existing enum would either bloat the case body (per-case base URL) or weaken the type signal ("this enum covers Privacy panes"). Inline string + `nonisolated static let` on `LoginItemController` is the smaller change, and the string is test-pinned in `LoginItemControllerTests`.
 - **`SMAppService.Status.notFound` collapsed into `.notRegistered`** in the display-side `LoginItemStatus` enum. Both render as "Off" — the SDK distinction is internal classification only.
+
+### U6 (session 2026-05-18)
+
+- **Sheet attached to row body, not row trailing closure.** Plan execution note flagged a macOS `.sheet(...)`-inside-`ScrollView` quirk. `GeminiKeyRow.body` attaches the sheet to its own outermost view (the `DSSettingsRow` it wraps) — *not* inside the row's trailing closure where the Edit button lives. Verified visually: sheet opens cleanly without flicker / self-dismiss.
+- **Pure-helper test surface.** Both new files expose the testable logic as `static` methods (`GeminiKeyRow.maskedDisplay`, `GeminiKeyRow.errorMessage`, `TokenStatsPanel.formatCacheHitRate`, `TokenStatsPanel.formatCount`, `TokenStatsRange.days`). The 18 new test cases run without standing up a SwiftUI render harness. Matches the U1 precedent (`MainTab.consumePendingSelection`).
+- **Error translation reuses `GeminiError.errorDescription` as fallback** — that property already redacts the `body` field for every case (verified `GeminiClient.swift:30-42`), so `error.localizedDescription` is body-safe by construction. Only `.missingKey` and `.http(401|403)` get UI-specific overrides; everything else falls through to the body-redacted localised message.
+- **`TokenStatsRange` chose Today/7d/30d/All over HomeRange's 7D/30D/90D/All.** Token usage moves fast — "today" is the most useful at-a-glance window, and "90D" is rarely interesting relative to "All". The `.days` mapping (`1 / 7 / 30 / nil`) and ordering are pinned by `TokenStatsPanelTests.test_allCases_orderingIsTodayLast7Last30All`.
+- **No new AppState methods.** `validateGeminiKey` + `updateAPIKey` + `currentAPIKey` + `statsSummary` were all already on AppState from earlier units (U2 keychain UX work / U5 stats wiring); U6 is a pure UI consumer.
 
 ### U5 (session 2026-05-18)
 
@@ -97,8 +104,10 @@ Items the implementation surfaced that need attention in the relevant follow-up 
 | `SleepAssertionTests` | 4 | init acquires non-zero IOPMAssertion handle; `release()` flips `isReleased` flag; `release()` idempotent; `deinit` safety net works for callers who forget |
 | `LoginItemControllerTests` | 4 | `SMAppService.Status` → `LoginItemStatus` mapping (incl. `.notFound` → `.notRegistered` collapse); `isEnabled` / `requiresApproval` predicates; deep-link URL string pinned |
 | `OnboardingStateTests` | 4 | `resetWizard` clears all three onboarding keys; preserves hotkey binding + selected mic UID; idempotent on cleared defaults; instance `currentStep` returns to `.welcome` |
+| `GeminiKeyRowTests` | 9 | Mask format (long key `AIzaSy` prefix + 8 dots, short key tolerated, empty key dot-only); error translation table (`.missingKey` → "Invalid key — check format"; `.http(401)` / `.http(403)` → "Authentication failed (\(s))"; other `.http` falls back to body-redacted `errorDescription`; `URLError.notConnectedToInternet` / `.timedOut` → friendly copy; generic `LocalizedError` → its own description); body-leak invariant pinned with `secret-project-id-12345` sentinel never appearing in the rendered string |
+| `TokenStatsPanelTests` | 9 | Range → days mapping (today=1 / last7=7 / last30=30 / all=nil); `allCases` ordering pinned (Today/7d/30d/All); cache hit rate format (divide-by-zero → "—", 300/1300 → "23%", 0/500 → "100%", 500/0 → "0%", 1/1 → "50%"); end-to-end against synthetic `StatsSnapshot` (today bucket vs 3-days-ago; 400-days-ago contributes to `.all` lifetime) |
 
-**Net:** 581 / 581 pass excluding live-API `PromptEvalTests`.
+**Net:** 604 / 604 pass excluding live-API `PromptEvalTests`.
 
 ---
 

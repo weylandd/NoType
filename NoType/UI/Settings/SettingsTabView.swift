@@ -48,8 +48,9 @@ struct SettingsTabView: View {
                 // TODO: when SaaS mode lands, gate this section on userMode.
                 // v1 ships BYOK-only; API section renders unconditionally.
                 DSSettingsSection(title: "API") {
-                    // Filled by U6 (Gemini key + Edit modal, Token stats panel)
-                    sectionPlaceholder()
+                    GeminiKeyRow()
+                    DSSeparator()
+                    TokenStatsPanel()
                 }
 
                 DSSettingsSection(title: "System") {
