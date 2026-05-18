@@ -395,6 +395,56 @@ extension PromptEvalHarness {
             screenText: nil
         )
     }
+
+    /// Context with a non-empty `RedactedAXSnapshot` containing a
+    /// specified proper noun in a neighbour-app window. Used by U6's
+    /// AX-content fixtures to exercise section #9 (`# Using on-screen
+    /// context`) behavioural defenses — the first such coverage per
+    /// `solutions/architecture-patterns/gemini-prompt-section-audit-2026-05-17.md`.
+    ///
+    /// `properNoun` is rendered as a single `StaticText` value in a
+    /// non-active app's window. Active app stays the messaging-style
+    /// context (Telegram) so the user-typing-into-messenger pattern is
+    /// realistic. The line shape matches what `formatLine` would emit
+    /// for a real AX dump (no caller-side indent — renderer adds it).
+    static func contextWithAX(
+        properNoun: String,
+        neighbourAppName: String = "Notes",
+        neighbourBundle: String = "com.apple.Notes",
+        neighbourWindowTitle: String = "Project notes",
+        textBefore: String = "",
+        textAfter: String = ""
+    ) -> ContextSnapshot {
+        let neighbourDump = RedactedAppDump(
+            appName: neighbourAppName,
+            bundleID: neighbourBundle,
+            windows: [
+                RedactedWindowDump(
+                    title: neighbourWindowTitle,
+                    lines: ["- StaticText = \(properNoun)"]
+                )
+            ]
+        )
+        return ContextSnapshot(
+            activeApp: AppInfo(name: "Telegram", bundleID: "ru.keepcoder.Telegram"),
+            category: .messaging,
+            userInstruction: "",
+            categoryInstruction: AppCategory.messaging.defaultPrompt,
+            dictionary: [],
+            replacements: [],
+            tree: RedactedAXSnapshot(apps: [neighbourDump]),
+            insertionTarget: InsertionTarget(textBefore: textBefore, textAfter: textAfter),
+            screenText: nil
+        )
+    }
+
+    /// Test-helper: returns `true` if the fixture's audio file exists on
+    /// disk. Used by tests whose audio hasn't been recorded yet to
+    /// `XCTSkip` cleanly rather than crash on file-not-found.
+    static func audioFileExists(for fixture: Fixture) -> Bool {
+        let url = fixturesDirURL.appendingPathComponent(fixture.file)
+        return FileManager.default.fileExists(atPath: url.path)
+    }
 }
 
 // MARK: - Token-ceiling assertions (deferred)

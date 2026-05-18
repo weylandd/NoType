@@ -272,7 +272,7 @@ struct InsertionTarget: Sendable, Equatable {
         // adding a defensive leading space would be wrong on every short
         // dictation. We treat the field as genuinely empty.
         if let bundle = focusedBundleID(of: element),
-           Self.knownTerminalBundleIDs.contains(bundle) {
+           AXNoiseFilter.knownTerminalBundleIDs.contains(bundle) {
             log.info("ax capture: terminal app \(bundle, privacy: .public) detected — bailing to .empty")
             return .empty
         }
@@ -308,12 +308,13 @@ struct InsertionTarget: Sendable, Equatable {
         }
 
         // Shape-based terminal / scrollback detection — covers terminals
-        // not in `knownTerminalBundleIDs` (custom builds, niche emulators)
-        // and similar viewport-style components that expose visible text
-        // through `kAXValueAttribute`. Real text fields rarely have this
-        // shape: compose boxes are 1–10 lines, search/URL are single-line.
-        // Bail to `.empty` for the same reason terminals do: the visible
-        // scrollback is not continuation context for the cursor.
+        // not in `AXNoiseFilter.knownTerminalBundleIDs` (custom builds,
+        // niche emulators) and similar viewport-style components that
+        // expose visible text through `kAXValueAttribute`. Real text
+        // fields rarely have this shape: compose boxes are 1–10 lines,
+        // search/URL are single-line. Bail to `.empty` for the same
+        // reason terminals do: the visible scrollback is not
+        // continuation context for the cursor.
         if Self.looksLikeScrollback(value: value, role: role) {
             log.info("ax capture: focused value shape looks like scrollback (lines=\(value.unicodeScalars.lazy.filter { $0 == "\n" }.count), len=\(value.utf16.count)) — bailing to .empty")
             return .empty
@@ -411,28 +412,11 @@ struct InsertionTarget: Sendable, Equatable {
         return max(0, min(lineRange.location, value.utf16.count))
     }
 
-    /// Bundle ids of terminal emulators whose focused element's
-    /// `kAXValueAttribute` is the visible scrollback — never a real
-    /// editable field. Insertion-target capture must bail to `.unknown`
-    /// for these so we don't ship code/log lines as `Text after cursor`
-    /// and let the model "complete" the dictation from that text.
-    private static let knownTerminalBundleIDs: Set<String> = [
-        "com.apple.Terminal",
-        "com.googlecode.iterm2",
-        "com.mitchellh.ghostty",
-        "dev.warp.Warp-Stable",
-        "dev.warp.Warp-Preview",
-        "net.kovidgoyal.kitty",
-        "org.alacritty",
-        "co.zeit.hyper",
-        "com.github.wez.wezterm",
-        "io.alacritty",
-    ]
-
     /// Heuristic: a focused element's `kAXValueAttribute` "looks like
     /// scrollback" when it has the shape of terminal output rather than
-    /// a text field. Catches terminals not in `knownTerminalBundleIDs`
-    /// and similar viewport-style components.
+    /// a text field. Catches terminals not in
+    /// `AXNoiseFilter.knownTerminalBundleIDs` and similar viewport-style
+    /// components.
     ///
     /// Triggers when: many newlines (≥5) AND total length large (>1000
     /// chars) AND role suggests a text-area (so we don't false-positive
@@ -449,9 +433,9 @@ struct InsertionTarget: Sendable, Equatable {
     }
 
     /// PID of the app owning an AX element → its bundle id. Used to
-    /// match against `knownTerminalBundleIDs` without round-tripping
-    /// through `NSWorkspace.frontmostApplication` (which can race with
-    /// app-switch events during session start).
+    /// match against `AXNoiseFilter.knownTerminalBundleIDs` without
+    /// round-tripping through `NSWorkspace.frontmostApplication`
+    /// (which can race with app-switch events during session start).
     private static func focusedBundleID(of element: AXUIElement) -> String? {
         var pid: pid_t = 0
         let err = AXUIElementGetPid(element, &pid)

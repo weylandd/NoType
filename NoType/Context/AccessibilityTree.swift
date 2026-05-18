@@ -31,14 +31,39 @@ enum AccessibilityTree {
     ]
 
     private static let totalNodeBudget = 5_000
-    private static let perAppNodeBudget = 800
+    /// Modest active-app priority budget (R2). Active app gets ~1.4× the
+    /// non-active per-app cap. The bump is small enough that cross-window
+    /// signal (per ADR-009 — typical signal comes from neighbour windows
+    /// like the Slack sidebar or an open spec doc) is preserved, while
+    /// honouring the user intuition that the app they're typing into
+    /// deserves a slight edge. Earlier draft used 1200/500 (2.4×) which
+    /// over-rotated to active and starved exactly the cross-window case.
+    static let perAppNodeBudgetActive = 1_000
+    static let perAppNodeBudgetNonActive = 700
     private static let perWindowDepth = 6
     private static let perAppTimeout: TimeInterval = 0.1
     private static let maxValueLength = 2_000
 
+    /// Pure helper for `snapshot()`'s per-app budget assignment. Tested
+    /// directly in `AccessibilityTreeTests` — pinning the routing rules.
+    static func budgetForApp(bundleID: String, active activeBundleID: String?) -> Int {
+        guard let activeBundleID, activeBundleID == bundleID else {
+            return perAppNodeBudgetNonActive
+        }
+        return perAppNodeBudgetActive
+    }
+
     /// Captures the on-screen tree. Safe to call from any actor — the work
     /// is done off the caller's isolation domain via a task group.
-    static func snapshot() async -> RedactedAXSnapshot {
+    ///
+    /// `activeBundleID` is the frontmost app's bundle id at session start,
+    /// captured once by `RecordingSession.start` on `@MainActor` and passed
+    /// in as a parameter to eliminate the app-switch race that would arise
+    /// from re-reading `NSWorkspace.frontmostApplication` inside this
+    /// detached task. Pass `nil` (no frontmost app, or our own app was
+    /// frontmost and got filtered) to flatten the budget — every app then
+    /// gets `perAppNodeBudgetNonActive` and the active-first sort is a no-op.
+    static func snapshot(activeBundleID: String?) async -> RedactedAXSnapshot {
         guard AXIsProcessTrusted() else {
             // No Accessibility permission → no tree. Caller (RecordingSession)
             // still records audio; Gemini just gets the active-app hint.
@@ -50,10 +75,16 @@ enum AccessibilityTree {
             return RedactedAXSnapshot(apps: [])
         }
 
-        let dumps = await withTaskGroup(of: RedactedAppDump?.self) { group in
+        var dumps = await withTaskGroup(of: RedactedAppDump?.self) { group in
             for c in candidates {
+                let budget = budgetForApp(bundleID: c.bundleID, active: activeBundleID)
                 group.addTask {
-                    await dumpApp(pid: c.pid, name: c.name, bundleID: c.bundleID)
+                    await dumpApp(
+                        pid: c.pid,
+                        name: c.name,
+                        bundleID: c.bundleID,
+                        nodeBudget: budget
+                    )
                 }
             }
             var collected: [RedactedAppDump] = []
@@ -63,12 +94,41 @@ enum AccessibilityTree {
             return collected
         }
 
-        // Apply the global node budget. Counting uses lines as a proxy for
-        // nodes (one node ~= one line); good enough for capping.
+        let (capped, totalNodes, truncated) = applyGlobalCap(
+            dumps: dumps,
+            activeBundleID: activeBundleID
+        )
+
+        let result = RedactedAXSnapshot(apps: capped, truncated: truncated)
+        Self.log.info("ax snapshot: \(capped.count) apps, \(totalNodes) nodes, active=\(activeBundleID ?? "nil", privacy: .public), truncated=\(truncated)")
+        return result
+    }
+
+    /// Pure helper for `snapshot()`'s ordering + global-cap pass. Active
+    /// app (when present) moves to the front via stable move-to-front
+    /// (NOT `Array.sort` — Swift doesn't document it as stable). Then the
+    /// 5000-line global budget truncates from the tail. Active-first
+    /// guarantees the user's frontmost app survives the cap on busy
+    /// machines (7+ candidate apps). Returns `(cappedDumps, totalLines,
+    /// truncatedFlag)` so the caller can log the breakdown.
+    ///
+    /// Exposed for direct unit testing in `AccessibilityTreeTests`.
+    static func applyGlobalCap(
+        dumps: [RedactedAppDump],
+        activeBundleID: String?
+    ) -> (apps: [RedactedAppDump], totalNodes: Int, truncated: Bool) {
+        var ordered = dumps
+        if let activeBundleID,
+           let idx = ordered.firstIndex(where: { $0.bundleID == activeBundleID }),
+           idx > 0 {
+            let active = ordered.remove(at: idx)
+            ordered.insert(active, at: 0)
+        }
+
         var totalNodes = 0
         var truncated = false
         var capped: [RedactedAppDump] = []
-        for app in dumps {
+        for app in ordered {
             let appNodes = app.windows.reduce(0) { $0 + $1.lines.count }
             if totalNodes + appNodes > totalNodeBudget {
                 truncated = true
@@ -77,10 +137,7 @@ enum AccessibilityTree {
             totalNodes += appNodes
             capped.append(app)
         }
-
-        let result = RedactedAXSnapshot(apps: capped, truncated: truncated)
-        Self.log.info("ax snapshot: \(capped.count) apps, \(totalNodes) nodes, truncated=\(truncated)")
-        return result
+        return (capped, totalNodes, truncated)
     }
 
     // MARK: - Candidate enumeration
@@ -126,10 +183,10 @@ enum AccessibilityTree {
     ///    step and at every window iteration, so the synchronous AX work
     ///    actually short-circuits instead of running to natural
     ///    completion in the background.
-    private static func dumpApp(pid: pid_t, name: String, bundleID: String) async -> RedactedAppDump? {
+    private static func dumpApp(pid: pid_t, name: String, bundleID: String, nodeBudget: Int) async -> RedactedAppDump? {
         await withTaskGroup(of: RedactedAppDump?.self) { group in
             group.addTask {
-                walkApp(pid: pid, name: name, bundleID: bundleID)
+                walkApp(pid: pid, name: name, bundleID: bundleID, nodeBudget: nodeBudget)
             }
             group.addTask {
                 try? await Task.sleep(for: .milliseconds(Int(perAppTimeout * 1000)))
@@ -141,10 +198,72 @@ enum AccessibilityTree {
         }
     }
 
+    // MARK: - Per-node decision
+
+    /// Outcome of `decideForNode` for a single AX node:
+    /// - `.skipSubtree` — `SecureFieldMasker` flagged this node; drop it
+    ///   AND its descendants (secure-field children would be just internal
+    ///   text storage).
+    /// - `.dropRender` — `AXNoiseFilter` classified this node's line as
+    ///   noise (structural chrome, gibberish, terminal scrollback). Don't
+    ///   append a line, don't charge against the budget, but **do** still
+    ///   recurse into children — a noisy parent may wrap real content.
+    /// - `.render(line)` — formatted prompt line; append and charge budget.
+    enum NodeDecision: Equatable {
+        case skipSubtree
+        case dropRender
+        case render(String)
+    }
+
+    /// Pure per-node pipeline. Pipeline order is load-bearing — pinned by
+    /// `AccessibilityTreeTests`:
+    ///
+    /// 1. `SecureFieldMasker.mask` (security boundary, R8) — `.skip`
+    ///    short-circuits to `.skipSubtree`.
+    /// 2. `AXNoiseFilter.shouldDropNode` (R4 + R7) — structural chrome
+    ///    and gibberish-only content drop to `.dropRender`.
+    /// 3. `AXNoiseFilter.isViewportScrollback` (R5) — terminal-parent
+    ///    gated scrollback drop.
+    /// 4. `formatLine` — the existing nothing-to-render safety net
+    ///    (empty-Group case) also falls through to `.dropRender`.
+    static func decideForNode(
+        role: String?,
+        subrole: String?,
+        title: String?,
+        value: String?,
+        metadata: SecureFieldMasker.NodeMetadata,
+        containingBundleID: String?,
+        depth: Int
+    ) -> NodeDecision {
+        let action = SecureFieldMasker.mask(value: value, metadata: metadata)
+        switch action {
+        case .skip:
+            return .skipSubtree
+        case .keep(let v), .replace(let v, _):
+            if AXNoiseFilter.shouldDropNode(
+                role: role, subrole: subrole, title: title, value: v
+            ) {
+                return .dropRender
+            }
+            if AXNoiseFilter.isViewportScrollback(
+                role: role, value: v, containingBundleID: containingBundleID
+            ) {
+                return .dropRender
+            }
+            guard let line = formatLine(
+                role: role, subrole: subrole, title: title,
+                value: v, depth: depth
+            ) else {
+                return .dropRender
+            }
+            return .render(line)
+        }
+    }
+
     /// Synchronous tree walk for one app. Runs inside a task with the
     /// per-app timeout. Polls `Task.isCancelled` between windows so a
     /// fired timeout actually stops the walk, not just hides it.
-    private static func walkApp(pid: pid_t, name: String, bundleID: String) -> RedactedAppDump? {
+    private static func walkApp(pid: pid_t, name: String, bundleID: String, nodeBudget: Int) -> RedactedAppDump? {
         let appElement = AXUIElementCreateApplication(pid)
 
         if Task.isCancelled { return nil }
@@ -153,7 +272,7 @@ enum AccessibilityTree {
             return nil  // backgrounded app with no windows — skip
         }
 
-        var nodesRemaining = perAppNodeBudget
+        var nodesRemaining = nodeBudget
         var windowDumps: [RedactedWindowDump] = []
 
         for window in rawWindows {
@@ -170,9 +289,13 @@ enum AccessibilityTree {
                 depth: 0,
                 parentRole: AXAttr.stringDescribing(window, kAXRoleAttribute as String),
                 parentTitle: title,
+                containingBundleID: bundleID,
                 lines: &lines,
                 budget: &nodesRemaining
             )
+            // R6: collapse repetitive packs once per window AFTER the walk.
+            // Pure post-pass on rendered lines; no AX calls.
+            AXNoiseFilter.collapseRepetitivePacks(&lines)
             windowDumps.append(RedactedWindowDump(title: title, lines: lines))
         }
 
@@ -186,6 +309,7 @@ enum AccessibilityTree {
         depth: Int,
         parentRole: String?,
         parentTitle: String?,
+        containingBundleID: String?,
         lines: inout [String],
         budget: inout Int
     ) {
@@ -218,23 +342,33 @@ enum AccessibilityTree {
                 parentTitle: parentTitle
             )
 
-            let action = SecureFieldMasker.mask(value: rawValue, metadata: metadata)
+            let decision = decideForNode(
+                role: role,
+                subrole: subrole,
+                title: title,
+                value: rawValue,
+                metadata: metadata,
+                containingBundleID: containingBundleID,
+                depth: depth
+            )
 
-            switch action {
-            case .skip:
+            switch decision {
+            case .skipSubtree:
                 // Drop this node and everything below it. AXSecureTextField
-                // children would be just internal text storage — no reason to
-                // descend.
+                // children would be just internal text storage — no reason
+                // to descend. Charge budget so secure-rich subtrees can't
+                // monopolise the per-app walk.
                 budget -= 1
                 return
-            case .keep(let v), .replace(let v, _):
-                if let line = formatLine(
-                    role: role, subrole: subrole, title: title,
-                    value: v, depth: depth
-                ) {
-                    lines.append(line)
-                    budget -= 1
-                }
+            case .dropRender:
+                // Noise — don't append a line, don't charge budget, but
+                // DO recurse into children. Per R10: budget caps rendered
+                // lines, not nodes visited. A noisy container (label-less
+                // Toolbar) may wrap real content (labelled Search field).
+                break
+            case .render(let line):
+                lines.append(line)
+                budget -= 1
             }
         }
 
@@ -248,6 +382,7 @@ enum AccessibilityTree {
                 depth: depth + 1,
                 parentRole: role,
                 parentTitle: title ?? parentTitle,
+                containingBundleID: containingBundleID,
                 lines: &lines,
                 budget: &budget
             )

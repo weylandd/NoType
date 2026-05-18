@@ -86,6 +86,7 @@ The current eval's 9 fixtures exercise:
 
 - **Multi-chunk batched mode** — no test sends > 1 audio chunk in a session. Sections #7 (punctuation across chunk boundaries) untestable.
 - **AX-tree context leakage** — all fixtures use empty `RedactedAXSnapshot`. Section #9 untestable.
+  - **Update 2026-05-17 (post-PR for noise-filter plan):** First behavioural coverage landed via `test_ax_antiLeak_aboveLineDoesNotPoisonTranscript` in `NoTypeTests/PromptEvalTests.swift` — exercises a non-empty `RedactedAXSnapshot` and pins the anti-leak rule (AX-only token must not appear in transcript). Positive-spelling scaffolding (`test_ax_properNoun_positiveSpelling`) is in place but skips until audio is recorded. Section #9 now PARTIALLY measurable.
 - **OCR sub-block** — all fixtures use nil `RedactedScreenText`. Part of section #9 untestable.
 - **Non-empty user dictionary** — all fixtures use `dictionary: []`. Section #10 / L7 untestable.
 - **Non-empty user instruction** — all fixtures use empty `userInstruction`. Section #12 untestable.

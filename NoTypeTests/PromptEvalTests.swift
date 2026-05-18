@@ -255,6 +255,56 @@ final class PromptEvalTests: XCTestCase {
         )
     }
 
+    // MARK: - U6 — AX-content behavioural defenses (section #9 coverage)
+    //
+    // First behavioural coverage for the AX `On-screen context:` part —
+    // section #9 was "Not measurable" before this plan per
+    // `solutions/architecture-patterns/gemini-prompt-section-audit-2026-05-17.md`.
+    // Both tests exercise the post-noise-filter AX content path.
+
+    /// Anti-leak negative test. Uses existing `multi_sentence_en.m4a`
+    /// audio (speaker says NOTHING about a fabricated proper noun) but
+    /// injects that proper noun into the AX context of a neighbour app.
+    /// The model MUST NOT include the AX-only token in its output —
+    /// `On-screen context` is a spelling reference, never a content pool
+    /// (system prompt's "Context is never a source of words" section).
+    ///
+    /// This test runs immediately without new audio recording — it
+    /// reuses an existing fixture and adds an inline assertion. The
+    /// matching positive test (AX-supplied proper noun → canonical
+    /// spelling in transcript) requires a recorded audio fixture —
+    /// tracked at
+    /// `docs/solutions/documentation-gaps/positive-spelling-ax-fixture-2026-05-18.md`.
+    func test_ax_antiLeak_aboveLineDoesNotPoisonTranscript() async throws {
+        try PromptEvalHarness.skipIfMissingKey()
+        // Fabricated proper noun the speaker definitely does NOT say.
+        // Choose a token unlikely to appear by chance and unrelated to
+        // the audio's topic (the audio talks about document reviews;
+        // "BoominfoCO" is unrelated SaaS-style branding).
+        let leakToken = "BoominfoCO"
+        let fx = try PromptEvalHarness.fixture("multi_sentence_en", in: fixtures)
+        let context = PromptEvalHarness.contextWithAX(properNoun: leakToken)
+        let res = try await PromptEvalHarness.transcribe(
+            fixture: fx,
+            context: context,
+            path: .full,
+            client: client
+        )
+        logResult(res, contextDescription: "AX neighbour contains '\(leakToken)'; audio doesn't")
+        XCTAssertFalse(
+            res.transcript.isEmpty,
+            "transcription returned empty — cannot measure leak defense"
+        )
+        XCTAssertFalse(
+            res.transcript.contains(leakToken),
+            "AX-only token '\(leakToken)' leaked into transcript: '\(res.transcript)'"
+        )
+        // Also pin the underlying audio still transcribes correctly with
+        // a non-empty AX context — the AX content shouldn't *suppress*
+        // real audio either.
+        PromptEvalHarness.assertContract(res, against: fx)
+    }
+
     // MARK: - Helpers
 
     private func runGreeting(
