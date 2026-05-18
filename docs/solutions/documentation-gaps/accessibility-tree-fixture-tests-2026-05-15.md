@@ -41,7 +41,7 @@ Historical reference only.
 
 What shipped:
 
-- `NoTypeTests/AXNoiseFilterTests.swift` — 56 cases on the pure predicates (R4 chrome, R5 terminal-parent scrollback, R6 pack-collapse with negative cases, R7 length floor + CJK).
+- `NoTypeTests/AXNoiseFilterTests.swift` — 59 cases on the pure predicates (R4 chrome, R5 terminal-parent scrollback, R6 pack-collapse with negative cases, R7 length floor + CJK). The 9th chrome subrole (`AXToolbarButton`) and 3 stem-preservation regression tests for date-followed-by-content patterns landed in PR #47's code-review pass.
 - `NoTypeTests/AccessibilityTreeTests.swift` — 25 cases on the walker's three pure seams (`decideForNode`, `budgetForApp`, `applyGlobalCap`) plus the rendering contract.
 
 ## Related
