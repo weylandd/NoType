@@ -17,12 +17,36 @@ struct DayBucket: Codable, Sendable, Equatable {
     /// calculations — using `words` would mix in legacy sessions
     /// that contributed text but no timing, blowing up the rate.
     var durationWords: Int
+    /// Gemini prompt tokens billed across every session that landed
+    /// in this bucket (v4+). Decoded with `decodeIfPresent ?? 0`
+    /// so v3 files load cleanly — `healIfPreV4` doesn't backfill
+    /// (purely additive migration; tolerant decoder IS the
+    /// migration for token fields). Local-only — never sent
+    /// anywhere; see `solutions/conventions/no-telemetry-with-statsstore-carveout-2026-05-15.md`.
+    var tokenInput: Int
+    /// Gemini output (candidate) tokens billed across every session
+    /// in this bucket.
+    var tokenOutput: Int
+    /// Subset of `tokenInput` that hit Gemini's implicit cache and
+    /// were billed at the discounted rate (`cached <= input` always).
+    var tokenCached: Int
 
-    init(words: Int, sessions: Int, durationSeconds: Double = 0, durationWords: Int = 0) {
+    init(
+        words: Int,
+        sessions: Int,
+        durationSeconds: Double = 0,
+        durationWords: Int = 0,
+        tokenInput: Int = 0,
+        tokenOutput: Int = 0,
+        tokenCached: Int = 0
+    ) {
         self.words = words
         self.sessions = sessions
         self.durationSeconds = durationSeconds
         self.durationWords = durationWords
+        self.tokenInput = tokenInput
+        self.tokenOutput = tokenOutput
+        self.tokenCached = tokenCached
     }
 
     init(from decoder: Decoder) throws {
@@ -31,6 +55,9 @@ struct DayBucket: Codable, Sendable, Equatable {
         self.sessions        = try c.decodeIfPresent(Int.self,    forKey: .sessions)        ?? 0
         self.durationSeconds = try c.decodeIfPresent(Double.self, forKey: .durationSeconds) ?? 0
         self.durationWords   = try c.decodeIfPresent(Int.self,    forKey: .durationWords)   ?? 0
+        self.tokenInput      = try c.decodeIfPresent(Int.self,    forKey: .tokenInput)      ?? 0
+        self.tokenOutput     = try c.decodeIfPresent(Int.self,    forKey: .tokenOutput)     ?? 0
+        self.tokenCached     = try c.decodeIfPresent(Int.self,    forKey: .tokenCached)     ?? 0
     }
 }
 
@@ -75,13 +102,18 @@ struct StatsSnapshot: Codable, Sendable, Equatable {
     /// bundle ID. Empty for sessions recorded before v2 shipped.
     var dayAppBuckets: [String: [String: DayBucket]]
 
-    /// Latest schema version. Bumped from 2 → 3 when
-    /// `totalDurationWords` joined the schema: pre-v3 files may carry
-    /// `totalDurationSeconds` from an intermediate build where
-    /// seconds were tracked but matched word counts weren't. Decoding
-    /// such a file triggers `healIfPreV3()` which zeroes the duration
-    /// fields so WPM doesn't divide by a stale denominator.
-    static let currentVersion = 3
+    /// Latest schema version.
+    ///
+    ///   - v2 → v3 (`healIfPreV3`): zeroed asymmetric duration
+    ///     fields that an intermediate build wrote without matching
+    ///     word counts (WPM denominator integrity).
+    ///   - v3 → v4 (`healIfPreV4`): **purely additive** — adds
+    ///     `tokenInput / tokenOutput / tokenCached` per `DayBucket`.
+    ///     Token fields default to 0 via tolerant decode (that IS
+    ///     the migration); existing v3 aggregates (words, sessions,
+    ///     duration, app buckets) are preserved verbatim. Plan
+    ///     2026-05-18-001 §491.
+    static let currentVersion = 4
 
     static let empty = StatsSnapshot(
         version: currentVersion,
@@ -122,6 +154,7 @@ struct StatsSnapshot: Codable, Sendable, Equatable {
         self.appBuckets           = try c.decodeIfPresent([String: AppBucket].self, forKey: .appBuckets) ?? [:]
         self.dayAppBuckets        = try c.decodeIfPresent([String: [String: DayBucket]].self, forKey: .dayAppBuckets) ?? [:]
         healIfPreV3()
+        healIfPreV4()
     }
 
     /// Pre-v3 files may have `totalDurationSeconds` accumulated from a
@@ -134,7 +167,7 @@ struct StatsSnapshot: Codable, Sendable, Equatable {
     /// `totalSessions`, `appBuckets`, and the `words` / `sessions`
     /// columns of the daily buckets — are untouched.
     private mutating func healIfPreV3() {
-        guard version < Self.currentVersion else { return }
+        guard version < 3 else { return }
         totalDurationSeconds = 0
         totalDurationWords = 0
         for (key, var bucket) in dayBuckets {
@@ -151,7 +184,23 @@ struct StatsSnapshot: Codable, Sendable, Equatable {
             }
             dayAppBuckets[outerKey] = fixed
         }
-        version = Self.currentVersion
+        version = 3
+    }
+
+    /// v3 → v4: token fields joined `DayBucket`. **Purely additive.**
+    /// The tolerant decoder already defaulted every new field to 0
+    /// for files that don't carry them — token aggregates start
+    /// accumulating from the first session under the v4 build.
+    /// Existing v3 aggregates (`totalDurationSeconds`,
+    /// `totalDurationWords`, day buckets, app buckets) MUST be
+    /// preserved verbatim — semantics differ from `healIfPreV3`,
+    /// which zeroed duration fields because pre-v3 had no duration
+    /// concept. v3 already has every aggregate v4 needs, so nothing
+    /// to backfill here — just bump the version stamp so subsequent
+    /// writes claim v4 ownership. Plan 2026-05-18-001 §491.
+    private mutating func healIfPreV4() {
+        guard version < 4 else { return }
+        version = 4
     }
 
     // Memberwise init is normally synthesized but custom `init(from:)`
@@ -213,6 +262,49 @@ extension StatsSnapshot {
             }
         }
         return (words, sessions, duration, durationWords)
+    }
+
+    /// Token totals summed across the last `days` local days
+    /// (inclusive of today). `days == nil` returns lifetime totals
+    /// (sums every recorded day's bucket — no separate lifetime
+    /// field; `dayBuckets` IS the source of truth for tokens).
+    /// All three components default to 0 for empty windows or files
+    /// migrated from v3 (no tokens recorded yet).
+    func tokenTotals(
+        overLastDays days: Int?,
+        today: Date = Date(),
+        calendar: Calendar = .autoupdatingCurrent
+    ) -> (input: Int, output: Int, cached: Int) {
+        if let days, days > 0 {
+            var input = 0
+            var output = 0
+            var cached = 0
+            for offset in 0..<days {
+                guard let d = calendar.date(byAdding: .day, value: -offset, to: today) else { continue }
+                let key = StatsSnapshot.dayKey(for: d, calendar: calendar)
+                if let bucket = dayBuckets[key] {
+                    input  += bucket.tokenInput
+                    output += bucket.tokenOutput
+                    cached += bucket.tokenCached
+                }
+            }
+            return (input, output, cached)
+        }
+        // Lifetime: sum every day bucket. No `totalToken*` field on
+        // the top-level snapshot — the per-day slice is the only
+        // place these aggregates live, by design (`StatsSnapshot`
+        // already carries every other lifetime total separately;
+        // adding three more would mostly duplicate the day-bucket
+        // sums and risk drift between the two).
+        var input = 0
+        var output = 0
+        var cached = 0
+        for bucket in dayBuckets.values {
+            input  += bucket.tokenInput
+            output += bucket.tokenOutput
+            cached += bucket.tokenCached
+        }
+        return (input, output, cached)
     }
 
     /// Per-app totals over the last `days` local days. `days == nil` →
@@ -293,8 +385,25 @@ actor StatsStore {
     /// app bucket and persist atomically. Returns the new snapshot so
     /// the caller can update its observable mirror without an extra
     /// round-trip.
+    ///
+    /// Backwards-compat shim: callers that don't track per-session
+    /// `TokenUsage` (legacy paths, tests, the still-extant
+    /// no-token-aware code path) route here. The `tokens:`-aware
+    /// overload below is the production wiring after U5.
     @discardableResult
     func record(_ entry: HistoryEntry) -> StatsSnapshot {
+        record(entry, tokens: .zero)
+    }
+
+    /// Token-aware record. Folds the session's word/duration/app
+    /// aggregates AND the Gemini token usage emitted by the
+    /// session's calls into the corresponding day + day×app
+    /// buckets. Token aggregates are **never decremented** on
+    /// history-entry deletion (matches the existing carve-out for
+    /// word counts — see
+    /// `solutions/conventions/no-telemetry-with-statsstore-carveout-2026-05-15.md`).
+    @discardableResult
+    func record(_ entry: HistoryEntry, tokens: TokenUsage) -> StatsSnapshot {
         var snap = summary()
         let words = Self.wordCount(entry.text)
         let duration = max(0, entry.durationSeconds)
@@ -318,6 +427,9 @@ actor StatsStore {
         day.sessions += 1
         day.durationSeconds += duration
         day.durationWords += timedWords
+        day.tokenInput  += tokens.input
+        day.tokenOutput += tokens.output
+        day.tokenCached += tokens.cached
         snap.dayBuckets[dayKey] = day
 
         // Empty bundle IDs would all collapse into one bucket and the
@@ -339,6 +451,9 @@ actor StatsStore {
             dayAppBucket.sessions += 1
             dayAppBucket.durationSeconds += duration
             dayAppBucket.durationWords += timedWords
+            dayAppBucket.tokenInput  += tokens.input
+            dayAppBucket.tokenOutput += tokens.output
+            dayAppBucket.tokenCached += tokens.cached
             perApp[entry.sourceBundleID] = dayAppBucket
             snap.dayAppBuckets[dayKey] = perApp
         }

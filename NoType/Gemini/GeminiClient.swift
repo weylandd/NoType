@@ -271,6 +271,35 @@ actor GeminiClient {
         isFinal: Bool,
         apiKey: String
     ) async throws -> String {
+        try await transcribeWithUsage(
+            audio: audio,
+            mimeType: mimeType,
+            context: context,
+            priorTranscripts: priorTranscripts,
+            chunkIndex: chunkIndex,
+            isFinal: isFinal,
+            apiKey: apiKey
+        ).text
+    }
+
+    /// Token-aware variant of `transcribe`. Returns the transcript
+    /// AND the `TokenUsage` Gemini billed for this single response.
+    /// Added in U5 (plan 2026-05-18-001 §473) — production path
+    /// (`RecordingSession`) switches to the `*WithUsage` overloads
+    /// so session-level token aggregation is honest. Existing
+    /// `transcribe(...)` stays as a backwards-compat shim
+    /// (PromptEvalHarness reads `lastUsage` directly post-call,
+    /// untouched). Path (a) per plan recommendation — smaller blast
+    /// radius than renaming the existing return types.
+    func transcribeWithUsage(
+        audio: Data,
+        mimeType: String,
+        context: ContextSnapshot,
+        priorTranscripts: [String],
+        chunkIndex: Int,
+        isFinal: Bool,
+        apiKey: String
+    ) async throws -> (text: String, tokens: TokenUsage) {
         let instruction = isFinal
             ? Self.finalChunkInstruction(chunkIndex: chunkIndex)
             : Self.midChunkInstruction(chunkIndex: chunkIndex)
@@ -308,6 +337,22 @@ actor GeminiClient {
         context: ContextSnapshot,
         apiKey: String
     ) async throws -> String {
+        try await transcribeShortWithUsage(
+            audio: audio,
+            mimeType: mimeType,
+            context: context,
+            apiKey: apiKey
+        ).text
+    }
+
+    /// Token-aware variant of `transcribeShort`. See
+    /// `transcribeWithUsage` for the path-(a) rationale.
+    func transcribeShortWithUsage(
+        audio: Data,
+        mimeType: String,
+        context: ContextSnapshot,
+        apiKey: String
+    ) async throws -> (text: String, tokens: TokenUsage) {
         let instruction = Self.liteChunkInstruction()
         return try await sendRequest(
             audios: [(audio, mimeType)],
@@ -342,6 +387,32 @@ actor GeminiClient {
         isFinal: Bool,
         apiKey: String
     ) async throws -> String {
+        try await transcribeBatchWithUsage(
+            audios: audios,
+            context: context,
+            priorTranscripts: priorTranscripts,
+            chunkIndices: chunkIndices,
+            isFinal: isFinal,
+            apiKey: apiKey
+        ).text
+    }
+
+    /// Token-aware variant of `transcribeBatch`. Returns the
+    /// transcript covering every chunk in the batch AND the single
+    /// per-request `TokenUsage` Gemini billed. Tokens are **not**
+    /// divided across chunks — Gemini's billing model is
+    /// per-response, and synthesising a per-chunk split would be a
+    /// guess (see `TokenUsage` doc-comment). The caller (a
+    /// `RecordingSession` sender) records one `TokenUsage` per
+    /// Gemini call and sums at session end.
+    func transcribeBatchWithUsage(
+        audios: [(data: Data, mimeType: String)],
+        context: ContextSnapshot,
+        priorTranscripts: [String],
+        chunkIndices: [Int],
+        isFinal: Bool,
+        apiKey: String
+    ) async throws -> (text: String, tokens: TokenUsage) {
         precondition(audios.count == chunkIndices.count, "audios / indices mismatch")
         precondition(audios.count > 1, "use transcribe(audio:...) for single chunks")
         let instruction = Self.batchedChunkInstruction(indices: chunkIndices, isFinal: isFinal)
@@ -507,7 +578,7 @@ actor GeminiClient {
         mayBeEmpty: Bool,
         apiKey: String,
         useLitePrompt: Bool = false
-    ) async throws -> String {
+    ) async throws -> (text: String, tokens: TokenUsage) {
         let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedKey.isEmpty else { throw GeminiError.missingKey }
 
@@ -578,7 +649,7 @@ actor GeminiClient {
         logID: String,
         attempt: Int,
         mayBeEmpty: Bool
-    ) async throws -> String {
+    ) async throws -> (text: String, tokens: TokenUsage) {
         let networkStart = Date()
         let data: Data
         let response: URLResponse
@@ -664,7 +735,7 @@ actor GeminiClient {
         #endif
 
         Self.log.info("\(logID) length=\(trimmed.count) network=\(networkMs)ms attempt=\(attempt)")
-        return trimmed
+        return (trimmed, TokenUsage(from: parsed.usageMetadata))
     }
 
     /// Classifies a Gemini error into a retry decision. `delayMs == nil`

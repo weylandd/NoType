@@ -51,6 +51,7 @@
 		53C4DEF1DBDDC642056EF8E0 /* DictionaryEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = D000444FD5EA9D0896B2C9C1 /* DictionaryEntry.swift */; };
 		551A4446A3496C4502365605 /* RecordingSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = D554997E83D2BF16C4DD84D1 /* RecordingSession.swift */; };
 		589152C954B6AB2D2AA9EA62 /* DictionaryContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80B5557E3F7759AFF2F36889 /* DictionaryContext.swift */; };
+		5B7AB75F219A3892F0C86298 /* TokenUsageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DC7098DB4AFCBD975E3972 /* TokenUsageTests.swift */; };
 		5C25E5C9E44CD1A0BD505B8A /* AudioRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6B1570DF6A21DE453068EEB /* AudioRecorder.swift */; };
 		5C8B981FF1A1BD6F8C9D456D /* PauseDetectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C63BFE2471C89B7CA5960E /* PauseDetectorTests.swift */; };
 		623A26DF74A7AF71651614D4 /* single_word_ambiguous.m4a in Resources */ = {isa = PBXBuildFile; fileRef = A7C59A54EBE6E4A27AA5BC63 /* single_word_ambiguous.m4a */; };
@@ -61,6 +62,7 @@
 		6A7871F67249676D83A0FF7B /* TranscribingHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C62AA4B6AC6FC3D6AAE71EB /* TranscribingHUD.swift */; };
 		6AB76A2029EA19115C7DC48C /* UpdateController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 314C82E93FAD83A53D17FED7 /* UpdateController.swift */; };
 		6C16924490912963A523DF4D /* AccessibilityTree.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65F2CECA59B522023624A410 /* AccessibilityTree.swift */; };
+		6D07B5396F3FCA96C1BAB30D /* TokenUsage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A4E0E4612EC01595645A34B /* TokenUsage.swift */; };
 		6FEAD522F9B3FC308F851EFE /* DictionaryStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B56D29AEDCCC79C94B4E4A8 /* DictionaryStoreTests.swift */; };
 		70CB01B9990D31BFE6EC8352 /* greeting_ru_long.m4a in Resources */ = {isa = PBXBuildFile; fileRef = 077C218468F31B862B7F60A5 /* greeting_ru_long.m4a */; };
 		74A7A652192F139D5E06D7ED /* audio_fixtures.json in Resources */ = {isa = PBXBuildFile; fileRef = 4B35A42D4256E83CF2EAD5E2 /* audio_fixtures.json */; };
@@ -178,6 +180,7 @@
 		47154B6F331890C96DC4D118 /* PasteSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasteSettings.swift; sourceTree = "<group>"; };
 		47CF0C0DD773EAC8DB67A6CC /* code_switch_en_es.m4a */ = {isa = PBXFileReference; path = code_switch_en_es.m4a; sourceTree = "<group>"; };
 		4A17B31D07203EABD873911B /* PermissionsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionsViewModel.swift; sourceTree = "<group>"; };
+		4A4E0E4612EC01595645A34B /* TokenUsage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenUsage.swift; sourceTree = "<group>"; };
 		4B35A42D4256E83CF2EAD5E2 /* audio_fixtures.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = audio_fixtures.json; sourceTree = "<group>"; };
 		4B91BA41A360644AE3C05488 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		4CD5FAA39C9FB564C0ACD614 /* ErrorHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorHUD.swift; sourceTree = "<group>"; };
@@ -237,6 +240,7 @@
 		B9FA5AFDC5821D5F1A2B8E52 /* HUDController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HUDController.swift; sourceTree = "<group>"; };
 		BF63CF893691C7C9ED9A4745 /* InstructionsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstructionsStore.swift; sourceTree = "<group>"; };
 		BF64DF751173D1C9DE2854C3 /* AccessibilityPermission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityPermission.swift; sourceTree = "<group>"; };
+		C0DC7098DB4AFCBD975E3972 /* TokenUsageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenUsageTests.swift; sourceTree = "<group>"; };
 		C14E8B007DEBD358EA83ED05 /* RecordingHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingHUD.swift; sourceTree = "<group>"; };
 		C1EA021924A61385E6B6F190 /* DictionaryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryView.swift; sourceTree = "<group>"; };
 		C35B4CE5FD1FCE754F5BFE87 /* InstructionsStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstructionsStoreTests.swift; sourceTree = "<group>"; };
@@ -342,6 +346,7 @@
 			children = (
 				E7C9AEDB2C6A5F32D6870A5A /* GeminiClient.swift */,
 				C5C54217DA985000100F2E9D /* Models.swift */,
+				4A4E0E4612EC01595645A34B /* TokenUsage.swift */,
 			);
 			path = Gemini;
 			sourceTree = "<group>";
@@ -524,6 +529,7 @@
 				0263094356CC622C357E0118 /* StatsStoreTests.swift */,
 				670CD7BB8F0AE779BE04F6BC /* TextInjectorTests.swift */,
 				631D4A860096B1F0D33547B0 /* TextReplacementEngineTests.swift */,
+				C0DC7098DB4AFCBD975E3972 /* TokenUsageTests.swift */,
 				3C1C62F4FBC068F50C44F23A /* Fixtures */,
 			);
 			path = NoTypeTests;
@@ -816,6 +822,7 @@
 				35B420BDBA4A559C00E9B857 /* TextInjector.swift in Sources */,
 				303E98F84E276A287506E159 /* TextRecognizer.swift in Sources */,
 				E20654C65BC11A56C0A0D68E /* TextReplacementEngine.swift in Sources */,
+				6D07B5396F3FCA96C1BAB30D /* TokenUsage.swift in Sources */,
 				6A7871F67249676D83A0FF7B /* TranscribingHUD.swift in Sources */,
 				760BA0F6F480F003CC6195FB /* UpdateBanner.swift in Sources */,
 				6AB76A2029EA19115C7DC48C /* UpdateController.swift in Sources */,
@@ -852,6 +859,7 @@
 				3F148D35B9566D9F223F5EF8 /* StatsStoreTests.swift in Sources */,
 				E22FCFE6255CF1946BF42BC1 /* TextInjectorTests.swift in Sources */,
 				507D5469915CEC43E4F27812 /* TextReplacementEngineTests.swift in Sources */,
+				5B7AB75F219A3892F0C86298 /* TokenUsageTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

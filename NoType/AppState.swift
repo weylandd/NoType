@@ -645,8 +645,13 @@ final class AppState {
                 // Fold into lifetime stats — survives the history cap so
                 // the Home tab's totals / top-apps / heatmap keep
                 // accumulating beyond the rolling 10-entry window.
+                // Token aggregates ride the same path (added in U5,
+                // plan 2026-05-18-001) — `sessionSummary.tokens` is
+                // already a per-session sum of successful Gemini
+                // calls; failed (recoverable) chunks contribute zero.
+                let tokens = sessionSummary.tokens
                 Task { [statsStore = self.statsStore] in
-                    let snap = await statsStore.record(entry)
+                    let snap = await statsStore.record(entry, tokens: tokens)
                     await MainActor.run { [weak self] in
                         self?.statsSummary = snap
                     }

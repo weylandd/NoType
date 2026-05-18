@@ -103,6 +103,16 @@ final class RecordingSession {
         /// Total chunks dispatched to Gemini (excludes sub-150 ms
         /// drops). `failedChunkCount <= dispatchedChunkCount`.
         let dispatchedChunkCount: Int
+        /// Sum of `TokenUsage` across every successful Gemini call
+        /// in this session (single-chunk, batched, lite, split-
+        /// retry). Failed calls (terminal or recoverable) contribute
+        /// nothing — the `*WithUsage` overload only returns on the
+        /// success path, so retried-then-succeeded calls already
+        /// carry only the final successful attempt's usage (matches
+        /// Gemini's per-response billing). Read by
+        /// `AppState.finalizeRecording` and folded into
+        /// `StatsStore.record(_:tokens:)` for per-day token totals.
+        let tokens: TokenUsage
 
         var hasFailures: Bool { failedChunkCount > 0 }
     }
@@ -215,6 +225,15 @@ final class RecordingSession {
     /// dispatch out-of-order). Stitched at `stop()` — each entry's
     /// `text ?? Self.failureMarker` becomes one piece of the output.
     private var responses: [ChunkResponse] = []
+    /// Per-session accumulator for Gemini token usage. Sums one
+    /// `TokenUsage` per successful `*WithUsage` call (single-chunk,
+    /// batched, lite, split-retry). Failed calls contribute nothing
+    /// (the only call sites that mutate this are the success arms).
+    /// `ChunkResponse` deliberately does NOT carry per-chunk
+    /// tokens — Gemini bills per-request and a batched response's
+    /// usage doesn't split cleanly across its chunks (plan §475 +
+    /// `TokenUsage` doc-comment).
+    private var sessionTokens: TokenUsage = .zero
     private var chunkCounter: Int = 0
     /// Set when a terminal error aborts the session (auth, blocked,
     /// encode failure, cancellation). `stop()` rethrows this — the
@@ -424,7 +443,8 @@ final class RecordingSession {
         }
         return SessionSummary(
             failedChunkCount: failed,
-            dispatchedChunkCount: total
+            dispatchedChunkCount: total,
+            tokens: sessionTokens
         )
     }
 
@@ -770,14 +790,14 @@ final class RecordingSession {
             : "chunks_\(encoded.first?.idx ?? -1)..\(encoded.last?.idx ?? -1)"
 
         do {
-            let text: String
+            let result: (text: String, tokens: TokenUsage)
             if snap.isLite {
                 // Lite path is reachable only via the discriminator in
                 // `processBatch` — guaranteed `encoded.count == 1` and
                 // `containsFinal == true` by construction (final-only
                 // batch, no successful priors, audio < 2 s).
                 let one = encoded[0]
-                text = try await gemini.transcribeShort(
+                result = try await gemini.transcribeShortWithUsage(
                     audio: one.audio,
                     mimeType: "audio/mp4",
                     context: snap.context,
@@ -785,7 +805,7 @@ final class RecordingSession {
                 )
             } else if encoded.count == 1 {
                 let one = encoded[0]
-                text = try await gemini.transcribe(
+                result = try await gemini.transcribeWithUsage(
                     audio: one.audio,
                     mimeType: "audio/mp4",
                     context: snap.context,
@@ -796,7 +816,7 @@ final class RecordingSession {
                 )
             } else {
                 Self.log.info("batching \(encoded.count) chunks (\(encoded.first?.idx ?? -1)..\(encoded.last?.idx ?? -1)) final=\(containsFinal)")
-                text = try await gemini.transcribeBatch(
+                result = try await gemini.transcribeBatchWithUsage(
                     audios: encoded.map { ($0.audio, "audio/mp4") },
                     context: snap.context,
                     priorTranscripts: snap.priors,
@@ -805,9 +825,10 @@ final class RecordingSession {
                     apiKey: snap.apiKey
                 )
             }
+            sessionTokens = sessionTokens + result.tokens
             responses.append(ChunkResponse(
                 chunkIndices: encoded.map { $0.idx },
-                text: text
+                text: result.text
             ))
         } catch {
             if Self.isTerminal(error) {
@@ -867,7 +888,7 @@ final class RecordingSession {
             // succeeded becomes context for the next one.
             let priors = currentPriors()
             do {
-                let text = try await gemini.transcribe(
+                let result = try await gemini.transcribeWithUsage(
                     audio: chunk.audio,
                     mimeType: "audio/mp4",
                     context: snap.context,
@@ -876,9 +897,10 @@ final class RecordingSession {
                     isFinal: chunk.isFinal,
                     apiKey: snap.apiKey
                 )
+                sessionTokens = sessionTokens + result.tokens
                 responses.append(ChunkResponse(
                     chunkIndices: [chunk.idx],
-                    text: text
+                    text: result.text
                 ))
             } catch {
                 if Self.isTerminal(error) {

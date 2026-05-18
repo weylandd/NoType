@@ -337,9 +337,10 @@ final class StatsStoreTests: XCTestCase {
         // Reproduces the "4 words / 2 s but WPM=4" report: a file
         // written by the intermediate v2 build carries
         // `totalDurationSeconds` from sessions that never tracked
-        // matching word counts. After the v3 decoder runs, the file
+        // matching word counts. After the heal chain runs, the file
         // should be self-healed: duration fields zeroed at every
-        // level, version bumped to 3, text totals preserved.
+        // level by `healIfPreV3`, then version bumped to current
+        // (v4) by `healIfPreV4`, text totals preserved throughout.
         let v2JSON = """
         {
           "version": 2,
@@ -364,7 +365,7 @@ final class StatsStoreTests: XCTestCase {
         let store = makeStore()
         let snap = await store.summary()
 
-        XCTAssertEqual(snap.version, 3, "post-heal file should claim v3")
+        XCTAssertEqual(snap.version, 4, "post-heal file should claim current schema (v4)")
         // Text totals survive — the user keeps their session count
         // and Top apps history.
         XCTAssertEqual(snap.totalWords, 100)
@@ -380,6 +381,74 @@ final class StatsStoreTests: XCTestCase {
         XCTAssertEqual(snap.dayBuckets["2026-05-10"]?.durationWords, 0)
         XCTAssertEqual(snap.dayAppBuckets["2026-05-10"]?["com.tinyspeck.slackmacgap"]?.durationSeconds, 0)
         XCTAssertEqual(snap.dayAppBuckets["2026-05-10"]?["com.tinyspeck.slackmacgap"]?.durationWords, 0)
+    }
+
+    func test_healIfPreV4_preservesV3Duration() async throws {
+        // v3 file (full duration tracking; no token fields). After
+        // `healIfPreV4` runs, every v3 field MUST survive verbatim
+        // and token fields MUST default to 0. Pins the
+        // "purely-additive migration" contract — `healIfPreV4` is
+        // explicitly forbidden from zeroing v3 fields (the v4 schema
+        // already has every aggregate v3 ships; the existence of
+        // token fields with default-0 via tolerant decode IS the
+        // migration). See plan 2026-05-18-001 §491.
+        let v3JSON = """
+        {
+          "version": 3,
+          "totalWords": 50,
+          "totalSessions": 7,
+          "totalDurationSeconds": 1234.5,
+          "totalDurationWords": 40,
+          "dayBuckets": {
+            "2026-05-15": {
+              "words": 50,
+              "sessions": 7,
+              "durationSeconds": 1234.5,
+              "durationWords": 40
+            }
+          },
+          "appBuckets": {
+            "com.tinyspeck.slackmacgap": { "name": "Slack", "words": 50, "sessions": 7 }
+          },
+          "dayAppBuckets": {
+            "2026-05-15": {
+              "com.tinyspeck.slackmacgap": {
+                "words": 50,
+                "sessions": 7,
+                "durationSeconds": 1234.5,
+                "durationWords": 40
+              }
+            }
+          }
+        }
+        """
+        try v3JSON.data(using: .utf8)!.write(to: tempURL)
+
+        let store = makeStore()
+        let snap = await store.summary()
+
+        XCTAssertEqual(snap.version, 4, "post-heal file should claim v4")
+
+        // EVERY v3 aggregate preserved verbatim.
+        XCTAssertEqual(snap.totalWords, 50)
+        XCTAssertEqual(snap.totalSessions, 7)
+        XCTAssertEqual(snap.totalDurationSeconds, 1234.5,
+                       "v3 duration must NOT be zeroed by healIfPreV4")
+        XCTAssertEqual(snap.totalDurationWords, 40)
+        XCTAssertEqual(snap.dayBuckets["2026-05-15"]?.words, 50)
+        XCTAssertEqual(snap.dayBuckets["2026-05-15"]?.sessions, 7)
+        XCTAssertEqual(snap.dayBuckets["2026-05-15"]?.durationSeconds, 1234.5)
+        XCTAssertEqual(snap.dayBuckets["2026-05-15"]?.durationWords, 40)
+        XCTAssertEqual(snap.appBuckets["com.tinyspeck.slackmacgap"]?.words, 50)
+        XCTAssertEqual(snap.dayAppBuckets["2026-05-15"]?["com.tinyspeck.slackmacgap"]?.durationSeconds, 1234.5)
+
+        // Token fields default to 0 — the schema knows about them
+        // (decode succeeded), the migration just doesn't backfill
+        // anything since v3 files never carried them.
+        XCTAssertEqual(snap.dayBuckets["2026-05-15"]?.tokenInput, 0)
+        XCTAssertEqual(snap.dayBuckets["2026-05-15"]?.tokenOutput, 0)
+        XCTAssertEqual(snap.dayBuckets["2026-05-15"]?.tokenCached, 0)
+        XCTAssertEqual(snap.dayAppBuckets["2026-05-15"]?["com.tinyspeck.slackmacgap"]?.tokenInput, 0)
     }
 
     func test_historyEntry_decodesLegacyJSONWithoutDuration() throws {
@@ -434,6 +503,172 @@ final class StatsStoreTests: XCTestCase {
         let topAll = snap.topApps(overLastDays: nil, today: today, calendar: cal)
         XCTAssertEqual(topAll.count, 2)
         XCTAssertEqual(topAll.first?.bundleID, "co.linear.linear")
+    }
+
+    // MARK: - Token aggregation (v4)
+
+    func test_record_singleSessionWithTokens_updatesDayBucket() async {
+        let store = makeStore()
+        let day = makeDate(y: 2026, m: 5, d: 11, h: 14)
+        let e = entry(text: "hello world", date: day)
+        let tokens = TokenUsage(input: 1_000, output: 500, cached: 300)
+        let snap = await store.record(e, tokens: tokens)
+
+        let key = StatsSnapshot.dayKey(for: day)
+        XCTAssertEqual(snap.dayBuckets[key]?.tokenInput,  1_000)
+        XCTAssertEqual(snap.dayBuckets[key]?.tokenOutput,   500)
+        XCTAssertEqual(snap.dayBuckets[key]?.tokenCached,   300)
+
+        // day×app slice mirrors the same totals.
+        XCTAssertEqual(snap.dayAppBuckets[key]?["com.tinyspeck.slackmacgap"]?.tokenInput,  1_000)
+        XCTAssertEqual(snap.dayAppBuckets[key]?["com.tinyspeck.slackmacgap"]?.tokenOutput,   500)
+        XCTAssertEqual(snap.dayAppBuckets[key]?["com.tinyspeck.slackmacgap"]?.tokenCached,   300)
+    }
+
+    func test_record_accumulatesTokensAcrossMultipleSessions_sameDay() async {
+        let store = makeStore()
+        let day = makeDate(y: 2026, m: 5, d: 11, h: 14)
+        _ = await store.record(
+            entry(text: "first", date: day),
+            tokens: TokenUsage(input: 100, output: 50, cached: 30)
+        )
+        let snap = await store.record(
+            entry(text: "second", date: day),
+            tokens: TokenUsage(input: 200, output: 25, cached: 15)
+        )
+
+        let key = StatsSnapshot.dayKey(for: day)
+        XCTAssertEqual(snap.dayBuckets[key]?.tokenInput,  300)
+        XCTAssertEqual(snap.dayBuckets[key]?.tokenOutput,  75)
+        XCTAssertEqual(snap.dayBuckets[key]?.tokenCached,  45)
+    }
+
+    func test_record_zeroTokens_doesNotAffectBuckets() async {
+        // Backwards-compat path: existing tests + the `record(_:)`
+        // shim use `.zero`. Token fields must stay 0 throughout.
+        let store = makeStore()
+        let day = makeDate(y: 2026, m: 5, d: 11, h: 14)
+        let snap = await store.record(entry(text: "no tokens", date: day))
+
+        let key = StatsSnapshot.dayKey(for: day)
+        XCTAssertEqual(snap.dayBuckets[key]?.tokenInput,  0)
+        XCTAssertEqual(snap.dayBuckets[key]?.tokenOutput, 0)
+        XCTAssertEqual(snap.dayBuckets[key]?.tokenCached, 0)
+    }
+
+    func test_record_emptyBundleID_stillCountsTokensInDayBucket() async {
+        // Mirrors the existing `test_record_emptyBundleID_skipsAppBucketButCountsTotals`
+        // for tokens — day-level tokens accumulate, day×app skip.
+        let store = makeStore()
+        let day = makeDate(y: 2026, m: 5, d: 11, h: 14)
+        let snap = await store.record(
+            entry(text: "mystery", bundleID: "", name: "Mystery", date: day),
+            tokens: TokenUsage(input: 50, output: 25, cached: 10)
+        )
+
+        let key = StatsSnapshot.dayKey(for: day)
+        XCTAssertEqual(snap.dayBuckets[key]?.tokenInput,  50)
+        XCTAssertEqual(snap.dayBuckets[key]?.tokenOutput, 25)
+        XCTAssertEqual(snap.dayBuckets[key]?.tokenCached, 10)
+        XCTAssertTrue(snap.dayAppBuckets[key]?.isEmpty ?? true,
+                      "empty bundle skips day×app — by design")
+    }
+
+    func test_record_tokensPersistAcrossReload() async {
+        let store = makeStore()
+        let day = makeDate(y: 2026, m: 5, d: 11, h: 14)
+        _ = await store.record(
+            entry(text: "persist", date: day),
+            tokens: TokenUsage(input: 1_500, output: 600, cached: 900)
+        )
+
+        // Fresh actor — same URL — must see tokens preserved through
+        // atomic write + tolerant decode.
+        let store2 = StatsStore(url: tempURL)
+        let snap = await store2.summary()
+        let key = StatsSnapshot.dayKey(for: day)
+        XCTAssertEqual(snap.dayBuckets[key]?.tokenInput,  1_500)
+        XCTAssertEqual(snap.dayBuckets[key]?.tokenOutput,   600)
+        XCTAssertEqual(snap.dayBuckets[key]?.tokenCached,   900)
+    }
+
+    // MARK: - tokenTotals(overLastDays:) windowing
+
+    func test_tokenTotals_overLastDays_sumsRecentBuckets() async {
+        let store = makeStore()
+        let today = makeDate(y: 2026, m: 5, d: 11, h: 12)
+        let cal = Calendar.autoupdatingCurrent
+
+        _ = await store.record(
+            entry(text: "today", date: today),
+            tokens: TokenUsage(input: 100, output: 50, cached: 30)
+        )
+        let yesterday = cal.date(byAdding: .day, value: -1, to: today) ?? today
+        _ = await store.record(
+            entry(text: "yesterday", date: yesterday),
+            tokens: TokenUsage(input: 200, output: 100, cached: 80)
+        )
+        let weekPlus = cal.date(byAdding: .day, value: -8, to: today) ?? today
+        let snap = await store.record(
+            entry(text: "old", date: weekPlus),
+            tokens: TokenUsage(input: 1_000, output: 500, cached: 700)
+        )
+
+        // 7-day window from today: today + yesterday only.
+        let last7 = snap.tokenTotals(overLastDays: 7, today: today, calendar: cal)
+        XCTAssertEqual(last7.input,  300)
+        XCTAssertEqual(last7.output, 150)
+        XCTAssertEqual(last7.cached, 110)
+
+        // 30-day window: includes the old bucket.
+        let last30 = snap.tokenTotals(overLastDays: 30, today: today, calendar: cal)
+        XCTAssertEqual(last30.input,  1_300)
+        XCTAssertEqual(last30.output,   650)
+        XCTAssertEqual(last30.cached,   810)
+
+        // nil (All): same as 30 here — no sessions outside the
+        // 30-day window in this fixture.
+        let allTime = snap.tokenTotals(overLastDays: nil, today: today, calendar: cal)
+        XCTAssertEqual(allTime.input,  1_300)
+        XCTAssertEqual(allTime.output,   650)
+        XCTAssertEqual(allTime.cached,   810)
+    }
+
+    func test_tokenTotals_emptyWindow_returnsZero() async {
+        // No sessions at all → every window returns (0, 0, 0), not
+        // nil and not an error. UI consumers (e.g. `TokenStatsPanel`
+        // in U6) format zeros for the "Today" column on a fresh
+        // install without crashing.
+        let store = makeStore()
+        let today = makeDate(y: 2026, m: 5, d: 11, h: 12)
+        let snap = await store.summary()
+        let totals = snap.tokenTotals(overLastDays: 7, today: today)
+        XCTAssertEqual(totals.input,  0)
+        XCTAssertEqual(totals.output, 0)
+        XCTAssertEqual(totals.cached, 0)
+    }
+
+    func test_tokenTotals_allLifetime_sumsEveryDayBucket() async {
+        // Even when the day predates the windowed range, the "All"
+        // case (`days: nil`) still picks it up. Source of truth for
+        // tokens is the `dayBuckets` map directly — no separate
+        // lifetime field.
+        let store = makeStore()
+        let cal = Calendar.autoupdatingCurrent
+        let today = makeDate(y: 2026, m: 5, d: 11, h: 12)
+        let yearAgo = cal.date(byAdding: .day, value: -400, to: today) ?? today
+        _ = await store.record(
+            entry(text: "ancient", date: yearAgo),
+            tokens: TokenUsage(input: 1, output: 2, cached: 3)
+        )
+        let snap = await store.record(
+            entry(text: "recent", date: today),
+            tokens: TokenUsage(input: 10, output: 20, cached: 30)
+        )
+        let total = snap.tokenTotals(overLastDays: nil, today: today, calendar: cal)
+        XCTAssertEqual(total.input,  11)
+        XCTAssertEqual(total.output, 22)
+        XCTAssertEqual(total.cached, 33)
     }
 
     // MARK: - Helpers

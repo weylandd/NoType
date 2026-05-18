@@ -129,7 +129,8 @@ final class RecordingSessionPartialRecoveryTests: XCTestCase {
     func test_sessionSummary_hasFailures_false_whenNothingFailed() {
         let s = RecordingSession.SessionSummary(
             failedChunkCount: 0,
-            dispatchedChunkCount: 3
+            dispatchedChunkCount: 3,
+            tokens: .zero
         )
         XCTAssertFalse(s.hasFailures)
     }
@@ -137,8 +138,25 @@ final class RecordingSessionPartialRecoveryTests: XCTestCase {
     func test_sessionSummary_hasFailures_true_whenAnyFailed() {
         let s = RecordingSession.SessionSummary(
             failedChunkCount: 1,
-            dispatchedChunkCount: 5
+            dispatchedChunkCount: 5,
+            tokens: .zero
         )
         XCTAssertTrue(s.hasFailures)
+    }
+
+    // MARK: - SessionSummary token field (v4)
+
+    func test_sessionSummary_carriesTokens_verbatim() {
+        // Pin the tokens field round-trip — `AppState.finalizeRecording`
+        // forwards `summary.tokens` straight into `StatsStore.record`
+        // so anything that mutates this value silently would skew
+        // per-day token totals.
+        let t = TokenUsage(input: 1234, output: 567, cached: 890)
+        let s = RecordingSession.SessionSummary(
+            failedChunkCount: 0,
+            dispatchedChunkCount: 1,
+            tokens: t
+        )
+        XCTAssertEqual(s.tokens, t)
     }
 }
