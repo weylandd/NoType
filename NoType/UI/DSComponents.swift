@@ -568,6 +568,89 @@ struct DSWordChip: View {
     }
 }
 
+// MARK: - Settings section + row
+//
+// New DS primitives shipped by U1 for the Settings tab's
+// scrolled-with-headers form. Justified by the project's
+// "If a button/chip/pill appears in 2+ surfaces with the same spec, it
+// lives in DSComponents.swift" convention — 5 sections × 4–6 rows each
+// is well past the threshold. Visual defaults pulled from existing DS
+// tokens (DS.Space, DS.Color, DS.Font, DSSeparator); no hard-coded
+// padding / hex / alpha at the call site.
+//
+// Subsequent units (U2–U8) compose section content via DSSettingsRow,
+// passing the trailing control as a `@ViewBuilder` closure.
+
+/// Section block: H2-style label + a body slot. Bodies render as a
+/// vertical stack with hairline separators between sibling rows. The
+/// body is `@ViewBuilder` so callers can drop `DSSettingsRow`s
+/// directly OR mix in custom content (e.g. a description, an extra
+/// chip strip) without rewriting the section shell.
+struct DSSettingsSection<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DS.Space.s3) {
+            Text(title)
+                .font(DS.Font.bodyMD(.semibold))
+                .foregroundStyle(DS.Color.textPrimary)
+                .textCase(.none)
+
+            VStack(alignment: .leading, spacing: 0) {
+                content()
+            }
+            // bgCanvas is the same subtle recess the sidebar uses —
+            // makes section bodies read as a contained card without
+            // adding a heavyweight shadow / border treatment.
+            .background(
+                DS.Color.bgCanvas,
+                in: RoundedRectangle(cornerRadius: DS.Radius.md)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: DS.Radius.md)
+                    .strokeBorder(DS.Color.borderSubtle, lineWidth: DS.Border.hairline)
+            )
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Single row inside a `DSSettingsSection`: title (+ optional subtitle
+/// for context / explanation) on the leading side, an arbitrary
+/// trailing control via `@ViewBuilder`. Layout is a pinned HStack
+/// with a `Spacer` so the trailing control always docks right.
+///
+/// Sibling rows inside one section are separated by a hairline
+/// `DSSeparator` automatically (rendered by the section's child
+/// laying-out — see `DSSettingsSection.body`'s child-spacing rules).
+struct DSSettingsRow<Trailing: View>: View {
+    let title: String
+    var subtitle: String? = nil
+    @ViewBuilder let trailing: () -> Trailing
+
+    var body: some View {
+        HStack(alignment: .center, spacing: DS.Space.s4) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(DS.Font.body(.medium))
+                    .foregroundStyle(DS.Color.textPrimary)
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(DS.Font.bodySM())
+                        .foregroundStyle(DS.Color.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: DS.Space.s3)
+            trailing()
+        }
+        .padding(.horizontal, DS.Space.s4)
+        .padding(.vertical, DS.Space.s3 + 2)  // 10 pt — comfortable for toggles + slider tracks
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 // MARK: - Press-events helper
 
 private extension View {

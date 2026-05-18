@@ -18,6 +18,17 @@ final class AppState {
     var recordingState: RecordingState = .idle
     var history: [HistoryEntry] = []
 
+    /// Cross-window tab navigation flag. Set by surfaces outside the
+    /// main window (e.g. popover gear → Settings) when they want the
+    /// main window to open on a specific tab. `MainWindowView`
+    /// unconditionally reads-then-clears this on `.onAppear` and
+    /// `scenePhase == .active`; non-nil values land in `selectedTab`.
+    /// Clear-first-apply-second is deliberate per plan §270 — prevents
+    /// a flag set hours ago from hijacking an unrelated window-open
+    /// trigger (e.g. a Sparkle banner click landing on Settings
+    /// instead of the update detail).
+    var pendingTabSelection: MainTab?
+
     /// Lifetime aggregate of every recorded session — survives the
     /// 10-entry cap on `history`. Source of truth for Home tab stats
     /// (words/time saved/WPM), the top-apps panel, and the activity

@@ -19,6 +19,19 @@ struct HistoryPopover: View {
     @Environment(PermissionsViewModel.self) private var permissions
     @Environment(\.openWindow)              private var openWindow
 
+    /// Lookup for "is the main window already visible?" — used by the
+    /// gear button to decide whether to set the cross-window
+    /// `pendingTabSelection` flag (popover and main window are
+    /// disjoint surfaces; flag is for the case where the window has
+    /// to be opened) or to update `selectedTab` directly through a
+    /// runtime read of `NSApp.windows`. Wrapped here so tests can
+    /// override.
+    private var isMainWindowVisible: Bool {
+        NSApp.windows.contains { window in
+            window.identifier?.rawValue == "main" && window.isVisible
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -81,6 +94,12 @@ struct HistoryPopover: View {
 
             Spacer()
 
+            // Gear → open main window on Settings tab. Always visible
+            // (no recording-state gate) so the user can still adjust
+            // settings while a session is sending — Settings UI doesn't
+            // touch the in-flight session.
+            DSIconButton(icon: .settings) { openSettings() }
+
             if case .recording(let startedAt) = appState.recordingState {
                 recordingPill(startedAt: startedAt)
             } else if case .sending = appState.recordingState {
@@ -129,6 +148,22 @@ struct HistoryPopover: View {
     private static func formatElapsed(from start: Date, to now: Date) -> String {
         let total = max(0, Int(now.timeIntervalSince(start)))
         return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
+    /// Cross-window navigation: gear → Settings tab in main window.
+    /// When the main window is already visible we mutate `selectedTab`
+    /// directly via the `pendingTabSelection` flag the window's
+    /// `scenePhase` watcher consumes on its next `.active` transition;
+    /// when it's hidden we set the flag AND call `openWindow` which
+    /// triggers `MainWindowView.onAppear`'s consumer. Either way the
+    /// flag is cleared on consumption (clear-then-apply atomic per
+    /// plan §270).
+    private func openSettings() {
+        appState.pendingTabSelection = .settings
+        if !isMainWindowVisible {
+            openWindow(id: "main")
+        }
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private var sendingPill: some View {
