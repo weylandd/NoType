@@ -371,11 +371,21 @@ final class AudioDeviceManager {
         return name as String
     }
 
-    // MARK: - Apply to engine
+    // MARK: - Apply to AVAudioEngine (onboarding MicProbe only)
 
     /// Force `engine.inputNode` to read from `device`. Must be called
     /// before `engine.start()`. Returns `true` if the HAL accepted the
     /// override; `false` falls back to the system default.
+    ///
+    /// **Used exclusively by `NoType/Onboarding/MicProbe.swift`** for
+    /// the onboarding mic-check spectrum meter — that path stays on
+    /// `AVAudioEngine` because the BT-glitch concern that motivated
+    /// `AudioRecorder`'s HAL rewrite doesn't apply during onboarding
+    /// (users aren't holding the hotkey while listening to music in
+    /// the first-launch wizard). The real recording path
+    /// (`AudioRecorder`) opens the device via
+    /// `AudioDeviceCreateIOProcIDWithBlock` and doesn't touch this
+    /// method.
     @discardableResult
     nonisolated static func apply(_ device: Device, to engine: AVAudioEngine) -> Bool {
         guard let unit = engine.inputNode.audioUnit else { return false }
@@ -393,5 +403,41 @@ final class AudioDeviceManager {
             return false
         }
         return true
+    }
+
+    // MARK: - HAL stream format
+
+    /// Read the device's *input* stream format directly from Core
+    /// Audio. Returns `nil` when the HAL refuses (aggregate devices in
+    /// odd states, devices that vanish mid-call, etc.).
+    ///
+    /// `AudioRecorder`'s HAL path uses this to size the
+    /// `AVAudioConverter` (input fmt → 16 kHz mono float32) before
+    /// opening the IOProc. Pure / synchronous / hot-path-safe — no
+    /// MainActor hop, no allocations beyond the inout ASBD.
+    nonisolated static func inputStreamFormat(for deviceID: AudioDeviceID) -> AudioStreamBasicDescription? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamFormat,
+            mScope: kAudioDevicePropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var asbd = AudioStreamBasicDescription()
+        var size: UInt32 = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &asbd)
+        guard status == noErr, asbd.mSampleRate > 0, asbd.mChannelsPerFrame > 0 else {
+            return nil
+        }
+        return asbd
+    }
+
+    /// Pure: turn an `AudioStreamBasicDescription` into the matching
+    /// `AVAudioFormat`. Returned object is what the HAL IOProc adapter
+    /// hands to `AVAudioPCMBuffer(pcmFormat:bufferListNoCopy:)` so the
+    /// buffer view aligns 1:1 with the bytes the HAL just delivered.
+    /// `AVAudioFormat(streamDescription:)` is a thin Cocoa wrapper —
+    /// it doesn't allocate output buffers, just records the metadata.
+    nonisolated static func avAudioFormat(from asbd: AudioStreamBasicDescription) -> AVAudioFormat? {
+        var asbd = asbd
+        return AVAudioFormat(streamDescription: &asbd)
     }
 }

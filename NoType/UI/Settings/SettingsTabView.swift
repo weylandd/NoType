@@ -3,13 +3,14 @@ import SwiftUI
 /// Settings tab root. Scrolled-with-headers form per plan §118 —
 /// internal sidebar was rejected because the main window is locked
 /// at 1080×760 and a second nav rail would steal too much horizontal
-/// budget. All 5 sections live in one `ScrollView`:
+/// budget. All 6 sections live in one `ScrollView`:
 ///
-///   General · Shortcuts · Microphone & Audio · API · System
+///   General · Shortcuts · Microphone · Audio · API · System
 ///
-/// General section content shipped by U2 (this unit). Subsequent
-/// units fill in Shortcuts (U3), Microphone & Audio (U4), API (U6),
-/// and System (U7 + U8).
+/// General section content shipped by U2; Shortcuts by U3;
+/// Microphone + Audio by U4 (two sections per the reference screenshot:
+/// Microphone holds the change-mic row, Audio holds Sound effects,
+/// Silence remover, and Music interruption); API by U6; System by U7 + U8.
 struct SettingsTabView: View {
     @Environment(AppState.self)            private var appState
     @Environment(AppearanceController.self) private var appearance
@@ -43,9 +44,16 @@ struct SettingsTabView: View {
                     shortcutsSectionBody()
                 }
 
-                DSSettingsSection(title: "Microphone & Audio") {
-                    // Filled by U4 (Mic picker, BT toggle, HAL rewrite invisible to UI)
-                    sectionPlaceholder()
+                // Microphone section (U4): single status-style row
+                // ("Auto-detect" label + Change button) — the BT-avoidance
+                // toggle is intentionally not in the UI (default-ON; rare
+                // override via `defaults write notype.preferBuiltInOverBluetooth`).
+                DSSettingsSection(title: "Microphone") {
+                    MicChangeRow()
+                }
+
+                DSSettingsSection(title: "Audio") {
+                    audioSectionBody(appState: appState)
                 }
 
                 // TODO: when SaaS mode lands, gate this section on userMode.
@@ -242,13 +250,44 @@ struct SettingsTabView: View {
         }
     }
 
-    /// Placeholder body used by sections still pending in this branch.
-    private func sectionPlaceholder() -> some View {
-        Text("Coming soon.")
-            .font(DS.Font.body())
-            .foregroundStyle(DS.Color.textTertiary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, DS.Space.s2)
+    // MARK: - Audio section (U4)
+    //
+    // One row: Music interruption picker (None / Mute / Pause) —
+    // Mute toggles the system default output's
+    // `kAudioDevicePropertyMute` for the recording-session duration;
+    // Pause sends a synthesised `NX_KEYTYPE_PLAY` media-key event on
+    // start (and again on stop) so apps that respond to system
+    // play/pause (Music, Spotify, Safari/YouTube, Chrome) toggle
+    // their playback. None = no-op.
+    //
+    // Sound-effects toggle deliberately not shipped — UI feedback
+    // (recording HUD, menu-bar icon state) is the visual confirmation
+    // surface; piping a system tone into the audio stack adds
+    // complexity without solving a real user problem.
+    //
+    // Silence-remover toggle deliberately not shipped — `PauseDetector`
+    // + Silero VAD already enforce pause boundaries, and an explicit
+    // RMS trim layered on top either duplicates that work or risks
+    // clipping stop-consonant closures the VAD correctly keeps inside
+    // the chunk.
+
+    @ViewBuilder
+    private func audioSectionBody(appState: AppState) -> some View {
+        @Bindable var appState = appState
+
+        DSSettingsRow(
+            title: "Music interruption",
+            subtitle: MusicInterruption.Mode.subtitle(for: appState.musicInterruptionMode)
+        ) {
+            Picker("", selection: $appState.musicInterruptionMode) {
+                ForEach(MusicInterruption.Mode.allCases, id: \.self) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 240)
+        }
     }
 
     // MARK: - Shortcuts section (U3 Phase 1)

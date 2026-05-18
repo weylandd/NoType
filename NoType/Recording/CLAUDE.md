@@ -4,9 +4,9 @@
 
 ## Files
 
-- `AudioRecorder.swift` — `AVAudioEngine` setup; async stream of VAD windows; wraps `PCMRingBuffer`.
+- `AudioRecorder.swift` — Core Audio HAL `AudioDeviceCreateIOProcIDWithBlock` capture path; async stream of VAD windows; wraps `PCMRingBuffer`. Bypasses `AVAudioEngine` deliberately — `engine.start()` implicitly opens an aggregate input+output device that stutters BT-headphone playback for ~1 s on every hotkey press; pure HAL captures input only.
 - `PCMRingBuffer.swift` — fixed-capacity wrap-around ring with absolute sample indexing. O(1) discard.
-- `AudioDeviceManager.swift` — Core Audio HAL wrapper for input-device discovery + HAL-property listeners.
+- `AudioDeviceManager.swift` — Core Audio HAL wrapper for input-device discovery + HAL-property listeners. Owns `inputStreamFormat(for:)` and `avAudioFormat(from:)` — the helpers `AudioRecorder` uses to size its `AVAudioConverter` per session.
 - `SileroVAD.swift` — CoreML wrapper around the unified-256 ms Silero v6 model.
 - `PauseDetector.swift` — turns Silero frame probabilities into chunk boundaries.
 - `ChunkBuilder.swift` — encodes PCM slices to AAC-in-M4A blobs.
@@ -15,7 +15,7 @@
 
 ## Invariants
 
-1. **Audio = 16 kHz mono float32.** Resampled from hardware-native rate via `AVAudioConverter`. Silero requires 16 kHz.
+1. **Audio = 16 kHz mono float32.** Resampled from the HAL device's native stream format via `AVAudioConverter`. Silero requires 16 kHz. The HAL IOProc receives input in whatever shape the device exposes (typically 44.1 / 48 kHz float32; built-in mics are mono, USB / aggregates may be stereo) — `AVAudioConverter` handles both sample-rate and channel downmix to mono.
 2. **VAD window = 4096 samples (256 ms).** Matches Silero v6 unified `chunkSize`. Don't change without re-fixturing `PauseDetectorTests`.
 3. **Pre-roll = 4800 samples (300 ms).** Every chunk's start is rewound by this much to capture leading consonants lost to VAD onset latency. Constant in `PauseDetector.init`.
 4. **Adaptive pause threshold.** Base = 16 000 samples (1.0 s) for chunks under 20 s; steps down to 11 200 (700 ms) for 20–40 s, 8 000 (500 ms) at and beyond 40 s. The ladder lives in `PauseDetector.pauseThresholdSamples(forChunkLength:)`. The early step-down keeps chunks small enough that each Gemini request fits inside the 30 s `timeoutIntervalForResource` budget in `GeminiClient` — chunks after the 20 s rung typically clock 20–40 s of audio, well under the network ceiling. 500 ms is the floor on purpose — at ~300 ms stop-consonant closures and inter-phrase micropauses start producing false cuts.
@@ -30,11 +30,12 @@
 
 ## Hard rules
 
-- **`AVAudioConverter` must return `.noDataNow`, not `.endOfStream`, when each input buffer is exhausted.** End-of-stream per buffer corrupts the filter state across taps. See `ConverterFeed` doc-comment in `AudioRecorder.swift`.
-- **Mid-session input-device swap is supported.** `AudioRecorder` observes `AVAudioEngineConfigurationChange`, tears down the tap, and rebuilds against the new input format without ending the session. PCM buffer is preserved; splice = a few ms of silence.
+- **`AVAudioConverter` must return `.noDataNow`, not `.endOfStream`, when each input buffer is exhausted.** End-of-stream per buffer corrupts the filter state across IOProc invocations. See `ConverterFeed` doc-comment in `AudioRecorder.swift`.
+- **Mid-session input-device swap is supported.** `AudioRecorder` installs a HAL property listener on `kAudioHardwarePropertyDefaultInputDevice` for the session's lifetime; on fire it tears down the IOProc, rebuilds the `AVAudioConverter` against the new device's stream format, and reopens against the new effective device — without ending the session. PCM buffer is preserved; splice = a few ms of silence. `teardownHAL` drains `ioQueue` between `AudioDeviceStop` and `AudioDeviceDestroyIOProcID` so a late-enqueued IOProc block can't alias the new `inputFormat` against the old device's bytes (which the HAL may have already reclaimed).
+- **No `AVAudioEngine` in the recording path.** The legacy `AVAudioEngine` + `installTap` + `AVAudioEngineConfigurationChange` shape kicks an output-side aggregate device on `engine.start()` and stutters BT-headphone playback. Pure HAL via `AudioDeviceCreateIOProcIDWithBlock` is input-only and avoids the aggregate. If a future refactor reintroduces `AVAudioEngine` here, document why and benchmark against AirPods + Apple Music first — see plan 2026-05-18-001 §31–37 and the SuperMegaUltraGroovy / AudioKit links there.
 - **Default-input picking avoids Bluetooth mics.** When `AudioDeviceManager.preferBuiltInOverBluetooth` is on (default ON) and the user hasn't pinned a device, the recorder falls back to the built-in mic if the system default is a BT headset — keeps the headphones in A2DP and stops the HFP/SCO profile switch from breaking music ducking. Explicit pin via the picker overrides. Policy lives in the pure `AudioDeviceManager.pickEffectiveDevice`; rationale in `solutions/architecture-patterns/bluetooth-input-avoidance-2026-05-16.md`.
 - **Lite path bypasses the full prompt entirely.** Different system prompt (`systemPromptLite`), different cache-prefix shape, different namespace at Gemini. By construction single-audio — `precondition(audios.count == 1)` in the Gemini client.
-- **`PCMRingBuffer` is `@unchecked Sendable` with NO internal lock.** Contract: only `AudioRecorder`'s lock-guarded tap path mutates in production; tests drive it single-threaded. If a multi-actor use ever appears, wrap it in a lock first.
+- **`PCMRingBuffer` is `@unchecked Sendable` with NO internal lock.** Contract: only `AudioRecorder`'s lock-guarded IOProc path mutates in production (the IOProc block dispatched onto `ioQueue`); tests drive it single-threaded. If a multi-actor use ever appears, wrap it in a lock first.
 - **Don't write tests against live mic input.** Use fixtures. Unit tests must be deterministic.
 
 ## VAD threshold
@@ -87,7 +88,8 @@ The class is `final` for the deinit safety net only — `IOPMAssertionRelease` r
 - `NoTypeTests/PauseDetectorTests.swift` — state-machine fixtures (synthetic VAD probability sequences, adaptive-threshold ladder mapping, long-monologue cuts, 180 s force-cut).
 - `NoTypeTests/ChunkBuilderTests.swift` — PCM → AAC round-trip (valid `ftyp` container, decodable, no tmp-file leaks).
 - `NoTypeTests/RecordingSessionShortPathTests.swift` — pins the lite-path discriminator.
-- `NoTypeTests/AudioDeviceManagerTests.swift` — pins the pure `pickEffectiveDevice` policy (pin-wins, BT-classic / BLE-Audio fallback, no-built-in graceful degrade, off-switch honoured) and the `Device.isBluetooth` / `isBuiltIn` transport-type matrix.
+- `NoTypeTests/AudioDeviceManagerTests.swift` — pins the pure `pickEffectiveDevice` policy (pin-wins, BT-classic / BLE-Audio fallback, no-built-in graceful degrade, off-switch honoured), the `Device.isBluetooth` / `isBuiltIn` transport-type matrix, and the HAL stream-format helpers (`avAudioFormat(from:)` round-trip for built-in 44.1 kHz mono, USB 48 kHz mono, aggregate 48 kHz stereo shapes).
+- `NoTypeTests/AudioRecorderHALTests.swift` — `AudioRecorder.AudioError` `errorDescription` contract (no-input-device / stream-format-unavailable / converter-create / IOProc-create / IOProc-start surfaces consumed by `AppState.surfaceError`) plus the load-bearing constants `outputSampleRate = 16 000` and `frameSize = 4 096`. Live-mic behaviour is out of scope per the hard rule — see hardware-smoke protocol in plan 2026-05-18-001 §85–88.
 - `SileroVADTests` — planned (see `solutions/documentation-gaps/silero-vad-reference-test-2026-05-15.md`).
 
 ## Pointers

@@ -211,6 +211,27 @@ final class AppState {
     /// IOKit handle from two copies would log a warning at best.
     @ObservationIgnored private var activeSleepAssertion: SleepAssertion?
 
+    /// Music-interruption mode from Settings → Audio. Default `.none`.
+    /// `.mute` toggles `kAudioDevicePropertyMute` on the system
+    /// default output for the recording-session duration; `.pause`
+    /// posts an `NX_KEYTYPE_PLAY` media-key event on start AND on
+    /// stop (toggle semantics). Persisted as the `Mode.rawValue`
+    /// string under `notype.musicInterruption`.
+    var musicInterruptionMode: MusicInterruption.Mode {
+        didSet {
+            UserDefaults.standard.set(
+                musicInterruptionMode.rawValue,
+                forKey: MusicInterruption.Mode.userDefaultsKey
+            )
+        }
+    }
+
+    /// `@MainActor`-isolated owner of the currently-held music-
+    /// interruption assertion. Single-ownership / RAII shape mirrors
+    /// `activeSleepAssertion`. Created in `acquireMusicInterruptionIfNeeded`,
+    /// released in the three terminal session-end paths.
+    @ObservationIgnored private var activeMusicInterruption: MusicInterruption?
+
     /// `SMAppService.mainApp` wrapper for the Settings → General →
     /// "Open at login" toggle. Owned at the AppState layer so the
     /// status mirror survives Settings tab transitions and is
@@ -243,6 +264,12 @@ final class AppState {
         self.dictionaryStore = dictionaryStore
         self.onboarding = onboarding
         self.preventSleepDuringRecording = UserDefaults.standard.bool(forKey: Self.preventSleepKey)
+        // Music interruption defaults to `.none` — engaging it
+        // affects all running apps' audio (Mute) or pokes media keys
+        // system-wide (Pause), so it's opt-in.
+        let storedMode = UserDefaults.standard.string(forKey: MusicInterruption.Mode.userDefaultsKey)
+            .flatMap(MusicInterruption.Mode.init(rawValue:))
+        self.musicInterruptionMode = storedMode ?? .none
         self.loginItemController = LoginItemController()
 
         Task { @MainActor [weak self] in
@@ -725,6 +752,7 @@ final class AppState {
         pressStartedAt = startedAt
         recordingState = .recording(startedAt: startedAt)
         acquireSleepAssertionIfNeeded()
+        acquireMusicInterruptionIfNeeded()
         installSpacebarLockTapIfNeeded()
         updateSpacebarLockEnabled()
         let target = NSWorkspace.shared.frontmostApplication?.localizedName ?? "Active app"
@@ -826,6 +854,7 @@ final class AppState {
                 self.recordingState = .idle
                 self.lockedRecording = false
                 self.releaseSleepAssertion()
+                self.releaseMusicInterruption()
                 self.uninstallSpacebarLockTap()
                 self.hud.hideTranscribingHUD()
                 if sessionSummary.hasFailures {
@@ -873,6 +902,7 @@ final class AppState {
                 self.recordingState = .idle
                 self.lockedRecording = false
                 self.releaseSleepAssertion()
+                self.releaseMusicInterruption()
                 self.uninstallSpacebarLockTap()
                 self.hud.hideTranscribingHUD()
                 self.surfaceError(.sessionFailure(error))
@@ -908,6 +938,7 @@ final class AppState {
         doubleTapTimeout = nil
         recordingState = .idle
         releaseSleepAssertion()
+        releaseMusicInterruption()
         uninstallSpacebarLockTap()
         // Both calls are idempotent; we hide whichever HUD is currently
         // up (recording HUD during `.recording`, transcribing HUD during
@@ -959,6 +990,37 @@ final class AppState {
         assertion.release()
         activeSleepAssertion = nil
         Self.log.info("sleep assertion released")
+    }
+
+    // MARK: - Music interruption
+
+    /// Acquire a music-interruption assertion (Mute or Pause) for
+    /// the duration of the active recording session, iff the user
+    /// has picked a non-`.none` mode. Idempotent. Same single-
+    /// ownership / acquire-after-session-start / release-only-on-
+    /// terminal-end pattern as `SleepAssertion` — see that comment
+    /// for the broader rationale.
+    ///
+    /// Snapshots `musicInterruptionMode` at acquisition time so a
+    /// mid-session toggle (user opens Settings, flips Mute → None)
+    /// doesn't perturb the in-flight session — release still
+    /// undoes the mute we engaged.
+    func acquireMusicInterruptionIfNeeded() {
+        guard musicInterruptionMode != .none else { return }
+        guard activeMusicInterruption == nil else { return }
+        let controller = MusicInterruption()
+        controller.activate(mode: musicInterruptionMode)
+        activeMusicInterruption = controller
+        Self.log.info("music interruption acquired (\(self.musicInterruptionMode.rawValue, privacy: .public))")
+    }
+
+    /// Release the active music-interruption assertion, if any.
+    /// Idempotent. Same call-sites as `releaseSleepAssertion`.
+    func releaseMusicInterruption() {
+        guard let controller = activeMusicInterruption else { return }
+        controller.release()
+        activeMusicInterruption = nil
+        Self.log.info("music interruption released")
     }
 
     // MARK: - Hold+Space lock (secondary CGEventTap)

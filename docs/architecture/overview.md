@@ -9,7 +9,7 @@
 ```mermaid
 flowchart TD
   HK["Hotkey held (default: Right Option)<br/>HotkeyMonitor<br/>(CGEventTap)"]
-  REC["AudioRecorder<br/>(AVAudioEngine, 16 kHz mono PCM)"]
+  REC["AudioRecorder<br/>(HAL IOProc, 16 kHz mono PCM)"]
   RING[PCMRingBuffer]
   VAD["SileroVAD<br/>(CoreML, 256 ms windows)"]
   PD["PauseDetector<br/>(≥1 s pause → chunk boundary)"]
@@ -55,7 +55,7 @@ Solid arrows = audio / text path. Dotted arrows = control / async signal.
 | Folder | Owns | Source-of-truth doc |
 |---|---|---|
 | `NoType/Hotkey/` | Configurable hotkey press / release detection via CGEventTap (default: Right Option; `HotkeyBinding` persisted in UserDefaults) | `Hotkey/CLAUDE.md` |
-| `NoType/Recording/` | `AVAudioEngine`, Silero VAD, PCM ring buffer, chunk slicing & encoding | `Recording/CLAUDE.md` |
+| `NoType/Recording/` | Core Audio HAL capture (`AudioDeviceCreateIOProcIDWithBlock`), Silero VAD, PCM ring buffer, chunk slicing & encoding | `Recording/CLAUDE.md` |
 | `NoType/Context/` | Full-screen AX walk, optional OCR fallback, secure-field masking | `Context/CLAUDE.md` |
 | `NoType/Instructions/` | Per-app `AppCategory`, user / category instructions, search-field AX override, classifier | `Instructions/CLAUDE.md` |
 | `NoType/Dictionary/` | Personal dictionary (cache-prefix section + replacement pairs); `DictionaryHarvester` | `Dictionary/CLAUDE.md` |
@@ -92,8 +92,8 @@ No other external network calls. No telemetry — see [solutions/conventions/no-
 | Component | Lives on |
 |---|---|
 | `HotkeyMonitor` | Dedicated `Thread` with its own `RunLoop` (required for `CGEventTap`) |
-| `AudioRecorder` (engine) | `AVAudioEngine`'s render thread (managed by AVFAudio) |
-| `AudioRecorder` (PCM storage) | `NSLock`-guarded ring buffer; producer = tap thread, consumer = VAD task / chunk builder |
+| `AudioRecorder` (HAL IOProc) | Dedicated serial `DispatchQueue` (`app.notype.recording.ioproc`, qos `.userInteractive`) |
+| `AudioRecorder` (PCM storage) | `NSLock`-guarded ring buffer; producer = IOProc dispatch, consumer = VAD task / chunk builder |
 | `SileroVAD` | `actor`; called from a detached `Task` consuming `AsyncStream<[Float]>` |
 | `RecordingSession` | `@MainActor` (owns UI-bound state) |
 | `GeminiClient` | `actor` |

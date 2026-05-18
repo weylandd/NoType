@@ -34,7 +34,9 @@ progress: docs/plans/2026-05-18-001-feat-settings-screen-progress.md
 
 The glitch's root cause: on macOS, `AVAudioEngine.start()` implicitly creates an aggregate input+output device, which kicks the output side and stutters BT-headphone playback for ~1s. There is no public API to disable the output side. Pure HAL bypasses the aggregate. Background: [SuperMegaUltraGroovy](https://supermegaultragroovy.com/2021/01/26/it-s-over-avaudioengine/) · [AudioKit #2130](https://github.com/AudioKit/AudioKit/issues/2130).
 
-**R16 reframe.** The origin requirement was "Music interruption picker (None / Mute via AVAudioSession.duckOthers)". Two problems: (1) the real user pain is the glitch, not the lack of ducking — Mute solves the wrong thing; (2) `AVAudioSession` is `API_UNAVAILABLE(macos)`. The HAL rewrite solves the actual pain. Mute toggle deferred post-v1 as a separate nice-to-have.
+**R16 reframe.** The origin requirement was "Music interruption picker (None / Mute via AVAudioSession.duckOthers)". Two problems: (1) the real user pain is the glitch, not the lack of ducking — Mute solves the wrong thing; (2) `AVAudioSession` is `API_UNAVAILABLE(macos)`. The HAL rewrite solves the actual pain.
+
+**Scope extension (post-plan, per user direction):** the Music-interruption picker shipped after all, with **both** Mute and Pause options — but via implementations distinct from the original `AVAudioSession.duckOthers` proposal that the reframe rejected. Mute toggles `kAudioDevicePropertyMute` directly on the system default output device via CoreAudio; Pause posts an `NX_KEYTYPE_PLAY` system-defined media-key event (toggle semantics — pressed on session start, again on session end). Owned by `NoType/System/MusicInterruption.swift` (RAII parallel to `SleepAssertion`). The original "deferred post-v1" status no longer applies.
 
 **Requirements:** R14 (Mic picker dup), R15 (BT toggle), R16-reframed (audio continuity, covers AE8-reframed).
 
@@ -70,7 +72,7 @@ The glitch's root cause: on macOS, `AVAudioEngine.start()` implicitly creates an
 
 - BT-avoidance: `Toggle("Prefer built-in over Bluetooth", isOn: $audioDeviceManager.preferBuiltInOverBluetooth)` — exact reuse of the existing pattern.
 - Mic picker: instantiate `MicInputPicker()` inline.
-- No Music-interruption picker in v1.
+- Music-interruption picker: segmented control over `MusicInterruption.Mode` (`.none` / `.mute` / `.pause`), persisted under `notype.musicInterruption`. Scope-extended into v1 — see the R16-reframe note above. UI ships in the Audio section of `SettingsTabView`.
 
 ### Test scenarios
 
