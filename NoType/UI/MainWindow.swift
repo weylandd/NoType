@@ -212,12 +212,22 @@ struct MainWindowView: View {
         //   1. snapshot pending
         //   2. clear it (atomic w/ read)
         //   3. apply if non-nil
-        // Both onAppear AND scenePhase==.active fire because the main window is
-        // a single-instance `Window` scene — closing and re-opening doesn't
-        // recreate the view, so onAppear alone misses the re-open path.
+        // Three triggers, belt-and-braces:
+        //   - `.onAppear` — window first becomes visible (popover gear when
+        //     main window was hidden).
+        //   - `.onChange(of: scenePhase)` — window re-focused after popover
+        //     blur (popover gear when main window was already visible but
+        //     unfocused; macOS popovers normally blur the main window).
+        //   - `.onChange(of: pendingTabSelection)` — direct watcher for the
+        //     edge case where main window is already visible AND focused
+        //     when `openSettings()` fires (no scenePhase transition, but
+        //     the flag write itself is observable).
         .onAppear { consumePendingTabSelection() }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { consumePendingTabSelection() }
+        }
+        .onChange(of: appState.pendingTabSelection) { _, new in
+            if new != nil { consumePendingTabSelection() }
         }
     }
 

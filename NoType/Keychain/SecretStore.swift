@@ -5,8 +5,8 @@ import OSLog
 /// the macOS Keychain via `KeychainStore`. See `NoType/Keychain/CLAUDE.md`.
 ///
 /// Public API is intentionally backend-agnostic so callers (`AppState`,
-/// `SettingsView`, the onboarding wizard) don't need to know whether
-/// storage is Keychain, a file, or anything else.
+/// the Settings tab's API section, the onboarding wizard) don't need to
+/// know whether storage is Keychain, a file, or anything else.
 ///
 /// **One-shot migration from legacy storage.** Earlier builds stored the
 /// key in `~/Library/Application Support/NoType/settings.json` (a 0600
