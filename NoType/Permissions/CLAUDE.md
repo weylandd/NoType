@@ -7,7 +7,7 @@ Wraps the OS permission request APIs and exposes a single `@Observable` view-mod
 - `PermissionStatus.swift` — the shared enum (`unknown`, `notDetermined`, `denied`, `granted`).
 - `SystemSettingsPane.swift` — shared deep-link helper. `x-apple.systempreferences:` URL pattern + `Privacy_*` enum; each permission file delegates `openSystemSettings()` here.
 - `MicrophonePermission.swift` — `AVCaptureDevice` + delegates to `SystemSettingsPane.microphone`.
-- `AccessibilityPermission.swift` — `AXIsProcessTrustedWithOptions` + delegates to `SystemSettingsPane.accessibility`.
+- `AccessibilityPermission.swift` — `AXIsProcessTrustedWithOptions` + delegates to `SystemSettingsPane.accessibility`. Emulates the missing `.notDetermined` state via a `notype.permissions.accessibility.hasAsked` UserDefaults flag (same shape as `ScreenRecordingPermission`).
 - `ScreenRecordingPermission.swift` — **optional**; gates the OCR fallback (`NoType/Context/ScreenCapture/`).
 - `PermissionsViewModel.swift` — `@MainActor @Observable` aggregate.
 
@@ -20,12 +20,14 @@ There is **no** `SpeechRecognitionPermission.swift` — NoType uses Silero (Core
 3. **Polling every 1 s while any permission is not `granted`.** Stops once `allGranted` is true.
 4. **Refresh on `NSApplication.didBecomeActiveNotification` AND `NSWorkspace.didActivateApplicationNotification`** — the second is needed because LSUIElement apps don't always get the AppKit one when returning from System Settings.
 5. **`AppState` observes `permissions.accessibility` and `.microphone` via `withObservationTracking`**, not Combine. The view-model is `@Observable` and no longer exposes `$published` Combine publishers.
+6. **Accessibility and Screen Recording emulate `.notDetermined` via a UserDefaults `hasAsked` flag.** Both system APIs return `Bool` only, so a fresh install is indistinguishable from an explicit denial — without the flag the onboarding row would render red "DENIED" before the user has refused anything. Each module owns its own key (`notype.permissions.accessibility.hasAsked`, `notype.permissions.screenRecording.hasAsked`); `current()` returns `.notDetermined` until the flag is set, which happens when the user clicks Grant (via `request()`). `AccessibilityPermission.current()` additionally backfills the flag on first call if `notype.onboarding.complete` is already `true`, preserving the correct "DENIED + Open Settings" surface for users who explicitly refused under an older build.
 
 ## Hard rules
 
 - **Don't add a new permission without adding it to `PermissionsViewModel`** (request method + open-settings method) AND deciding whether it gates `allGranted` / `recordingReady`. Screen Recording is the only one that doesn't.
 - **`AXTrustedCheckOptionPrompt` literal is inlined**, not read from the C global — Swift 6 flags the global as non-concurrency-safe. The literal is stable across macOS releases.
 - **`Accessibility.request()` is sync, not async.** Accessibility has no async-style request API; calling it just shows the system prompt once per launch — the user has to flip the switch in Settings, so we poll to detect the change.
+- **`AccessibilityPermission.request()` must set the `hasAsked` flag BEFORE calling `AXIsProcessTrustedWithOptions`.** macOS only shows the system prompt once per launch lifetime and only when no prior decision is on record — if `request()` set the flag *after* the syscall, an existing-denial state could silently regress to `.notDetermined` on the first call after upgrade (the syscall returns `false` but writes nothing to TCC, and a missing flag would surface as `.notDetermined`). Same ordering rule applies to `ScreenRecordingPermission.request()`.
 - **Open-Settings deep links use `x-apple.systempreferences:com.apple.preference.security?Privacy_<Pane>`.** Don't substitute `applewebdata://` or any other scheme — the documented URL form is what survives macOS updates.
 
 ## Status enum
@@ -33,7 +35,7 @@ There is **no** `SpeechRecognitionPermission.swift` — NoType uses Silero (Core
 ```swift
 enum PermissionStatus: Equatable, Sendable {
     case unknown        // not yet checked
-    case notDetermined  // user hasn't been asked
+    case notDetermined  // user hasn't been asked (emulated for Accessibility + Screen Recording via the hasAsked flag — see invariant 6)
     case denied         // user denied; needs Settings.app round-trip
     case granted
     var isGranted: Bool { self == .granted }
@@ -49,6 +51,7 @@ Each individual permission file exposes:
 ## Testing
 
 - Permission APIs are system-level — not unit-testable directly. Plannable: TCC status → `PermissionStatus` mapping helpers, `PermissionsViewModel.allGranted` against synthetic state.
+- `NoTypeTests/AccessibilityPermissionTests.swift` — pins the pure `mapStatus(isAxGranted:hasAsked:)` truth table and the `migrateHasAskedIfNeeded(defaults:)` backfill rule, against a suite-isolated `UserDefaults`. `request()` itself is not tested — its `prompt: true` syscall opens a system dialog on a fresh TCC database, which is disruptive on dev / CI machines. The flag-write ordering inside `request()` is enforced by the Hard rule above and verified manually.
 - Manual smoke test on a fresh user account before each release.
 
 ## Pointers

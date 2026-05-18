@@ -45,6 +45,7 @@
 		4640032E8C9EDE6729F49FFD /* SileroVAD.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CF86AC1057B7E5A81EB2CF4 /* SileroVAD.swift */; };
 		4856D5182E5B1E3B3332F5B6 /* UpdateUserDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FBC05FF73F9C618B9E42DAD /* UpdateUserDriver.swift */; };
 		48EEA27889B0DC7B30F0A293 /* PermissionsHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A3FCB66408303B77B1CEA6A /* PermissionsHUD.swift */; };
+		4AC9A59AAE9A96848394A626 /* AccessibilityPermissionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D32E9B1F5F40742606DE4ADB /* AccessibilityPermissionTests.swift */; };
 		4ACAA66BAC7DE39DBD75E086 /* MusicInterruptionModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D83D2DB1123BB2F37D52A13 /* MusicInterruptionModeTests.swift */; };
 		4B1A4427BB37829351167B1B /* SecureFieldMasker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A4903039746BE76D3EBE010 /* SecureFieldMasker.swift */; };
 		4B9D03CEC35015E2D2EDE671 /* HistoryRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0647BD2049E49AF3A88F6125 /* HistoryRowView.swift */; };
@@ -299,6 +300,7 @@
 		CDC461E80955722B1004A930 /* AppCategory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppCategory.swift; sourceTree = "<group>"; };
 		CDDC2E31C9C8C874761E6350 /* OnboardingPermissionsStep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingPermissionsStep.swift; sourceTree = "<group>"; };
 		D000444FD5EA9D0896B2C9C1 /* DictionaryEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryEntry.swift; sourceTree = "<group>"; };
+		D32E9B1F5F40742606DE4ADB /* AccessibilityPermissionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityPermissionTests.swift; sourceTree = "<group>"; };
 		D3C98DF5CC926645BA3D32B6 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		D4615F8E4F5EBCBA33CF0C35 /* InstructionsContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstructionsContext.swift; sourceTree = "<group>"; };
 		D4D3BF35339034FBC8756BEF /* SupportedLanguages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupportedLanguages.swift; sourceTree = "<group>"; };
@@ -573,6 +575,7 @@
 		9C2B4BE9016E487F67E2DEEE /* NoTypeTests */ = {
 			isa = PBXGroup;
 			children = (
+				D32E9B1F5F40742606DE4ADB /* AccessibilityPermissionTests.swift */,
 				F6A0D6ADDA12FA10A1E3ACE6 /* AccessibilityTreeTests.swift */,
 				DCA5FB3C3828964C7E9459BB /* AppCategorizerTests.swift */,
 				5175004E309AF0A8AC3F9FFA /* AudioDeviceManagerTests.swift */,
@@ -941,6 +944,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				965C24F289A3D7C3498A229C /* AXNoiseFilterTests.swift in Sources */,
+				4AC9A59AAE9A96848394A626 /* AccessibilityPermissionTests.swift in Sources */,
 				9C237DBBF80FA182F5A0E73E /* AccessibilityTreeTests.swift in Sources */,
 				5097DA3AD9FD99E4673191AF /* AppCategorizerTests.swift in Sources */,
 				005FF0A3682356B52FE44A42 /* AudioDeviceManagerTests.swift in Sources */,
