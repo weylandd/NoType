@@ -18,6 +18,12 @@ import Foundation
 /// call, preserving the correct "DENIED + Open Settings" surface for
 /// users who actually refused.
 enum AccessibilityPermission {
+    /// Internal (no access modifier) so `OnboardingState.resetWizardDefaults`
+    /// and unit tests can reference the canonical key string —
+    /// `@testable import` elevates internal symbols to the test target but
+    /// does NOT elevate `private`, which is why the visibility intentionally
+    /// differs from a fully-encapsulated module-private constant. Matches
+    /// `ScreenRecordingPermission.hasAskedKey`.
     static let hasAskedKey = "notype.permissions.accessibility.hasAsked"
 
     static func current(defaults: UserDefaults = .standard) -> PermissionStatus {

@@ -17,7 +17,11 @@ import ScreenCaptureKit
 /// proper "Grant" button on first run (which triggers the registration)
 /// vs. "Open Settings" after the registration is on record.
 enum ScreenRecordingPermission {
-    private static let hasAskedKey = "notype.permissions.screenRecording.hasAsked"
+    /// Internal (no access modifier) so `OnboardingState.resetWizardDefaults`
+    /// and unit tests can reference the canonical key string. The pattern is
+    /// load-bearing — see `AccessibilityPermission.hasAskedKey` for the
+    /// matching shape on the Accessibility side.
+    static let hasAskedKey = "notype.permissions.screenRecording.hasAsked"
 
     static func current() -> PermissionStatus {
         if CGPreflightScreenCaptureAccess() {

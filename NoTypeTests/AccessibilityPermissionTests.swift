@@ -9,13 +9,17 @@ import XCTest
 ///   - `mapStatus(isAxGranted:hasAsked:)`  — pure 4-case truth table.
 ///   - `migrateHasAskedIfNeeded(defaults:)` — backfill rule for users
 ///     whose onboarding already completed under an older build.
-///
-/// `request()` is *not* tested directly: it calls the syscall with
-/// `prompt: true`, which on a fresh TCC database opens the macOS
-/// system Accessibility prompt — disruptive on dev machines and CI.
-/// The flag-write contract for `request()` is documented as a hard
-/// rule in `NoType/Permissions/CLAUDE.md` and verified manually per
-/// the U3 smoke checklist in the originating plan.
+///   - `request(defaults:)` — pins that the `hasAsked` flag is set
+///     when the user clicks Grant. This is load-bearing per the Hard
+///     rule in Permissions/CLAUDE.md (the flag MUST be written before
+///     the `AXIsProcessTrustedWithOptions` syscall — a reversed order
+///     would silently regress existing-denial users to `.notDetermined`).
+///     We do not assert on the syscall's return value: on a test
+///     target where Accessibility is ungranted, `AXIsProcessTrustedWithOptions`
+///     returns `false` without opening a dialog. The "ordering before
+///     the syscall" half of the contract remains a code-review
+///     invariant — we cannot interleave-and-observe — but the
+///     "flag is set by `request()`" half is pinned here.
 ///
 /// Each test runs against an isolated `UserDefaults` suite so we
 /// never disturb the real `UserDefaults.standard` (the user's actual
@@ -127,6 +131,24 @@ final class AccessibilityPermissionTests: XCTestCase {
         suite.set(false, forKey: OnboardingState.completeKey)
 
         AccessibilityPermission.migrateHasAskedIfNeeded(defaults: suite)
+
+        XCTAssertTrue(suite.bool(forKey: AccessibilityPermission.hasAskedKey))
+    }
+
+    // MARK: - request() flag-write contract
+
+    /// `request()` MUST set `hasAsked` so subsequent `current()` calls
+    /// surface `.denied` (red "Open Settings") rather than `.notDetermined`
+    /// (yellow "REQUIRED") — macOS only prompts once per launch lifetime
+    /// and only when no prior decision is on record, so without this flag
+    /// a user clicking Grant on a Mac where AX was previously refused
+    /// outside our flow would silently no-op and we'd never surface the
+    /// "Open Settings" CTA. The Permissions/CLAUDE.md Hard rule pins the
+    /// flag-before-syscall ordering; this test pins the side effect.
+    func test_request_setsHasAskedFlag() {
+        XCTAssertFalse(suite.bool(forKey: AccessibilityPermission.hasAskedKey))
+
+        AccessibilityPermission.request(defaults: suite)
 
         XCTAssertTrue(suite.bool(forKey: AccessibilityPermission.hasAskedKey))
     }

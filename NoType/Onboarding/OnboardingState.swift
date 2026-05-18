@@ -108,12 +108,22 @@ final class OnboardingState {
     }
 
     /// Side-effect-only counterpart of `resetWizard()` — clears the
-    /// three onboarding keys in any `UserDefaults` instance. Exposed
-    /// so tests can verify on an isolated suite without touching the
-    /// process-wide standard defaults.
+    /// three onboarding keys plus the two `permissions.*.hasAsked`
+    /// flags in any `UserDefaults` instance. Exposed so tests can
+    /// verify on an isolated suite without touching the process-wide
+    /// standard defaults.
+    ///
+    /// The `hasAsked` flags ride along because a user who reset
+    /// onboarding expects to walk a "fresh wizard" — leaving the
+    /// flags sticky-true would re-render Accessibility and Screen
+    /// Recording as red "DENIED" on the Permissions step even when
+    /// the user has refused nothing in this wizard run. Permissions/
+    /// CLAUDE.md invariant 6 documents the broader pattern.
     nonisolated static func resetWizardDefaults(in defaults: UserDefaults) {
         defaults.removeObject(forKey: currentStepKey)
         defaults.removeObject(forKey: furthestStepKey)
         defaults.removeObject(forKey: completeKey)
+        defaults.removeObject(forKey: AccessibilityPermission.hasAskedKey)
+        defaults.removeObject(forKey: ScreenRecordingPermission.hasAskedKey)
     }
 }
