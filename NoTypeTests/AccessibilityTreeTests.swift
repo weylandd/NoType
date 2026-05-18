@@ -25,7 +25,7 @@ final class AccessibilityTreeTests: XCTestCase {
             title: nil,
             value: "hunter2",
             metadata: metadata,
-            parentBundleID: nil,
+            containingBundleID: nil,
             depth: 1
         )
         XCTAssertEqual(decision, .skipSubtree)
@@ -42,7 +42,7 @@ final class AccessibilityTreeTests: XCTestCase {
             title: nil,
             value: "secret",
             metadata: metadata,
-            parentBundleID: nil,
+            containingBundleID: nil,
             depth: 1
         )
         XCTAssertEqual(decision, .skipSubtree)
@@ -62,7 +62,7 @@ final class AccessibilityTreeTests: XCTestCase {
             title: nil,
             value: "password123",
             metadata: metadata,
-            parentBundleID: nil,
+            containingBundleID: nil,
             depth: 1
         )
         XCTAssertEqual(decision, .skipSubtree)
@@ -81,7 +81,7 @@ final class AccessibilityTreeTests: XCTestCase {
             title: nil,
             value: nil,
             metadata: metadata,
-            parentBundleID: "com.example.app",
+            containingBundleID: "com.example.app",
             depth: 1
         )
         XCTAssertEqual(decision, .dropRender)
@@ -97,7 +97,7 @@ final class AccessibilityTreeTests: XCTestCase {
             title: nil,
             value: longValue,
             metadata: metadata,
-            parentBundleID: "com.apple.Terminal",
+            containingBundleID: "com.apple.Terminal",
             depth: 1
         )
         XCTAssertEqual(decision, .dropRender)
@@ -115,7 +115,7 @@ final class AccessibilityTreeTests: XCTestCase {
             title: nil,
             value: longValue,
             metadata: metadata,
-            parentBundleID: "com.apple.Notes",
+            containingBundleID: "com.apple.Notes",
             depth: 1
         )
         // Should render — long Notes content is real signal.
@@ -134,7 +134,7 @@ final class AccessibilityTreeTests: XCTestCase {
             title: nil,
             value: "口》巳@",
             metadata: metadata,
-            parentBundleID: "com.apple.QuickTimePlayerX",
+            containingBundleID: "com.apple.QuickTimePlayerX",
             depth: 1
         )
         XCTAssertEqual(decision, .dropRender)
@@ -150,7 +150,7 @@ final class AccessibilityTreeTests: XCTestCase {
             title: nil,
             value: "search query",
             metadata: metadata,
-            parentBundleID: "com.apple.Safari",
+            containingBundleID: "com.apple.Safari",
             depth: 1
         )
         XCTAssertEqual(decision, .render("- TextField = search query"))
@@ -164,7 +164,7 @@ final class AccessibilityTreeTests: XCTestCase {
             title: "Continue",
             value: nil,
             metadata: metadata,
-            parentBundleID: "com.example.app",
+            containingBundleID: "com.example.app",
             depth: 1
         )
         XCTAssertEqual(decision, .render("- Button \"Continue\""))
@@ -178,7 +178,7 @@ final class AccessibilityTreeTests: XCTestCase {
             title: "Send",
             value: nil,
             metadata: metadata,
-            parentBundleID: "com.example.app",
+            containingBundleID: "com.example.app",
             depth: 3
         )
         // depth=3 → indent = "  " * 2 = "    "
@@ -196,7 +196,7 @@ final class AccessibilityTreeTests: XCTestCase {
             title: nil,
             value: nil,
             metadata: metadata,
-            parentBundleID: nil,
+            containingBundleID: nil,
             depth: 1
         )
         XCTAssertEqual(decision, .dropRender)

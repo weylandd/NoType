@@ -22,7 +22,7 @@ No `AccessibilityTreeTests.swift` existed. The tree walker (`NoType/Context/Acce
 
 **Closed** by `docs/plans/2026-05-17-002-refactor-ax-tree-noise-filtering-plan.md` (U2 + U4). The right next refactor showed up — adding noise filters and active-app priority — and pulled the testability seams in with it. Rather than the originally-proposed `MockAXNode` + walker-protocol shape (which would have required carving a non-trivial abstraction through `AXUIElementCopyAttributeValue`), the plan extracted two pure seams from inside the walker:
 
-- `AccessibilityTree.decideForNode(role:subrole:title:value:metadata:parentBundleID:depth:) -> NodeDecision` — the per-node pipeline (masker → noise filter → format) as a pure function. Tested directly with synthetic `NodeMetadata` inputs; no AX live calls.
+- `AccessibilityTree.decideForNode(role:subrole:title:value:metadata:containingBundleID:depth:) -> NodeDecision` — the per-node pipeline (masker → noise filter → format) as a pure function. Tested directly with synthetic `NodeMetadata` inputs; no AX live calls.
 - `AccessibilityTree.applyGlobalCap(dumps:activeBundleID:) -> (apps,totalNodes,truncated)` — the active-first sort + global-budget truncation as a pure function over hand-built `RedactedAppDump` arrays.
 
 Plus `AccessibilityTree.budgetForApp(bundleID:active:) -> Int` for routing rules.
@@ -49,3 +49,4 @@ What shipped:
 - `docs/plans/2026-05-17-002-refactor-ax-tree-noise-filtering-plan.md` (closing plan, U2 + U4).
 - `NoType/Context/CLAUDE.md` "Noise filtering" — invariants now pinned by the new tests.
 - `solutions/design-patterns/full-screen-ax-tree-2026-05-15.md` — the underlying multi-app decision.
+- Closed in [PR #47](https://github.com/weylandd/NoType/pull/47).

@@ -232,7 +232,7 @@ enum AccessibilityTree {
         title: String?,
         value: String?,
         metadata: SecureFieldMasker.NodeMetadata,
-        parentBundleID: String?,
+        containingBundleID: String?,
         depth: Int
     ) -> NodeDecision {
         let action = SecureFieldMasker.mask(value: value, metadata: metadata)
@@ -246,7 +246,7 @@ enum AccessibilityTree {
                 return .dropRender
             }
             if AXNoiseFilter.isViewportScrollback(
-                role: role, value: v, parentBundleID: parentBundleID
+                role: role, value: v, containingBundleID: containingBundleID
             ) {
                 return .dropRender
             }
@@ -289,7 +289,7 @@ enum AccessibilityTree {
                 depth: 0,
                 parentRole: AXAttr.stringDescribing(window, kAXRoleAttribute as String),
                 parentTitle: title,
-                parentBundleID: bundleID,
+                containingBundleID: bundleID,
                 lines: &lines,
                 budget: &nodesRemaining
             )
@@ -309,7 +309,7 @@ enum AccessibilityTree {
         depth: Int,
         parentRole: String?,
         parentTitle: String?,
-        parentBundleID: String?,
+        containingBundleID: String?,
         lines: inout [String],
         budget: inout Int
     ) {
@@ -348,7 +348,7 @@ enum AccessibilityTree {
                 title: title,
                 value: rawValue,
                 metadata: metadata,
-                parentBundleID: parentBundleID,
+                containingBundleID: containingBundleID,
                 depth: depth
             )
 
@@ -382,7 +382,7 @@ enum AccessibilityTree {
                 depth: depth + 1,
                 parentRole: role,
                 parentTitle: title ?? parentTitle,
-                parentBundleID: parentBundleID,
+                containingBundleID: containingBundleID,
                 lines: &lines,
                 budget: &budget
             )

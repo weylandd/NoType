@@ -290,11 +290,12 @@ final class RecordingSession {
         let dictionaryReplacements = dictionary.replacements
         // Capture `activeBundleID` once on @MainActor (already done above
         // as `frontmost?.bundleIdentifier`) and pass it into the detached
-        // AX task. Eliminates the app-switch race that would arise from
-        // re-reading `NSWorkspace.frontmostApplication` inside the
-        // detached context. Mirrors the existing rationale on
-        // `InsertionTarget.knownTerminalBundleIDs` (parameter-passed
-        // identity vs round-trip through NSWorkspace).
+        // AX task. Guardrail against re-introducing an
+        // `NSWorkspace.frontmostApplication` read inside the detached
+        // context — that would race with app-switch events between
+        // session start and the AX walk. Mirrors the existing rationale
+        // on `InsertionTarget` (parameter-passed identity vs round-trip
+        // through NSWorkspace).
         let activeBundleID = frontmost?.bundleIdentifier
         contextTask = Task.detached(priority: .userInitiated) {
             let t0 = Date()

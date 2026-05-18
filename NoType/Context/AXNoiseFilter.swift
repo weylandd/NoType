@@ -29,6 +29,37 @@ import Foundation
 /// No exceptions.
 enum AXNoiseFilter {
 
+    // MARK: - Known terminal emulators (shared)
+
+    /// Bundle ids of terminal emulators whose visible scrollback ships
+    /// through AX as one giant `kAXValueAttribute` blob. Two call sites
+    /// gate on this set:
+    ///
+    /// 1. `AXNoiseFilter.isViewportScrollback` — the walker's R5 drop
+    ///    gate. A false positive here would silently drop an open Notes
+    ///    / Bear / BBEdit / Pages document, so the gate is intentionally
+    ///    conservative (terminal-parent + scrollback shape).
+    /// 2. `InsertionTarget.captureSync` — the focused-field bail-out.
+    ///    Terminals expose visible scrollback as the focused element's
+    ///    `kAXValueAttribute`; the cursor inside that buffer is
+    ///    meaningless for our use case, so we bail to `.empty`.
+    ///
+    /// Lives here (not on `InsertionTarget`) because the noise filter
+    /// owns the policy of "what is a terminal?"; the focused-field
+    /// reader is just another consumer.
+    static let knownTerminalBundleIDs: Set<String> = [
+        "com.apple.Terminal",
+        "com.googlecode.iterm2",
+        "com.mitchellh.ghostty",
+        "dev.warp.Warp-Stable",
+        "dev.warp.Warp-Preview",
+        "net.kovidgoyal.kitty",
+        "org.alacritty",
+        "co.zeit.hyper",
+        "com.github.wez.wezterm",
+        "io.alacritty",
+    ]
+
     // MARK: - Per-node drop (R4 + R7)
 
     /// Returns `true` when the node carries no transcription signal:
@@ -155,17 +186,29 @@ enum AXNoiseFilter {
 
     /// True when `s` is short AND dominated by non-alphabetic /
     /// non-decimal characters. Pure — exposed for direct unit testing.
+    ///
+    /// **Perf note:** the loop short-circuits the long-content escape
+    /// valve before allocating any per-scalar storage — a multi-KB
+    /// `kAXValueAttribute` (e.g., a giant Notes document accidentally
+    /// routed here) bails on the (N + 1)th non-whitespace scalar
+    /// without ever materializing the full filter. Single pass; no
+    /// intermediate array.
     static func isGibberishDominant(_ s: String) -> Bool {
-        let probe = s.unicodeScalars.filter { !$0.properties.isWhitespace }
-        guard !probe.isEmpty else { return false }
-        if probe.count > gibberishLengthFloor { return false }
+        var nonWhitespaceCount = 0
         var alphaOrDecimal = 0
-        for scalar in probe {
+        for scalar in s.unicodeScalars {
+            if scalar.properties.isWhitespace { continue }
+            nonWhitespaceCount += 1
+            // Long content (above the floor) always passes — early exit
+            // before doing any more bookkeeping. Saves both the
+            // remaining scan and any allocation on multi-KB inputs.
+            if nonWhitespaceCount > gibberishLengthFloor { return false }
             if scalar.properties.isAlphabetic || isAsciiDecimal(scalar) {
                 alphaOrDecimal += 1
             }
         }
-        let nonAlphaRatio = Double(probe.count - alphaOrDecimal) / Double(probe.count)
+        guard nonWhitespaceCount > 0 else { return false }
+        let nonAlphaRatio = Double(nonWhitespaceCount - alphaOrDecimal) / Double(nonWhitespaceCount)
         return nonAlphaRatio > gibberishNonAlphaThreshold
     }
 
@@ -176,20 +219,25 @@ enum AXNoiseFilter {
     // MARK: - Viewport scrollback (R5)
 
     /// Returns `true` when the node looks like terminal scrollback AND its
-    /// parent app is a known terminal emulator. The terminal-parent gate
+    /// containing app is a known terminal emulator. The terminal-parent gate
     /// is what distinguishes this from `InsertionTarget.looksLikeScrollback`
     /// — the same shape predicate applied to two different cost matrices.
     /// In `InsertionTarget.captureSync` a false positive yields `.empty`
     /// cursor context (cheap). In the walker, a false positive drops the
     /// open Notes / Bear / BBEdit / Pages document — the exact cross-window
     /// signal case ADR-009 was built for.
+    ///
+    /// `containingBundleID` is the bundle id of the *app* owning the node,
+    /// not the AX parent element. The naming reflects the semantic — we
+    /// want "which app is this node inside?", not "what's the immediate
+    /// AX parent element?".
     static func isViewportScrollback(
         role: String?,
         value: String,
-        parentBundleID: String?
+        containingBundleID: String?
     ) -> Bool {
-        guard let parentBundleID,
-              InsertionTarget.knownTerminalBundleIDs.contains(parentBundleID) else {
+        guard let containingBundleID,
+              Self.knownTerminalBundleIDs.contains(containingBundleID) else {
             return false
         }
         guard let role else { return false }
@@ -293,16 +341,34 @@ enum AXNoiseFilter {
     }
 
     /// Matches a trailing date pattern of the form `YYYY[-./]MM[-./]DD`
-    /// preceded by whitespace, optionally followed by additional time /
-    /// locale-word content. Tied to the start of a whitespace boundary so
-    /// inline version numbers (no preceding word + date pattern) don't match.
+    /// preceded by whitespace, optionally followed by a short
+    /// timestamp/locale suffix of up to 32 chars (digits, dots, colons,
+    /// spaces, and a single locale word — e.g., ` at 17.50.07`, ` в
+    /// 19.40.53`, ` 18:30`). Tied to a whitespace boundary on both ends:
     ///
-    /// Earlier draft allowed `\S*\s*` between the whitespace and the date —
-    /// turned out greedy on Russian "Снимок экрана 2026-..." (`\S*` matched
-    /// "экрана", stripping the locale word). Tightened to require the date
-    /// immediately after whitespace.
+    /// - **Left:** date must follow whitespace so inline version numbers
+    ///   (e.g., "Release 1.0", which has no `YYYY` immediately after a
+    ///   space) don't match.
+    /// - **Right (new):** the optional suffix is bounded to 32 chars of
+    ///   timestamp-shaped content. This protects against the
+    ///   "Meeting YYYY-MM-DD - Alice" / "Project YYYY-MM-DD review"
+    ///   class — titles where a date appears mid-string but the
+    ///   participant / topic name *after* the date is real signal that
+    ///   should survive in the stem.
+    ///
+    /// Two earlier failure modes informed the current shape:
+    /// - **`\S*\s*` between whitespace and date** turned out greedy on
+    ///   Russian "Снимок экрана 2026-..." (`\S*` matched "экрана",
+    ///   stripping the locale word). Tightened to require the date
+    ///   immediately after whitespace.
+    /// - **`.*$` after the date** (its first tightening) was too
+    ///   permissive and would strip arbitrary trailing content like
+    ///   " - Alice" / " - Bob", collapsing meeting/note titles that
+    ///   shouldn't pack. The 32-char suffix window is tight enough to
+    ///   cover real timestamps + locale words without absorbing
+    ///   participant names or topic suffixes.
     private static let trailingDateRegex = try! NSRegularExpression(
-        pattern: #"\s+\d{4}[-./]\d{1,2}[-./]\d{1,2}.*$"#
+        pattern: #"\s+\d{4}[-./]\d{1,2}[-./]\d{1,2}([\s.][\d:.\s\w]{0,32})?$"#
     )
 
     private static func makeSummaryLine(for run: ArraySlice<String>) -> String? {

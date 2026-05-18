@@ -271,8 +271,10 @@ final class PromptEvalTests: XCTestCase {
     ///
     /// This test runs immediately without new audio recording — it
     /// reuses an existing fixture and adds an inline assertion. The
-    /// matching positive test (`test_ax_properNoun_positiveSpelling`)
-    /// requires recorded audio and skips cleanly until that lands.
+    /// matching positive test (AX-supplied proper noun → canonical
+    /// spelling in transcript) requires a recorded audio fixture —
+    /// tracked at
+    /// `docs/solutions/documentation-gaps/positive-spelling-ax-fixture-2026-05-18.md`.
     func test_ax_antiLeak_aboveLineDoesNotPoisonTranscript() async throws {
         try PromptEvalHarness.skipIfMissingKey()
         // Fabricated proper noun the speaker definitely does NOT say.
@@ -290,60 +292,16 @@ final class PromptEvalTests: XCTestCase {
         )
         logResult(res, contextDescription: "AX neighbour contains '\(leakToken)'; audio doesn't")
         XCTAssertFalse(
+            res.transcript.isEmpty,
+            "transcription returned empty — cannot measure leak defense"
+        )
+        XCTAssertFalse(
             res.transcript.contains(leakToken),
             "AX-only token '\(leakToken)' leaked into transcript: '\(res.transcript)'"
         )
         // Also pin the underlying audio still transcribes correctly with
         // a non-empty AX context — the AX content shouldn't *suppress*
         // real audio either.
-        PromptEvalHarness.assertContract(res, against: fx)
-    }
-
-    /// Positive spelling test — scaffolding for an audio fixture not yet
-    /// recorded. When `Audio/ax_proper_noun.m4a` exists (speaker says a
-    /// fabricated proper noun also visible in the AX neighbour content),
-    /// this test asserts Gemini renders the canonical spelling rather
-    /// than a phonetic transliteration. Until then it skips cleanly so
-    /// the test suite stays green.
-    ///
-    /// Recording recipe (when the maintainer is ready):
-    ///   1. Drop a ~3 s m4a at `NoTypeTests/Fixtures/Audio/ax_proper_noun.m4a`
-    ///      with the speaker saying "Let me check BoominfoCO".
-    ///   2. Re-run this test — it should pass with the canonical spelling
-    ///      present in the transcript.
-    func test_ax_properNoun_positiveSpelling() async throws {
-        try PromptEvalHarness.skipIfMissingKey()
-        // Reuse multi_sentence_en's JSON entry shape but point at the
-        // not-yet-recorded audio file. Inline fixture so we don't have
-        // to add a JSON entry referencing a non-existent file.
-        let fx = PromptEvalHarness.Fixture(
-            id: "ax_proper_noun_positive",
-            file: "Audio/ax_proper_noun.m4a",
-            language: "en",
-            expectedTranscript: "Let me check BoominfoCO.",
-            mustContain: ["BoominfoCO"],
-            mustNotContain: ["Boomy", "BoomInfo", "Boom Info"],
-            wordCountFloor: 4,
-            wordCountCeiling: nil,
-            usageTokensCeiling: nil,
-            notes: "Positive AX-spelling defense. Pending audio recording."
-        )
-        try XCTSkipUnless(
-            PromptEvalHarness.audioFileExists(for: fx),
-            """
-            Skipping — audio fixture not yet recorded.
-            Drop a ~3 s m4a of the speaker saying "Let me check BoominfoCO" at
-            NoTypeTests/Fixtures/Audio/ax_proper_noun.m4a, then re-run.
-            """
-        )
-        let context = PromptEvalHarness.contextWithAX(properNoun: "BoominfoCO")
-        let res = try await PromptEvalHarness.transcribe(
-            fixture: fx,
-            context: context,
-            path: .full,
-            client: client
-        )
-        logResult(res, contextDescription: "AX neighbour contains 'BoominfoCO'; audio says it phonetically")
         PromptEvalHarness.assertContract(res, against: fx)
     }
 

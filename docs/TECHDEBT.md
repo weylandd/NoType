@@ -13,6 +13,8 @@ See `docs/solutions/README.md` for the frontmatter contract and body structure.
 - [Settings section for screen-capture fallback](solutions/documentation-gaps/screen-capture-settings-section-2026-05-15.md) — **S**; no in-app way to disable OCR without revoking TCC.
 - [Aggregate-device handling in the BT-input-avoidance policy](solutions/documentation-gaps/bluetooth-aggregate-device-handling-2026-05-16.md) — **M**; aggregate devices wrapping a BT mic bypass the avoidance.
 - [Narrow BT-input avoidance to classic BT once LE Audio is reliably HFP-free](solutions/documentation-gaps/bt-le-audio-airpods-pro-2-narrowing-2026-05-16.md) — **M**; AirPods Pro 2 + LE Audio is in the fallback unnecessarily.
+- [Positive-spelling AX fixture for prompt-eval](solutions/documentation-gaps/positive-spelling-ax-fixture-2026-05-18.md) — **S**; recorded fixture missing, test removed in PR #47.
+- [Dynamic terminal-app detection via AppCategorizer](solutions/documentation-gaps/dynamic-terminal-detection-2026-05-18.md) — **M**; R5 gate bypassed for terminals outside the hardcoded 8-entry set.
 
 ## Closing an entry
 

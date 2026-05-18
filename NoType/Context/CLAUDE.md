@@ -5,8 +5,8 @@
 ## Files
 
 - `AccessibilityTree.swift` — walks the AX trees of **all on-screen windows** (parallel `withTaskGroup`). Exposes the pure `decideForNode(...) -> NodeDecision` seam (per-node pipeline: masker → noise filter → format) and `applyGlobalCap(dumps:activeBundleID:)` (active-first sort + 5000-line truncation).
-- `AXNoiseFilter.swift` — pure-function namespace for content noise (R4 chrome, R5 terminal scrollback, R6 repetitive packs, R7 short gibberish). Runs **after** `SecureFieldMasker` inside `decideForNode`; never overrides secure-field skips.
-- `ContextSnapshot.swift` — value types: `AppInfo`, `RedactedAXSnapshot`, `RedactedScreenText`, `InsertionTarget`, `ContextSnapshot`. Also owns `InsertionTarget.knownTerminalBundleIDs` (shared with `AXNoiseFilter`).
+- `AXNoiseFilter.swift` — pure-function namespace for content noise (R4 chrome, R5 terminal scrollback, R6 repetitive packs, R7 short gibberish). Runs **after** `SecureFieldMasker` inside `decideForNode`; never overrides secure-field skips. Owns `knownTerminalBundleIDs` (shared with `InsertionTarget.captureSync`).
+- `ContextSnapshot.swift` — value types: `AppInfo`, `RedactedAXSnapshot`, `RedactedScreenText`, `InsertionTarget`, `ContextSnapshot`.
 - `SecureFieldMasker.swift` — **security-critical**. Skip rules + value-content scrubbing patterns.
 - `ScreenCapture/ScreenCaptureController.swift` — `ScreenCaptureKit` wrapper for active-window screenshots.
 - `ScreenCapture/TextRecognizer.swift` — `Vision` OCR wrapper.
@@ -24,8 +24,8 @@
 6. **`InsertionTarget` is captured once at session start; cursor doesn't move during a session** (user holds the hotkey). The section ships even when `.unknown` — empty strings, but the section stays so the prefix shape is stable.
 7. **`InsertionTarget.captureSync()` refuses to read `AXSecureTextField` outright.** Returns `.empty` rather than attempting to read the value.
 8. **`SecureFieldMasker` runs first in `decideForNode`.** `.skip` short-circuits to `.skipSubtree` *before* `AXNoiseFilter` is consulted — secure-field skips can never be overridden by the noise filter. Pinned by `AccessibilityTreeTests` (`test_decide_secureFieldSkipsBeforeNoiseFilter` + sensitive-sheet-parent variant).
-9. **Global budget counts rendered lines, not nodes visited.** Filtering may walk more children per rendered line (a label-less Toolbar parent is filtered out but its labelled children render). The per-app 100 ms wall-clock cap and `Task.isCancelled` checks in `walk` bound CPU.
-10. **`activeBundleID` is passed in by the caller, never re-read inside `snapshot()`.** Eliminates the app-switch race between session start (`RecordingSession.start` captures `frontmost?.bundleIdentifier` on `@MainActor`) and the detached AX task. Mirrors the existing `InsertionTarget` rationale at `ContextSnapshot.swift:453` ("avoid round-tripping through `NSWorkspace.frontmostApplication` which can race with app-switch events during session start").
+9. **Global budget counts rendered lines, not nodes visited.** Filtering may walk more children per rendered line (a label-less Toolbar parent is filtered out but its labelled children render). Noise-filter `.dropRender` parents still recurse into children **without charging budget**, so for chrome-heavy trees (Electron, deep label-less container hierarchies) the per-app **100 ms wall-clock cap — NOT the rendered-lines budget — is the binding CPU constraint**. That's intentional: the wall-clock cap is the right controller for CPU; the rendered-lines budget is for output-size. `Task.isCancelled` checks in `walk` make the wall-clock cap reachable mid-recursion.
+10. **`activeBundleID` is passed in by the caller, never re-read inside `snapshot()`.** Guardrail against re-introducing an `NSWorkspace.frontmostApplication` read inside the detached AX task — that would race with app-switch events between session start (`RecordingSession.start` captures `frontmost?.bundleIdentifier` on `@MainActor`) and the AX walk firing. Mirrors the existing `InsertionTarget` rationale at `ContextSnapshot.swift:453` ("avoid round-tripping through `NSWorkspace.frontmostApplication` which can race with app-switch events during session start").
 
 ## Hard rules
 
@@ -50,7 +50,7 @@
 After `SecureFieldMasker` clears a node, `AXNoiseFilter` (run inside `decideForNode`) classifies the rendered LINE as signal or noise. Four independent filters; secure-field skips always win.
 
 - **R4 structural chrome.** Pure-mechanic roles (`AXScrollBar`, `AXValueIndicator`) drop unconditionally — their `kAXValueAttribute` is a numeric position string, never content. Chrome subroles (`AXCloseButton`, `AXMinimizeButton`, `AXFullScreenButton`, `AXZoomButton`, `AXIncrementArrow/DecrementArrow/IncrementPage/DecrementPage`) and label-less container roles (`AXSplitGroup`, `AXTabGroup`, `AXToolbar`, `AXScrollArea`, `AXLayoutArea`, `AXLayoutItem`) drop *only when they carry no title or value of their own* — a labelled CloseButton still renders.
-- **R5 terminal scrollback.** `AXTextArea` / `AXStaticText` with ≥5 newlines AND >1000 chars drops **only when the parent app is in `InsertionTarget.knownTerminalBundleIDs`** (Terminal, iTerm, Ghostty, Warp, kitty, alacritty, hyper, wezterm). Open Notes / Bear / TextEdit / BBEdit / Pages documents survive — regression-pinned by `AXNoiseFilterTests`.
+- **R5 terminal scrollback.** `AXTextArea` / `AXStaticText` with ≥5 newlines AND >1000 chars drops **only when the containing app is in `AXNoiseFilter.knownTerminalBundleIDs`** (Terminal, iTerm, Ghostty, Warp, kitty, alacritty, hyper, wezterm). Open Notes / Bear / TextEdit / BBEdit / Pages documents survive — regression-pinned by `AXNoiseFilterTests`.
 - **R6 repetitive-pack collapse.** Runs of ≥6 same-role same-stem title-only lines collapse into one summary `- Image (× N items, stem "Screenshot YYYY-MM-DD")`. Stem-strip removes `YYYY-[./-]MM-DD` date suffixes; inline version numbers (`Release 1.0` / `Release 2.0`) are NOT stripped — distinct stems don't collapse.
 - **R7 short gibberish.** Drops nodes whose value-or-title is ≤8 non-whitespace chars AND has non-alphabetic/non-decimal ratio > 0.4. CJK ideographs are alphabetic (`公第〇` → keep). Length floor escape valve means long mixed content (code, JSON, scrollback fragments) always passes.
 
@@ -58,20 +58,21 @@ When a noise filter fires (returns `.dropRender`), the walker does NOT append a 
 
 ## Bypass: how it can't happen
 
-`AccessibilityTree.snapshot()` returns `RedactedAXSnapshot`. There is no API to extract raw text — `RedactedAXSnapshot.formattedForPrompt()` is the only readable accessor, and it has already gone through `SecureFieldMasker`. Same for `RedactedScreenText`. New code that needs the on-screen text **must** consume one of these types — anything else is a security regression.
+`AccessibilityTree.snapshot(activeBundleID:)` returns `RedactedAXSnapshot`. There is no API to extract raw text — `RedactedAXSnapshot.formattedForPrompt()` is the only readable accessor, and it has already gone through `SecureFieldMasker`. Same for `RedactedScreenText`. New code that needs the on-screen text **must** consume one of these types — anything else is a security regression.
 
 ## Threats not in scope
 
 - Password manager auto-fill overlays with a visible password on screen (rare; managers obscure by default).
 - Custom apps using `AXTextField` for password input instead of `AXSecureTextField` — identifier-based heuristics catch most; the content-pattern layer catches token-shaped values; free-form text-typed passwords that don't match any pattern can slip.
 - Cloud-provider keys outside the covered set (Azure storage, GCP service-account JSON, DigitalOcean tokens, etc.) — caught by the 40-char generic opaque-token rule with a generic label. Add a specific rule + test if a provider format slips past.
+- Terminal emulators outside the hardcoded `AXNoiseFilter.knownTerminalBundleIDs` set (Tabby, Termius, Rio, Cool Retro Term, BlackBox, …). Their `AXTextArea` scrollback ships into `On-screen context:` unredacted; `SecureFieldMasker.scrubContent` only catches token-shaped secrets, not free-form content like `echo $DB_PASSWORD` left in scrollback. Extend the set when a new emulator becomes common — see `solutions/documentation-gaps/dynamic-terminal-detection-2026-05-18.md` for the long-term `AppCategorizer` path.
 
 ## Testing
 
 - `NoTypeTests/SecureFieldMaskerTests.swift` — both layers (skip + content) plus empty-value and idempotence paths.
-- `NoTypeTests/AXNoiseFilterTests.swift` — 56 cases pinning every noise predicate (R4 chrome, R5 terminal-parent gate, R6 pack-collapse with negative cases, R7 length floor + CJK).
+- `NoTypeTests/AXNoiseFilterTests.swift` — 59 cases pinning every noise predicate (R4 chrome (full inventory-lock), R5 terminal-parent gate, R6 pack-collapse with negative cases incl. meeting-with-participant-suffix regression, R7 length floor + CJK).
 - `NoTypeTests/AccessibilityTreeTests.swift` — 25 cases pinning `decideForNode` pipeline ordering (R8 masker precedence), `budgetForApp` routing, `applyGlobalCap` active-first sort + truncation, and the `formattedForPrompt` rendering contract.
-- `NoTypeTests/PromptEvalTests.swift` — live-API anti-leak test (AX-only token must not appear in transcript) + positive-spelling scaffolding (skips until audio recorded).
+- `NoTypeTests/PromptEvalTests.swift` — live-API anti-leak test (AX-only token must not appear in transcript). Positive-spelling complement is tracked at `solutions/documentation-gaps/positive-spelling-ax-fixture-2026-05-18.md` (pending audio recording).
 - No tests against live apps in unit tests.
 
 ## Pointers

@@ -41,12 +41,21 @@ final class AXNoiseFilterTests: XCTestCase {
         ))
     }
 
-    func test_drop_scrollbarMechanics_allSubroles() {
-        // Locks the inventory — adding/removing a chrome subrole requires
-        // updating the test.
+    func test_drop_allChromeSubrolesWhenLabelless() {
+        // Locks the **full inventory** of chrome subroles from
+        // `AXNoiseFilter.chromeSubroleSet`. Adding or removing any subrole
+        // from that set requires updating this list. Each one drops to
+        // `.dropRender` when the carrying node has no title and no value.
         let subroles = [
-            "AXIncrementArrow", "AXDecrementArrow",
-            "AXIncrementPage", "AXDecrementPage",
+            "AXCloseButton",
+            "AXMinimizeButton",
+            "AXFullScreenButton",
+            "AXZoomButton",
+            "AXIncrementArrow",
+            "AXDecrementArrow",
+            "AXIncrementPage",
+            "AXDecrementPage",
+            "AXToolbarButton",
         ]
         for subrole in subroles {
             XCTAssertTrue(
@@ -54,7 +63,7 @@ final class AXNoiseFilterTests: XCTestCase {
                     role: "AXButton", subrole: subrole,
                     title: nil, value: ""
                 ),
-                "subrole '\(subrole)' should drop as scrollbar mechanic"
+                "subrole '\(subrole)' should drop as labelless chrome"
             )
         }
     }
@@ -264,7 +273,7 @@ final class AXNoiseFilterTests: XCTestCase {
         XCTAssertTrue(AXNoiseFilter.isViewportScrollback(
             role: "AXTextArea",
             value: longValue,
-            parentBundleID: "com.apple.Terminal"
+            containingBundleID: "com.apple.Terminal"
         ))
     }
 
@@ -273,7 +282,7 @@ final class AXNoiseFilterTests: XCTestCase {
         XCTAssertTrue(AXNoiseFilter.isViewportScrollback(
             role: "AXTextArea",
             value: longValue,
-            parentBundleID: "com.mitchellh.ghostty"
+            containingBundleID: "com.mitchellh.ghostty"
         ))
     }
 
@@ -282,7 +291,7 @@ final class AXNoiseFilterTests: XCTestCase {
         XCTAssertTrue(AXNoiseFilter.isViewportScrollback(
             role: "AXTextArea",
             value: longValue,
-            parentBundleID: "com.googlecode.iterm2"
+            containingBundleID: "com.googlecode.iterm2"
         ))
     }
 
@@ -296,7 +305,7 @@ final class AXNoiseFilterTests: XCTestCase {
         XCTAssertFalse(AXNoiseFilter.isViewportScrollback(
             role: "AXTextArea",
             value: longValue,
-            parentBundleID: "com.apple.Notes"
+            containingBundleID: "com.apple.Notes"
         ))
     }
 
@@ -305,7 +314,7 @@ final class AXNoiseFilterTests: XCTestCase {
         XCTAssertFalse(AXNoiseFilter.isViewportScrollback(
             role: "AXTextArea",
             value: longValue,
-            parentBundleID: "com.apple.TextEdit"
+            containingBundleID: "com.apple.TextEdit"
         ))
     }
 
@@ -314,7 +323,7 @@ final class AXNoiseFilterTests: XCTestCase {
         XCTAssertFalse(AXNoiseFilter.isViewportScrollback(
             role: "AXTextArea",
             value: longValue,
-            parentBundleID: "net.shinyfrog.bear"
+            containingBundleID: "net.shinyfrog.bear"
         ))
     }
 
@@ -322,7 +331,7 @@ final class AXNoiseFilterTests: XCTestCase {
         XCTAssertFalse(AXNoiseFilter.isViewportScrollback(
             role: "AXTextArea",
             value: String(repeating: "line\n", count: 60),
-            parentBundleID: nil
+            containingBundleID: nil
         ))
     }
 
@@ -331,7 +340,7 @@ final class AXNoiseFilterTests: XCTestCase {
         XCTAssertFalse(AXNoiseFilter.isViewportScrollback(
             role: "AXTextArea",
             value: "short\nthree\nlines",
-            parentBundleID: "com.apple.Terminal"
+            containingBundleID: "com.apple.Terminal"
         ))
     }
 
@@ -514,5 +523,40 @@ final class AXNoiseFilterTests: XCTestCase {
             AXNoiseFilter.stripTrailingTemplateTokens("Export 2026/05/16"),
             "Export"
         )
+    }
+
+    // MARK: - trailingDateRegex tightening — participant suffix must NOT be stripped
+
+    func test_stem_meetingWithParticipantSuffix_preservesName() {
+        // "Meeting 2026-05-18 - Alice" has a date mid-string but the
+        // participant name after the date is real signal — must survive
+        // in the stem. Regression net for the earlier greedy `.*$` form
+        // of the regex.
+        XCTAssertEqual(
+            AXNoiseFilter.stripTrailingTemplateTokens("Meeting 2026-05-18 - Alice"),
+            "Meeting 2026-05-18 - Alice"
+        )
+    }
+
+    func test_stem_projectWithTopicSuffix_preservesTopic() {
+        XCTAssertEqual(
+            AXNoiseFilter.stripTrailingTemplateTokens("Project 2026-05-18 - Quarterly Review"),
+            "Project 2026-05-18 - Quarterly Review"
+        )
+    }
+
+    func test_packCollapse_meetingWithParticipantSuffix_doesNotOverStrip() {
+        // 6 meeting titles with distinct participants — each retains its
+        // ` - Alice` / ` - Bob` suffix in the stem, so the pack does NOT
+        // collapse (distinct stems). Regression net: under the earlier
+        // greedy `.*$` form of `trailingDateRegex`, all 6 would have
+        // collapsed to stem "Meeting".
+        let names = ["Alice", "Bob", "Carol", "Dave", "Eve", "Frank"]
+        let lines = names.map { name in
+            "  - Image \"Meeting 2026-05-18 - \(name)\""
+        }
+        var mutable = lines
+        AXNoiseFilter.collapseRepetitivePacks(&mutable)
+        XCTAssertEqual(mutable, lines, "distinct participant suffixes must NOT collapse")
     }
 }
