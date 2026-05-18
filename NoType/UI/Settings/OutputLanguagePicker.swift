@@ -98,7 +98,12 @@ private struct FlowChipStrip: View {
 
 // MARK: - Manage Languages sheet
 
-private struct ManageLanguagesSheet: View {
+/// Shared between the legacy `OutputLanguagePicker` row and the
+/// redesigned `LanguagePastePane`. `internal` (not `private`) so the
+/// pane can reuse it directly instead of carrying a 150-line copy —
+/// see PR #52 review (M-01 / M-02 / C2). Any future fix to the
+/// search / multi-select / chip-strip behaviour lands here once.
+struct ManageLanguagesSheet: View {
     @Environment(AppState.self) private var appState
     @Binding var isPresented: Bool
 
@@ -188,8 +193,7 @@ private struct ManageLanguagesSheet: View {
     }
 
     private func languageRow(language: SupportedLanguage, isSelected: Bool) -> some View {
-        @Bindable var appState = appState
-        return Button(action: {
+        Button(action: {
             toggle(language.code)
         }) {
             HStack(spacing: DS.Space.s3) {

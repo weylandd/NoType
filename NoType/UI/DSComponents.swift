@@ -694,6 +694,66 @@ struct DSSettingsRow<Trailing: View>: View {
     }
 }
 
+// MARK: - DSKeycapPill
+//
+// Shared keycap chrome used by Settings → Recording (shortcut row +
+// "How recording works" callout). Two emerging call sites in PR #52
+// matched the DS convention's 2+ surfaces rule (UI/CLAUDE.md), so
+// the shape lives here instead of duplicated as private structs in
+// each pane component.
+//
+// `style` selects between the dense pill used inline next to a
+// "Change" button (.compact, 12 pt mono medium) and the larger
+// callout chip (.callout, 12 pt mono regular, taller hit area)
+// with no behavioural difference — just per-site visual tuning.
+
+struct DSKeycapPill: View {
+    enum Style {
+        case compact   // shortcut row keycap (24 pt tall, weight medium)
+        case callout   // how-recording-works callout (24+ pt, weight regular)
+    }
+
+    let label: String
+    var style: Style = .compact
+
+    var body: some View {
+        Text(label)
+            .font(font)
+            .foregroundStyle(DS.Color.textPrimary)
+            .padding(.horizontal, padding)
+            .frame(minWidth: minWidth, minHeight: minHeight)
+            .background(background, in: RoundedRectangle(cornerRadius: DS.Radius.sm))
+            .overlay(
+                RoundedRectangle(cornerRadius: DS.Radius.sm)
+                    .strokeBorder(DS.Color.borderDefault, lineWidth: DS.Border.hairline)
+            )
+            .accessibilityLabel(label)
+    }
+
+    private var font: Font {
+        switch style {
+        case .compact: return .system(size: 12, weight: .medium, design: .monospaced)
+        case .callout: return .system(size: 12, design: .monospaced)
+        }
+    }
+
+    private var padding: CGFloat {
+        style == .callout ? 7 : DS.Space.s2 + 2
+    }
+
+    private var minWidth: CGFloat {
+        style == .callout ? 24 : 0
+    }
+
+    private var minHeight: CGFloat {
+        style == .callout ? 24 : 22
+    }
+
+    private var background: Color {
+        style == .callout ? DS.Color.bgOverlay : DS.Color.bgInset
+    }
+}
+
 // MARK: - DSCard + DSCardRow
 //
 // Card chrome for the redesigned Settings screen. Each Settings pane

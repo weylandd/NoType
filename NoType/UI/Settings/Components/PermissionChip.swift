@@ -64,7 +64,7 @@ struct PermissionChip: View {
                         lineWidth: DS.Border.hairline
                     )
             )
-            .contentShape(Rectangle())
+            .contentShape(RoundedRectangle(cornerRadius: DS.Radius.md))
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }

@@ -32,7 +32,7 @@ struct HowRecordingWorksCallout: View {
         }
         .padding(DS.Space.s4 + 2)
         .background(
-            DS.Color.bgInset.opacity(0.7),
+            DS.Color.calloutSurface,
             in: RoundedRectangle(cornerRadius: DS.Radius.md)
         )
         .overlay(
@@ -74,7 +74,7 @@ struct HowRecordingWorksCallout: View {
             ForEach(Array(tokens.enumerated()), id: \.offset) { _, token in
                 switch token {
                 case .text(let s):
-                    KeycapView(label: s)
+                    DSKeycapPill(label: s, style: .callout)
                 case .small(let s):
                     Text(s)
                         .font(.system(size: 11, design: .monospaced))
@@ -94,25 +94,5 @@ struct HowRecordingWorksCallout: View {
         case text(String)
         case small(String)
         case plus
-    }
-}
-
-private struct KeycapView: View {
-    let label: String
-
-    var body: some View {
-        Text(label)
-            .font(.system(size: 12, design: .monospaced))
-            .foregroundStyle(DS.Color.textPrimary)
-            .padding(.horizontal, 7)
-            .frame(minWidth: 24, minHeight: 24)
-            .background(
-                DS.Color.bgOverlay,
-                in: RoundedRectangle(cornerRadius: DS.Radius.sm)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: DS.Radius.sm)
-                    .strokeBorder(DS.Color.borderDefault, lineWidth: DS.Border.hairline)
-            )
     }
 }

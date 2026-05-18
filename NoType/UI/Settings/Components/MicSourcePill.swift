@@ -20,7 +20,7 @@ struct MicSourcePill: View {
             Circle()
                 .fill(DS.Color.successFg)
                 .frame(width: 6, height: 6)
-                .shadow(color: DS.Color.successFg.opacity(0.6), radius: 3, x: 0, y: 0)
+                .shadow(color: DS.Color.statusDotGlow, radius: 3, x: 0, y: 0)
 
             Text(mode)
                 .font(DS.Font.bodySM(.medium))

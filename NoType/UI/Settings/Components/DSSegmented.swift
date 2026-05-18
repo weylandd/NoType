@@ -32,6 +32,11 @@ struct DSSegmented<Option: Hashable>: View {
             RoundedRectangle(cornerRadius: 7)
                 .strokeBorder(DS.Color.borderSubtle, lineWidth: DS.Border.hairline)
         )
+        // Container-level a11y so VoiceOver reads the group as a
+        // segmented picker ("Theme, Adaptive, 3 options") instead of
+        // tabbing through three anonymous buttons.
+        .accessibilityElement(children: .contain)
+        .accessibilityValue(Text(label(selection)))
     }
 }
 
@@ -62,7 +67,7 @@ private struct Segment: View {
                         )
                 )
                 .shadow(
-                    color: isPressed ? .black.opacity(0.18) : .clear,
+                    color: isPressed ? DS.Color.segmentedPressedShadow : .clear,
                     radius: 0, x: 0, y: 1
                 )
                 .contentShape(Rectangle())

@@ -131,6 +131,30 @@ enum DS {
         // beneath. Intentionally theme-shared (no dsDynamic wrap).
         static let buttonInnerHighlight = SwiftUI.Color.white.opacity(0.18)
 
+        // Settings primitives — Tier-1 redesign tokens (plan 2026-05-18-003).
+        // Each replaces an inline `.opacity(...)` literal flagged by the
+        // project-standards reviewer. Theme-shared because they all
+        // operate as subtle overlays on top of dark or light surfaces;
+        // no per-mode override required.
+        //
+        // `segmentedPressedShadow` — drop shadow under the pressed
+        //   `DSSegmented` segment. Fakes the spec's `inset 0 1px 0
+        //   rgba(0,0,0,0.20)` chip raise.
+        // `calloutSurface` — `bgInset` at 70 % alpha for the
+        //   "How recording works" callout, slightly more diffuse than
+        //   raw `bgInset` so it reads as a recessed card-in-card.
+        // `statusDotGlow` — 60 % of `successFg` painted as a glow on
+        //   the mic-source pill's active dot. Theme-shared (the dot's
+        //   base colour already adapts).
+        // `headerBackdropTint` — 40 % of `bgBase` layered over
+        //   `.ultraThinMaterial` for the Settings sticky header. The
+        //   material does the blur; this tint biases the result toward
+        //   the design's 88 % `bg-base` look.
+        static let segmentedPressedShadow = SwiftUI.Color.black.opacity(0.18)
+        static let calloutSurface         = DS.Color.bgInset.opacity(0.7)
+        static let statusDotGlow          = DS.Color.successFg.opacity(0.6)
+        static let headerBackdropTint     = DS.Color.bgBase.opacity(0.4)
+
         // 40 % danger — used for the row background of a permission
         // that's in the `denied` state. Reads as a flag tint that the
         // user needs to address. Roughly 7× the effective alpha of the

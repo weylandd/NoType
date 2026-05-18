@@ -49,10 +49,6 @@ struct TokenStatsPanel: View {
         )
     }
 
-    /// Currently-selected range — exposed so the parent card can
-    /// mirror the scope into its head meta ("Last 30 days" etc.).
-    var currentRangeScope: String { range.scopeLabel }
-
     // MARK: - Pure helpers (testable)
 
     /// Integer count with grouping separator. 1234 → "1,234".

@@ -21,9 +21,7 @@ struct GitHubRow: View {
                         .foregroundStyle(DS.Color.textTertiary)
                 }
                 Spacer(minLength: 0)
-                Image(systemName: "arrow.up.right")
-                    .font(.system(size: 12))
-                    .foregroundStyle(DS.Color.textTertiary)
+                DSIcon(name: .arrowUpRight, size: 12, color: DS.Color.textTertiary)
             }
             .padding(.horizontal, DS.Space.s5 - 2)
             .padding(.vertical, DS.Space.s4 + 2)
@@ -46,9 +44,7 @@ struct GitHubRow: View {
             RoundedRectangle(cornerRadius: 7)
                 .fill(DS.Color.bgInset)
                 .frame(width: 30, height: 30)
-            Image(systemName: "chevron.left.forwardslash.chevron.right")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(DS.Color.textPrimary)
+            DSIcon(name: .code, size: 14, color: DS.Color.textPrimary)
         }
     }
 

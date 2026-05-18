@@ -28,7 +28,7 @@ struct SettingsContentHeader: View {
         .padding(.vertical, DS.Space.s5)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.ultraThinMaterial)
-        .overlay(DS.Color.bgBase.opacity(0.4))
+        .overlay(DS.Color.headerBackdropTint)
         .overlay(
             DS.Color.borderSubtle.frame(height: DS.Border.hairline),
             alignment: .bottom

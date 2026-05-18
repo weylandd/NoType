@@ -35,7 +35,7 @@ struct RecordingPane: View {
                 subtitle: "Press & hold to dictate. Release to paste at the cursor."
             ) {
                 HStack(spacing: DS.Space.s3) {
-                    KeycapPill(label: appState.hotkeyBinding.displayWord)
+                    DSKeycapPill(label: appState.hotkeyBinding.displayWord, style: .compact)
                     DSSecondaryButton(label: "Change", action: onChangeRecordingShortcut)
                         .disabled(disabled)
                 }
@@ -45,7 +45,7 @@ struct RecordingPane: View {
                 subtitle: "Aborts the current session — nothing gets pasted."
             ) {
                 HStack(spacing: DS.Space.s3) {
-                    KeycapPill(label: appState.cancelHotkeyBinding.displayWord)
+                    DSKeycapPill(label: appState.cancelHotkeyBinding.displayWord, style: .compact)
                     DSSecondaryButton(label: "Change", action: onChangeCancelShortcut)
                         .disabled(disabled)
                 }
@@ -104,9 +104,11 @@ struct RecordingPane: View {
             : "NoType records from the device you picked. Switch back to Auto-detect anytime."
     }
 
-    /// Pop the input-device NSMenu using the same shape `MicChangeRow`
-    /// uses — duplicated here for now because the menu plumbing isn't
-    /// worth abstracting until a third caller appears.
+    /// Pop the input-device NSMenu. `MicInputPicker` (popover footer
+    /// + onboarding mic-check) is the other caller of this shape;
+    /// each owns its own NSMenu construction. Extract into a shared
+    /// helper when a third caller appears — until then duplication
+    /// is cheaper than abstracting prematurely.
     private func showMicMenu() {
         let devices = AudioDeviceManager.shared
         let menu = NSMenu()
@@ -150,27 +152,6 @@ struct RecordingPane: View {
             return "System default — \(def.name)"
         }
         return "System default"
-    }
-}
-
-private struct KeycapPill: View {
-    let label: String
-
-    var body: some View {
-        Text(label)
-            .font(.system(size: 12, weight: .medium, design: .monospaced))
-            .foregroundStyle(DS.Color.textPrimary)
-            .padding(.horizontal, DS.Space.s2 + 2)
-            .padding(.vertical, 4)
-            .background(
-                DS.Color.bgInset,
-                in: RoundedRectangle(cornerRadius: DS.Radius.sm)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: DS.Radius.sm)
-                    .strokeBorder(DS.Color.borderDefault, lineWidth: DS.Border.hairline)
-            )
-            .accessibilityLabel(label)
     }
 }
 

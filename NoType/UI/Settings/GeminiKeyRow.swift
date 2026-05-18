@@ -78,9 +78,7 @@ private struct MaskedKeyPill: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "lock.fill")
-                .font(.system(size: 11))
-                .foregroundStyle(DS.Color.textQuaternary)
+            DSIcon(name: .lock, size: 11, color: DS.Color.textQuaternary)
             Text(value)
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(DS.Color.textPrimary)
