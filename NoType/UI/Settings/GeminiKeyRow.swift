@@ -186,6 +186,15 @@ private struct EditAPIKeySheet: View {
         Task { @MainActor in
             do {
                 try await appState.validateGeminiKey(candidate)
+                // Honor the Cancel-during-validation contract: if the user
+                // hit Cancel while the network round-trip was in flight,
+                // the binding has flipped to `false` and we must NOT write
+                // the candidate to the Keychain even though validation
+                // succeeded. Otherwise "Cancel" silently saves the key.
+                guard isPresented else {
+                    validating = false
+                    return
+                }
                 try appState.updateAPIKey(candidate)
                 validating = false
                 isPresented = false
