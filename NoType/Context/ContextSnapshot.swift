@@ -547,7 +547,8 @@ struct ContextSnapshot: Sendable, Equatable {
     /// custom-NSText cases). When set, the Gemini request builder appends
     /// `screenText.formattedForPrompt()` inside the existing `On-screen context:`
     /// prompt part — no new top-level prompt section is introduced, so the
-    /// cached-prefix shape (up to 7 text parts) stays intact.
+    /// cached-prefix shape (up to 9 text parts post-`User languages:` —
+    /// see `NoType/Gemini/CLAUDE.md` invariant 3) stays intact.
     let screenText: RedactedScreenText?
 
     init(
@@ -579,11 +580,19 @@ struct ContextSnapshot: Sendable, Equatable {
     /// Collapses to the minimum stable shape: `Category: uncategorized`,
     /// no user instruction, no category instruction, empty dictionary,
     /// no replacements, empty tree, empty insertion target. Cache-prefix-
-    /// wise this is the 6-text-part case (App+Category, User dictionary,
-    /// Insertion target, On-screen context, Prior chunks, per-call
-    /// instruction) — the dictionary section is always present but
-    /// renders `(empty)` when no entries.
-    static func minimal(activeApp: AppInfo) -> ContextSnapshot {
+    /// wise this is the 7-text-part case (App+Category, User languages,
+    /// User dictionary, Insertion target, On-screen context, Prior chunks,
+    /// per-call instruction) — the dictionary and languages sections are
+    /// always present but render `(empty)` when no entries.
+    ///
+    /// **`userLanguages` parameter (added post-U7):** the caller passes
+    /// `userLanguagesFrozen` when constructing a final-chunk minimal
+    /// snapshot, so the `User languages:` cache-prefix part stays
+    /// byte-stable across chunks of the same session even on the
+    /// quick-release path. Defaults to `[]` for non-session callers
+    /// (tests, the dictionary/instructions doc-strings that name this
+    /// factory as the "empty" baseline).
+    static func minimal(activeApp: AppInfo, userLanguages: [String] = []) -> ContextSnapshot {
         ContextSnapshot(
             activeApp: activeApp,
             category: .uncategorized,
@@ -591,7 +600,7 @@ struct ContextSnapshot: Sendable, Equatable {
             categoryInstruction: nil,
             dictionary: [],
             replacements: [],
-            userLanguages: [],
+            userLanguages: userLanguages,
             tree: RedactedAXSnapshot(apps: []),
             insertionTarget: .empty,
             screenText: nil

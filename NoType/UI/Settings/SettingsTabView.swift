@@ -29,7 +29,7 @@ struct SettingsTabView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: DS.Space.s8) {
                 Text("Settings")
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(DS.Font.title())
                     .foregroundStyle(DS.Color.textPrimary)
 
                 DSSettingsSection(title: "General") {
@@ -102,8 +102,17 @@ struct SettingsTabView: View {
                 currentBinding: appState.hotkeyBinding,
                 onCancel: { showRecordingRebind = false },
                 onCapture: { binding in
-                    appState.applyHotkeyBinding(binding)
-                    return nil
+                    let result = appState.applyHotkeyBinding(binding)
+                    switch result {
+                    case .applied, .noChange:
+                        return nil
+                    case .rejectedDuringRecording:
+                        return "Can't change the recording shortcut while a recording is in flight."
+                    case .rejectedCollidesWithCancel:
+                        return "This key is already your cancel shortcut — pick a different one."
+                    case .rejectedDisallowedKey:
+                        return "This key isn't allowed as a recording shortcut."
+                    }
                 }
             )
         }

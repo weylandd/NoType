@@ -10,6 +10,11 @@ import XCTest
 /// These tests rely on `SleepAssertion` exposing a couple of test-only
 /// hooks (`assertionID`, `isReleased`) so we can introspect the underlying
 /// IOKit handle without poking through Mirror.
+///
+/// Marked `@MainActor` because `SleepAssertion` itself is `@MainActor`
+/// (production callers all run on the main actor). Test methods stay
+/// synchronous — main-actor isolation propagates from the class.
+@MainActor
 final class SleepAssertionTests: XCTestCase {
 
     func test_init_acquiresNonZeroHandle() throws {

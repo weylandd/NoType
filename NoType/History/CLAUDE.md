@@ -43,11 +43,11 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
 
 Storage: `~/Library/Application Support/NoType/history.json`, top-level array of `HistoryEntry`.
 
-**`StatsSnapshot` (v3):**
+**`StatsSnapshot` (v4):**
 
 ```swift
 struct StatsSnapshot: Codable, Sendable, Equatable {
-    var version: Int                                    // 3
+    var version: Int                                    // current 4
     var totalWords: Int
     var totalSessions: Int
     var totalDurationSeconds: Double                    // measured sessions
@@ -58,7 +58,11 @@ struct StatsSnapshot: Codable, Sendable, Equatable {
 }
 ```
 
-`DayBucket { words, sessions, durationSeconds, durationWords }`. `AppBucket { name, words, sessions }`. Storage: `~/Library/Application Support/NoType/stats.json`. One row per calendar day + one row per distinct app; ~50 B/day + ~80 B/app — ten years ≈ 40 KB total.
+`DayBucket { words, sessions, durationSeconds, durationWords, tokenInput, tokenOutput, tokenCached }`. `AppBucket { name, words, sessions }`. Storage: `~/Library/Application Support/NoType/stats.json`. One row per calendar day + one row per distinct app; ~50 B/day + ~80 B/app — ten years ≈ 40 KB total.
+
+**Migration:** v3→v4 via `healIfPreV4` (called from `StatsSnapshot.init(from:)`, mirrors the existing `healIfPreV3`). Purely additive — only bumps the version stamp. New token fields default to 0 via `decodeIfPresent ?? 0` in the tolerant decoder; no existing v3 field is touched. A v3 reader of a v4 file silently drops the token fields via the same `decodeIfPresent` pattern, so the downgrade path is safe.
+
+**Wiring:** the single write point for stats is `AppState.finalizeRecording()`'s success arm, calling `await statsStore.record(entry, tokens: session.summary.tokens)`. The older `record(entry:)` shim still exists for the test surface; it forwards `tokens: .zero`. See `NoType/Gemini/CLAUDE.md` for how `TokenUsage` flows out of `GeminiClient.transcribeWithUsage*` overloads.
 
 ## Failure modes (both stores)
 

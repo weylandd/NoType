@@ -54,11 +54,8 @@ actor HistoryStore {
     /// Always writes — an empty file is the desired post-state — so
     /// the on-disk snapshot reflects the wipe even when history was
     /// already empty in-memory.
-    @discardableResult
-    func deleteAll() -> [HistoryEntry] {
-        let empty: [HistoryEntry] = []
-        write(empty)
-        return empty
+    func deleteAll() {
+        write([])
     }
 
     private func write(_ entries: [HistoryEntry]) {

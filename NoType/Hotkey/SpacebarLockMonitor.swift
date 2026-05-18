@@ -145,6 +145,15 @@ final class SpacebarLockMonitor: @unchecked Sendable {
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         // Re-enable on the same disable signals HotkeyMonitor handles
         // — keeps the secondary tap alive through a transient stall.
+        //
+        // Note the deliberate divergence from HotkeyMonitor invariant 4:
+        // HotkeyMonitor resets its local `nonModifierHeld` + `previousFlags`
+        // on re-enable because *that* monitor owns the press-state
+        // bookkeeping. We don't — the gate is `shouldLockOnSpace()` which
+        // reads an `OSAllocatedUnfairLock<Bool>` owned by AppState and kept
+        // current by `updateSpacebarLockEnabled()`. There's no local state
+        // to clear: the next tap callback will see whatever the main actor
+        // last wrote, which is exactly what we want.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             Self.log.warning("spacebar-lock tap disabled (\(type == .tapDisabledByTimeout ? "timeout" : "userInput", privacy: .public)); re-enabling")
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }

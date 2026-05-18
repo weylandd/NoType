@@ -23,15 +23,37 @@ import OSLog
 /// `acquireSleepAssertionIfNeeded()` / `releaseSleepAssertion()`.
 ///
 /// Plan §304 / §314 (`docs/plans/2026-05-18-001-feat-settings-screen-plan.md`).
+///
+/// **Isolation.** The public API (`init` / `release()`) is `@MainActor` —
+/// all production callers (`AppState.acquireSleepAssertionIfNeeded` /
+/// `releaseSleepAssertion`) run on the main actor, and the explicit
+/// annotation lets the compiler verify nobody touches the IOPMAssertion
+/// handle from a non-main context.
+///
+/// The two stored properties are `nonisolated(unsafe)` because `deinit`
+/// in Swift 6 runs as nonisolated by default, and must still be able to
+/// read them as a safety-net release. The pattern is sound:
+///
+///   - `init` writes both fields (main actor).
+///   - `release()` writes both fields (main actor).
+///   - `deinit` reads both fields exactly once when refcount drops to
+///     zero — by definition no other reference exists at that moment,
+///     so there is no concurrent mutation to race against.
+///
+/// `(unsafe)` is the honest acknowledgement that the compiler can't
+/// prove this, just like `@unchecked Sendable` on `PCMRingBuffer`.
+@MainActor
 final class SleepAssertion {
     /// Test-visible identifier of the underlying IOPMAssertion. Equal
-    /// to `kIOPMNullAssertionID` after `release()`.
-    private(set) var assertionID: IOPMAssertionID = IOPMAssertionID(kIOPMNullAssertionID)
+    /// to `kIOPMNullAssertionID` after `release()`. See class doc-comment
+    /// for the `nonisolated(unsafe)` rationale.
+    nonisolated(unsafe) private(set) var assertionID: IOPMAssertionID = IOPMAssertionID(kIOPMNullAssertionID)
 
     /// Flips true once `release()` has run — used both to short-circuit
     /// repeat calls and to keep `deinit` from re-releasing a handle the
-    /// caller already cleaned up.
-    private(set) var isReleased: Bool = false
+    /// caller already cleaned up. See class doc-comment for the
+    /// `nonisolated(unsafe)` rationale.
+    nonisolated(unsafe) private(set) var isReleased: Bool = false
 
     private static let log = Logger(subsystem: "app.notype", category: "sleep")
 

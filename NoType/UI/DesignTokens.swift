@@ -260,6 +260,16 @@ enum DS {
         static func heading(_ weight: SwiftUI.Font.Weight = .semibold) -> SwiftUI.Font {
             .system(size: 15, weight: weight)
         }
+        /// 18pt — page titles ("Settings", "Home"), prominent stat
+        /// values inside cards (`TokenStatsPanel` cells). Default
+        /// weight `.semibold` for titles; call with `.medium` for
+        /// stat values so they read as content, not as a heading.
+        /// Mirrors `--fs-18` from `tokens.css`; the spec also defines
+        /// `--lh-18` but we don't currently pair line-heights on any
+        /// `DS.Font.*` helper.
+        static func title(_ weight: SwiftUI.Font.Weight = .semibold) -> SwiftUI.Font {
+            .system(size: 18, weight: weight)
+        }
     }
 
     // -------------------------------------------------------------------------

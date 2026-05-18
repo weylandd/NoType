@@ -1007,10 +1007,17 @@ final class RecordingSession {
                 context = cached
                 Self.log.info("final batch: using cached context (ready=true)")
             } else {
-                context = ContextSnapshot.minimal(activeApp: AppInfo(
-                    name: sourceApp?.localizedName ?? "Unknown",
-                    bundleID: sourceApp?.bundleIdentifier ?? "unknown.bundle"
-                ))
+                // Pass `userLanguagesFrozen` so the `User languages:`
+                // cache-prefix part stays byte-stable across chunks of
+                // the same session even on this quick-release fallback.
+                // `buildLiteSnapshot` already threads the same value.
+                context = ContextSnapshot.minimal(
+                    activeApp: AppInfo(
+                        name: sourceApp?.localizedName ?? "Unknown",
+                        bundleID: sourceApp?.bundleIdentifier ?? "unknown.bundle"
+                    ),
+                    userLanguages: userLanguagesFrozen
+                )
                 Self.log.info("final batch: context not ready, using minimal fallback")
             }
             isLite = false
@@ -1018,10 +1025,13 @@ final class RecordingSession {
             context = await task.value
             isLite = false
         } else {
-            context = ContextSnapshot.minimal(activeApp: AppInfo(
-                name: sourceApp?.localizedName ?? "Unknown",
-                bundleID: sourceApp?.bundleIdentifier ?? "unknown.bundle"
-            ))
+            context = ContextSnapshot.minimal(
+                activeApp: AppInfo(
+                    name: sourceApp?.localizedName ?? "Unknown",
+                    bundleID: sourceApp?.bundleIdentifier ?? "unknown.bundle"
+                ),
+                userLanguages: userLanguagesFrozen
+            )
             isLite = false
         }
         return ChunkSnapshot(context: context, priors: currentPriors(), apiKey: apiKey, isLite: isLite)

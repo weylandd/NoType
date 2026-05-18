@@ -489,25 +489,57 @@ final class AppState {
         // benefits: prior builds left a stranded runloop per revoke.
         monitor.stop()
         hotkeyMonitor = nil
+        // The secondary Hold+Space tap has no reason to outlive the
+        // primary monitor — without an active recording-hotkey tap the
+        // predicate can never become true. Tearing it down here covers
+        // the AX-revoke-mid-session path explicitly: a stranded
+        // `.defaultTap` consuming Space across the OS would be worse
+        // than the recording outage itself. The call is idempotent.
+        uninstallSpacebarLockTap()
         Self.log.info("hotkey uninstalled")
     }
 
+    /// Outcome of applying a new recording binding. Mirror of
+    /// `CancelBindingApplyResult` so the Settings rebind sheet
+    /// handles both surfaces with the same `switch` shape and the
+    /// user sees an inline reason for every rejection instead of
+    /// a silent revert.
+    enum HotkeyBindingApplyResult: Equatable, Sendable {
+        case applied
+        case noChange
+        case rejectedDuringRecording
+        case rejectedCollidesWithCancel
+        case rejectedDisallowedKey
+    }
+
     /// Persist a new hotkey binding and reinstall the monitor against it.
-    /// Called by the onboarding shortcut screen's remap UI (and, in the
-    /// future, a Settings rebind UI).
+    /// Called by the onboarding shortcut screen's remap UI and the
+    /// Settings → Shortcuts rebind sheet.
     ///
-    /// Refused while a recording session is in flight — tearing the
-    /// monitor down mid-session drops the release event for the
-    /// previously-held key, which would orphan the session in
-    /// `.recording`/`.sending` with no path to finalize except Esc.
-    /// The caller is expected to check `recordingState` and disable the
-    /// remap UI accordingly; this guard is defence-in-depth.
-    func applyHotkeyBinding(_ binding: HotkeyBinding) {
-        guard binding.isAllowedAsHotkey else { return }
-        guard binding != hotkeyBinding else { return }
+    /// Validation (in order, matches the cancel-binding side):
+    ///   1. `isAllowedAsHotkey` — Escape / Power / CapsLock rejected
+    ///      so the user can't accidentally pick a system key.
+    ///   2. Collision vs `cancelHotkeyBinding.code` — without this,
+    ///      `HotkeyMonitor.handle` would match the cancel keycode
+    ///      before the press path and silently fire cancel instead
+    ///      of starting a session.
+    ///   3. `binding == hotkeyBinding` — `noChange` short-circuit.
+    ///   4. Refused while a recording session is in flight — tearing
+    ///      the monitor down mid-session drops the release event for
+    ///      the previously-held key, which would orphan the session
+    ///      in `.recording`/`.sending` with no path to finalize except
+    ///      Esc. The UI also disables the Change button when
+    ///      `recordingState != .idle`; this guard is defence-in-depth.
+    @discardableResult
+    func applyHotkeyBinding(_ binding: HotkeyBinding) -> HotkeyBindingApplyResult {
+        guard binding.isAllowedAsHotkey else { return .rejectedDisallowedKey }
+        if binding.code == cancelHotkeyBinding.code {
+            return .rejectedCollidesWithCancel
+        }
+        guard binding != hotkeyBinding else { return .noChange }
         guard case .idle = recordingState else {
             Self.log.warning("applyHotkeyBinding refused while recordingState != .idle")
-            return
+            return .rejectedDuringRecording
         }
         hotkeyBinding = binding
         binding.save()
@@ -517,6 +549,7 @@ final class AppState {
         // prior thread terminates cleanly (no leak).
         uninstallHotkey()
         installHotkeyIfPossible()
+        return .applied
     }
 
     /// Outcome of applying a new cancel binding. Surfaces validation
@@ -965,27 +998,67 @@ final class AppState {
         Self.log.info("hold+space lock tap uninstalled")
     }
 
+    /// Pure predicate computing whether the Hold+Space lock should
+    /// be enabled. Extracted from `updateSpacebarLockEnabled` so
+    /// the gate is testable in isolation — the only `.defaultTap`
+    /// in the project sits behind this, and a regression silently
+    /// breaks Space typing across the OS during recording.
+    ///
+    /// **Inputs**
+    ///   - `isRecording` — session is in `.recording`
+    ///   - `pressActive` — recording hotkey is currently held
+    ///     (`pressStartedAt != nil`; we keep it set for the hold
+    ///     duration)
+    ///   - `lockedRecording` — session has promoted to a hands-free
+    ///     locked state; no second Space-lock is needed
+    ///   - `hotkeyCode` / `cancelCode` — `HotkeyBinding.code` for
+    ///     each shortcut
+    ///
+    /// **`spaceOwnedElsewhere`.** Both `hotkeyCode == "Space"` and
+    /// `cancelCode == "Space"` suppress the predicate. Either
+    /// configuration would give Space ambiguous meaning at the
+    /// `.headInsertEventTap` site (own-hotkey-consumed-by-self,
+    /// or simultaneously-cancel-and-lock). In those configurations
+    /// Space's other role wins; Hold+Space silently disables.
+    ///
+    /// Pinned by `SpacebarLockPredicateTests`.
+    ///
+    /// `nonisolated` so the predicate is callable from any actor —
+    /// it's a pure function of its arguments with no AppState state
+    /// dependency. The Settings rebind sheet would benefit from
+    /// dry-running the predicate as the user types a potential
+    /// binding (preview "Hold+Space will/won't be available with
+    /// this key"), and the tap thread's `shouldLockOnSpace`
+    /// predicate closure could call this directly in a future
+    /// refactor.
+    nonisolated static func shouldEnableSpacebarLock(
+        isRecording: Bool,
+        pressActive: Bool,
+        lockedRecording: Bool,
+        hotkeyCode: String,
+        cancelCode: String
+    ) -> Bool {
+        let spaceOwnedElsewhere = (hotkeyCode == "Space" || cancelCode == "Space")
+        return isRecording && pressActive && !lockedRecording && !spaceOwnedElsewhere
+    }
+
     /// Recompute the lock-protected predicate the secondary tap
     /// reads. Called from every state transition that affects any
     /// of the three inputs: press / release of the recording hotkey,
     /// session start / end, lock event. Cheap — one bool write
-    /// under an unfair lock.
+    /// under an unfair lock. Delegates to the pure
+    /// `shouldEnableSpacebarLock` helper above so the predicate
+    /// itself is testable without standing up an AppState.
     fileprivate func updateSpacebarLockEnabled() {
         let isRecording: Bool
         if case .recording = recordingState { isRecording = true } else { isRecording = false }
-        // Hold+Space lock is suppressed when either the recording
-        // hotkey or the cancel binding IS Space — both cases would
-        // give Space ambiguous meaning (own-hotkey-consumed-by-self
-        // or simultaneously-cancel-and-lock through two taps on the
-        // same `.headInsertEventTap`). In those configurations
-        // Space's other role wins; Hold+Space silently disables.
-        let spaceOwnedElsewhere =
-            hotkeyBinding.code == "Space" ||
-            cancelHotkeyBinding.code == "Space"
-        let value = isRecording
-                 && pressStartedAt != nil
-                 && !lockedRecording
-                 && !spaceOwnedElsewhere
+        let value = Self.shouldEnableSpacebarLock(
+            isRecording: isRecording,
+            pressActive: pressStartedAt != nil,
+            lockedRecording: lockedRecording,
+            hotkeyCode: hotkeyBinding.code,
+            cancelCode: cancelHotkeyBinding.code
+        )
         spacebarLockEnabled.withLock { $0 = value }
     }
 

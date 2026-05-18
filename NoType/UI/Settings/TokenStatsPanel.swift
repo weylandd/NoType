@@ -1,18 +1,21 @@
 import SwiftUI
 
 /// Settings → API → Token usage panel. Segmented range picker
-/// (Today / 7d / 30d / All) over 4 stat cells: Input, Output,
-/// Cached, Cache hit rate. Reads from `appState.statsSummary`
-/// — the same `StatsSnapshot` mirror Home tab uses.
+/// (Today / 7d / 30d / All) over 3 stat cells: Input, Output, Cost.
+/// Reads from `appState.statsSummary` — the same `StatsSnapshot`
+/// mirror Home tab uses.
 ///
-/// Cache hit rate is **derived**, not stored — `cached / (input
-/// + cached) × 100`. When both are zero we render «—» rather
-/// than «0%» because «0%» reads as "real 0% hit rate" instead
-/// of "no data yet" (divide-by-zero invariant, plan §555).
+/// The cost cell is **derived** from token totals at the rates
+/// pinned in `GeminiPricing`. We factor in cached tokens (a subset
+/// of input) at the cache-read rate so the displayed dollar amount
+/// matches the actual Gemini bill, even though the cached count
+/// itself is no longer surfaced in the UI (revoked 2026-05-18 —
+/// not actionable for the typical user).
 ///
-/// Pure helpers live as static methods so they can be exercised
-/// without standing up a SwiftUI render harness — see
-/// `TokenStatsPanelTests`.
+/// Pure helpers (`formatCount`) live as static methods so they can
+/// be exercised without standing up a SwiftUI render harness — see
+/// `TokenStatsPanelTests`. The cost helpers live next door in
+/// `GeminiPricing` for the same reason.
 struct TokenStatsPanel: View {
     @Environment(AppState.self) private var appState
 
@@ -20,6 +23,11 @@ struct TokenStatsPanel: View {
 
     var body: some View {
         let totals = appState.statsSummary.tokenTotals(overLastDays: range.days)
+        let cost = GeminiPricing.cost(
+            input: totals.input,
+            output: totals.output,
+            cached: totals.cached
+        )
         VStack(alignment: .leading, spacing: DS.Space.s3) {
             HStack(alignment: .center) {
                 Text("Token usage")
@@ -32,11 +40,7 @@ struct TokenStatsPanel: View {
             HStack(alignment: .top, spacing: DS.Space.s4) {
                 TokenStatCell(label: "Input",  value: Self.formatCount(totals.input))
                 TokenStatCell(label: "Output", value: Self.formatCount(totals.output))
-                TokenStatCell(label: "Cached", value: Self.formatCount(totals.cached))
-                TokenStatCell(
-                    label: "Cache hit rate",
-                    value: Self.formatCacheHitRate(input: totals.input, cached: totals.cached)
-                )
+                TokenStatCell(label: "Cost",   value: GeminiPricing.formatCost(cost))
             }
         }
         .padding(.horizontal, DS.Space.s4)
@@ -46,21 +50,10 @@ struct TokenStatsPanel: View {
 
     // MARK: - Pure helpers (testable)
 
-    /// Cache hit rate, formatted as an integer percentage. Returns
-    /// «—» when `input + cached == 0` — distinguishes "no data
-    /// yet" from "real 0% hit rate" (which would still render as
-    /// «0%» when `input > 0 && cached == 0`).
-    static func formatCacheHitRate(input: Int, cached: Int) -> String {
-        let denom = input + cached
-        if denom == 0 { return "—" }
-        let pct = Double(cached) / Double(denom) * 100.0
-        return "\(Int(pct.rounded()))%"
-    }
-
     /// Integer count with grouping separator. 1234 → "1,234".
-    /// 0 still renders as "0" — divides between "no data" (—)
-    /// and "real zero" are handled at the rate-format level, not
-    /// the count level.
+    /// 0 still renders as "0" — there is no "no data" sentinel for
+    /// the count cells; if a window has no usage, every cell reads
+    /// "0" (and the Cost cell reads "$0.00").
     static func formatCount(_ n: Int) -> String {
         n.formatted(.number.grouping(.automatic))
     }
@@ -158,7 +151,7 @@ private struct TokenStatCell: View {
                 .tracking(0.5)
                 .lineLimit(1)
             Text(value)
-                .font(.system(size: 18, weight: .medium))
+                .font(DS.Font.title(.medium))
                 .foregroundStyle(DS.Color.textPrimary)
                 .monospacedDigit()
         }

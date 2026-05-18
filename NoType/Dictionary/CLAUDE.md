@@ -27,7 +27,7 @@ Two independent features behind the Dictionary tab:
 ## Hard rules
 
 - **Pinned by `GeminiRequestBuilderTests`:**
-  - `test_userDictionary_appearsAfterCategoryInstruction_beforeInsertionTarget`
+  - `test_userDictionary_appearsAfterUserLanguages_beforeInsertionTarget`
   - `test_userDictionary_emptyRendersEmptyBody_sectionStillPresent`
   - `test_userDictionary_rendersCommaSeparated`
   - `test_userDictionary_byteStable_betweenChunks_ofSameSession`

@@ -1,13 +1,18 @@
 import XCTest
 @testable import NoType
 
-/// Pins the two pure helpers backing `TokenStatsPanel`:
+/// Pins:
 ///
 ///   1. `TokenStatsRange.days` — the Today/7d/30d/All →
-///      `StatsSnapshot.tokenTotals(overLastDays:)` mapping.
-///   2. `TokenStatsPanel.formatCacheHitRate(input:cached:)` —
-///      the divide-by-zero invariant («—» when no usage recorded)
-///      and the round-to-integer percentage format.
+///      `StatsSnapshot.tokenTotals(overLastDays:)` mapping +
+///      the `.allCases` ordering rendered by the segmented picker.
+///   2. `GeminiPricing.cost(input:output:cached:)` — the
+///      cached-as-subset billing math + the rate constants.
+///   3. `GeminiPricing.formatCost(_:)` — the four formatter bands
+///      ($0 / <$0.01 / two-decimal / one-decimal / integer).
+///   4. End-to-end via `StatsSnapshot.tokenTotals(overLastDays:today:calendar:)`
+///      — windowed reads of synthetic day buckets feed cleanly into
+///      both `Self.formatCount` and the pricing helpers.
 final class TokenStatsPanelTests: XCTestCase {
 
     // MARK: - Range → days mapping
@@ -40,46 +45,125 @@ final class TokenStatsPanelTests: XCTestCase {
                        [.today, .last7, .last30, .all])
     }
 
-    // MARK: - Cache hit rate formatting
+    // MARK: - Pricing constants
 
-    func test_cacheHitRate_zeroInputAndZeroCached_returnsDash() {
-        // Divide-by-zero invariant (plan §555): no recorded
-        // sessions in the window must NOT render «0%» — the
-        // accuracy of «0%» is misleading (it reads as a real
-        // 0% hit rate, not "no data"). Show «—» instead.
-        let rendered = TokenStatsPanel.formatCacheHitRate(input: 0, cached: 0)
-        XCTAssertEqual(rendered, "—")
+    func test_pricingConstants_areCurrentGeminiFlashLiteRates() {
+        // Sanity-pin the rate constants so a "fix the formatter"
+        // commit can't silently change pricing math. Source:
+        // GeminiPricing.swift doc-comment.
+        XCTAssertEqual(GeminiPricing.inputPerMillion,  0.25,  accuracy: 1e-9)
+        XCTAssertEqual(GeminiPricing.outputPerMillion, 1.50,  accuracy: 1e-9)
+        XCTAssertEqual(GeminiPricing.cachedPerMillion, 0.025, accuracy: 1e-9)
     }
 
-    func test_cacheHitRate_300of1300_rounds_to23Percent() {
-        // Spec example from the plan §572: input=1000, cached=300
-        // → 300/(1000+300) = 23.07%, formatted «23%».
-        let rendered = TokenStatsPanel.formatCacheHitRate(input: 1000, cached: 300)
-        XCTAssertEqual(rendered, "23%")
+    // MARK: - Cost calculation
+
+    func test_cost_allZero_isZero() {
+        XCTAssertEqual(GeminiPricing.cost(input: 0, output: 0, cached: 0),
+                       0.0, accuracy: 1e-9)
     }
 
-    func test_cacheHitRate_allCached_returns100Percent() {
-        // Pathological-but-possible: a session where every input
-        // token hit the implicit cache (rare; would need a stable
-        // cache-prefix replay against a recently-warmed shard).
-        let rendered = TokenStatsPanel.formatCacheHitRate(input: 0, cached: 500)
-        XCTAssertEqual(rendered, "100%")
+    func test_cost_pureInputAndOutput_noCached() {
+        // 1M input @ $0.25 + 1M output @ $1.50 = $1.75 exactly.
+        let cost = GeminiPricing.cost(input: 1_000_000, output: 1_000_000, cached: 0)
+        XCTAssertEqual(cost, 1.75, accuracy: 1e-9)
     }
 
-    func test_cacheHitRate_noCached_returnsZeroPercent() {
-        // First session of a new prefix shape — nothing cached
-        // yet. «0%» is a real signal here (vs «—» which means
-        // "no data"), so distinguish the two by checking
-        // input > 0.
-        let rendered = TokenStatsPanel.formatCacheHitRate(input: 500, cached: 0)
-        XCTAssertEqual(rendered, "0%")
+    func test_cost_cachedIsSubsetOfInput_discountedAt10Percent() {
+        // 1M input total, of which 300K are cached.
+        //   billable input = 700K @ $0.25/M = $0.175
+        //   cached         = 300K @ $0.025/M = $0.0075
+        //   output         = 500K @ $1.50/M = $0.75
+        //   total                            = $0.9325
+        let cost = GeminiPricing.cost(input: 1_000_000, output: 500_000, cached: 300_000)
+        XCTAssertEqual(cost, 0.9325, accuracy: 1e-9)
     }
 
-    func test_cacheHitRate_smallNumbers_roundsCorrectly() {
-        // 1/2 = 50% exactly; the formatter must not round-down
-        // to 49%. Standard `Int(round(...))` covers this — pin
-        // it so a later switch to `Int(_:)` truncation is caught.
-        XCTAssertEqual(TokenStatsPanel.formatCacheHitRate(input: 1, cached: 1), "50%")
+    func test_cost_allCached_billsOnlyAtCachedRate() {
+        // 1M input all cached, no fresh prompt tokens.
+        //   billable input = 0
+        //   cached         = 1M @ $0.025/M = $0.025
+        //   output         = 0
+        let cost = GeminiPricing.cost(input: 1_000_000, output: 0, cached: 1_000_000)
+        XCTAssertEqual(cost, 0.025, accuracy: 1e-9)
+    }
+
+    func test_cost_cachedGreaterThanInput_clampsBillableToZero() {
+        // Pathological — would mean the snapshot is malformed
+        // (cached should be a subset of input). Defensive `max(0, …)`
+        // floors billable-input at zero rather than producing a
+        // negative number that would refund the user against the
+        // cached charge.
+        let cost = GeminiPricing.cost(input: 100, output: 0, cached: 500)
+        // billableInput = 0; cached = 500 @ $0.025/M = $0.0000125
+        XCTAssertEqual(cost, 500.0 * 0.025 / 1_000_000, accuracy: 1e-12)
+    }
+
+    // MARK: - Cost formatting bands
+
+    func test_formatCost_zero_rendersZeroDollars() {
+        XCTAssertEqual(GeminiPricing.formatCost(0), "$0.00")
+    }
+
+    func test_formatCost_negative_treatedAsZero() {
+        // No path produces a negative cost in production (the
+        // `max(0, …)` guard inside `cost(…)` prevents it), but the
+        // formatter should still hold the line if anyone passes one.
+        XCTAssertEqual(GeminiPricing.formatCost(-1), "$0.00")
+    }
+
+    func test_formatCost_subPenny_rendersLessThanOneCent() {
+        // Real usage but less than a cent — distinguishes a fresh
+        // window with a tiny amount of usage from a fresh window
+        // with no usage at all.
+        XCTAssertEqual(GeminiPricing.formatCost(0.005),  "<$0.01")
+        XCTAssertEqual(GeminiPricing.formatCost(0.0001), "<$0.01")
+    }
+
+    func test_formatCost_smallAmounts_useTwoDecimals() {
+        XCTAssertEqual(GeminiPricing.formatCost(0.01),  "$0.01")
+        XCTAssertEqual(GeminiPricing.formatCost(0.23),  "$0.23")
+        XCTAssertEqual(GeminiPricing.formatCost(1.75),  "$1.75")
+        XCTAssertEqual(GeminiPricing.formatCost(9.99),  "$9.99")
+    }
+
+    func test_formatCost_doubleDigitAmounts_useOneDecimal() {
+        // Keeps the three-cell row from breaking layout on width
+        // — once you're in $10+ territory, the precision of the
+        // hundredths digit is no longer interesting. `printf("%.1f", …)`
+        // banker-rounds halves (42.55 → 42.5 because the next exact
+        // float is 42.549999…), so the test pins the actual output
+        // rather than naive half-up rounding.
+        XCTAssertEqual(GeminiPricing.formatCost(10.0),  "$10.0")
+        XCTAssertEqual(GeminiPricing.formatCost(42.55), "$42.5")
+        // 99.95 stays in the 1-decimal band because the band check
+        // is `usd < 100` *before* formatter rounding — band-jumps on
+        // pre-rendered values keep the layout boundary predictable.
+        XCTAssertEqual(GeminiPricing.formatCost(99.95), "$100.0")
+    }
+
+    func test_formatCost_tripleDigitAmounts_dropDecimals() {
+        XCTAssertEqual(GeminiPricing.formatCost(100.0),  "$100")
+        // `printf("%.0f", 1234.5)` banker-rounds halves to even —
+        // 1234 is even so the result is "$1234", not "$1235".
+        XCTAssertEqual(GeminiPricing.formatCost(1234.5), "$1234")
+        XCTAssertEqual(GeminiPricing.formatCost(1235.5), "$1236") // 1236 is even
+    }
+
+    // MARK: - Count formatting
+
+    func test_formatCount_zero_rendersZero() {
+        XCTAssertEqual(TokenStatsPanel.formatCount(0), "0")
+    }
+
+    func test_formatCount_thousands_useGroupingSeparator() {
+        // 1234 → "1,234" in en-US locale. The actual separator
+        // varies by `Locale.current` ("." in ru-RU, " " in fr-FR) —
+        // we don't pin the literal because the test target inherits
+        // the host's locale.
+        let rendered = TokenStatsPanel.formatCount(1234)
+        XCTAssertTrue(rendered.contains("1") && rendered.contains("234"))
+        XCTAssertNotEqual(rendered, "1234", "Expected grouping separator")
     }
 
     // MARK: - Integration with StatsSnapshot
@@ -111,6 +195,14 @@ final class TokenStatsPanelTests: XCTestCase {
         XCTAssertEqual(totals.input,  100)
         XCTAssertEqual(totals.output, 50)
         XCTAssertEqual(totals.cached, 20)
+
+        // And the panel's cost would be derived from those totals.
+        let cost = GeminiPricing.cost(input: totals.input,
+                                      output: totals.output,
+                                      cached: totals.cached)
+        // billable = 80 @ $0.25/M = $0.00002; cached = 20 @ $0.025/M = $0.0000005;
+        // output = 50 @ $1.50/M = $0.000075; total ≈ $0.0000955 → formats "<$0.01"
+        XCTAssertEqual(GeminiPricing.formatCost(cost), "<$0.01")
     }
 
     func test_tokenTotals_all_sumsLifetime() {
