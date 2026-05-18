@@ -464,6 +464,21 @@ actor StatsStore {
         return snap
     }
 
+    /// Wipe every aggregate back to zero (totals, day / app / day×app
+    /// buckets, token counters). Driven by Settings → "Delete all
+    /// analytics". Returns the new (empty) snapshot so the caller can
+    /// update its observable mirror without a round-trip read. Mirror
+    /// of `HistoryStore.deleteAll()` — the two wipes are independent
+    /// so the user can clear transcripts without losing stats, and
+    /// vice-versa.
+    @discardableResult
+    func deleteAll() -> StatsSnapshot {
+        let empty = StatsSnapshot.empty
+        cached = empty
+        write(empty)
+        return empty
+    }
+
     // MARK: - Disk I/O
 
     private func readFromDisk() -> StatsSnapshot {

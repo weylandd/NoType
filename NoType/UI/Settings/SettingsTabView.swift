@@ -1,83 +1,59 @@
 import SwiftUI
 
-/// Settings tab root. Scrolled-with-headers form per plan §118 —
-/// internal sidebar was rejected because the main window is locked
-/// at 1080×760 and a second nav rail would steal too much horizontal
-/// budget. All 6 sections live in one `ScrollView`:
+/// Settings tab root for the redesigned Settings screen.
+/// Two-column shell inside the main window's content pane:
 ///
-///   General · Shortcuts · Microphone · Audio · API · System
+///   ┌──────────┬────────────────────────────────────────┐
+///   │ Settings │ Sticky header: "<title>"  ·  crumb pill │
+///   │ ────────│ ────────────────────────────────────────│
+///   │ General │                                          │
+///   │ Recording│   ScrollView                            │
+///   │ Language │     selected pane (one of 5)            │
+///   │ API     │       VStack of DSCards                  │
+///   │ About   │                                          │
+///   └──────────┴────────────────────────────────────────┘
 ///
-/// General section content shipped by U2; Shortcuts by U3;
-/// Microphone + Audio by U4 (two sections per the reference screenshot:
-/// Microphone holds the change-mic row, Audio holds Sound effects,
-/// Silence remover, and Music interruption); API by U6; System by U7 + U8.
+/// Five panes: General · Recording · Language & Paste · API & Usage ·
+/// About. Cross-pane state (rebind sheets, confirmation dialogs) is
+/// owned here so each pane stays a leaf value.
 struct SettingsTabView: View {
-    @Environment(AppState.self)            private var appState
-    @Environment(AppearanceController.self) private var appearance
-    @Environment(OnboardingState.self)     private var onboarding
-    @Environment(UpdateController.self)    private var updates
+    @Environment(AppState.self) private var appState
+    @Environment(OnboardingState.self) private var onboarding
+
+    @State private var selectedCategory: SettingsCategory = .general
 
     @State private var showResetConfirm = false
-    @State private var loginItemBusy = false
     @State private var showDeleteAllConfirm = false
+    @State private var showDeleteAnalyticsConfirm = false
     @State private var showRecordingRebind = false
     @State private var showCancelRebind = false
 
     var body: some View {
-        @Bindable var appState = appState
-        @Bindable var appearance = appearance
+        HStack(spacing: 0) {
+            SettingsSidebar(selection: $selectedCategory)
 
-        ScrollView {
-            VStack(alignment: .leading, spacing: DS.Space.s8) {
-                Text("Settings")
-                    .font(DS.Font.title())
-                    .foregroundStyle(DS.Color.textPrimary)
+            VStack(spacing: 0) {
+                SettingsContentHeader(
+                    title: selectedCategory.label,
+                    crumb: selectedCategory.crumb
+                )
 
-                DSSettingsSection(title: "General") {
-                    generalSectionBody(
-                        appState: appState,
-                        appearance: appearance
-                    )
+                ScrollView {
+                    pane(for: selectedCategory)
+                        .padding(.horizontal, DS.Space.s7 + 4)
+                        .padding(.top, DS.Space.s6)
+                        .padding(.bottom, DS.Space.s9)
+                        .frame(maxWidth: 760, alignment: .leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-
-                DSSettingsSection(title: "Shortcuts") {
-                    shortcutsSectionBody()
-                }
-
-                // Microphone section (U4): single status-style row
-                // ("Auto-detect" label + Change button) — the BT-avoidance
-                // toggle is intentionally not in the UI (default-ON; rare
-                // override via `defaults write notype.preferBuiltInOverBluetooth`).
-                DSSettingsSection(title: "Microphone") {
-                    MicChangeRow()
-                }
-
-                DSSettingsSection(title: "Audio") {
-                    audioSectionBody(appState: appState)
-                }
-
-                // TODO: when SaaS mode lands, gate this section on userMode.
-                // v1 ships BYOK-only; API section renders unconditionally.
-                DSSettingsSection(title: "API") {
-                    GeminiKeyRow()
-                    DSSeparator()
-                    TokenStatsPanel()
-                }
-
-                DSSettingsSection(title: "System") {
-                    systemSectionBody(appState: appState)
-                }
+                .background(DS.Color.bgBase)
             }
-            .padding(.horizontal, DS.Space.s6)
-            .padding(.top, DS.Space.s6)
-            .padding(.bottom, DS.Space.s8)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .onAppear {
             // SMAppService.mainApp has no KVO/publisher, so refresh
-            // whenever the Settings tab appears — picks up changes the
-            // user made in System Settings → Login Items without a
-            // restart.
+            // whenever the Settings tab appears — picks up changes
+            // the user made in System Settings → Login Items without
+            // a restart.
             appState.loginItemController.refresh()
         }
         .confirmationDialog(
@@ -85,9 +61,7 @@ struct SettingsTabView: View {
             isPresented: $showResetConfirm,
             titleVisibility: .visible
         ) {
-            Button("Reopen") {
-                onboarding.resetWizard()
-            }
+            Button("Reopen") { onboarding.resetWizard() }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Your API key, hotkey, and microphone choice will be preserved.")
@@ -104,14 +78,25 @@ struct SettingsTabView: View {
         } message: {
             Text("Your usage stats (session counts, word totals, token usage, and app breakdown) will be preserved.")
         }
+        .confirmationDialog(
+            "Delete all analytics?",
+            isPresented: $showDeleteAnalyticsConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Delete all", role: .destructive) {
+                appState.deleteAllStats()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Home dashboard counters, per-app breakdown, and Gemini token totals all reset to zero. Your transcripts and settings are kept.")
+        }
         .sheet(isPresented: $showRecordingRebind) {
             ShortcutRebindSheet(
                 kind: .recording,
                 currentBinding: appState.hotkeyBinding,
                 onCancel: { showRecordingRebind = false },
                 onCapture: { binding in
-                    let result = appState.applyHotkeyBinding(binding)
-                    switch result {
+                    switch appState.applyHotkeyBinding(binding) {
                     case .applied, .noChange:
                         return nil
                     case .rejectedDuringRecording:
@@ -130,8 +115,7 @@ struct SettingsTabView: View {
                 currentBinding: appState.cancelHotkeyBinding,
                 onCancel: { showCancelRebind = false },
                 onCapture: { binding in
-                    let result = appState.applyCancelHotkeyBinding(binding)
-                    switch result {
+                    switch appState.applyCancelHotkeyBinding(binding) {
                     case .applied, .noChange:
                         return nil
                     case .rejectedDuringRecording:
@@ -146,330 +130,25 @@ struct SettingsTabView: View {
         }
     }
 
-    // MARK: - General section
-
     @ViewBuilder
-    private func generalSectionBody(
-        appState: AppState,
-        appearance: AppearanceController
-    ) -> some View {
-        DSSettingsRow(
-            title: "Theme",
-            subtitle: "Adaptive follows your macOS appearance."
-        ) {
-            Picker("", selection: Binding(
-                get: { appearance.mode },
-                set: { appearance.mode = $0 }
-            )) {
-                ForEach(AppearanceMode.allCases, id: \.self) { mode in
-                    Text(mode.label).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 220)
-        }
-
-        DSSeparator()
-
-        loginItemRow(appState: appState)
-
-        DSSeparator()
-
-        DSSettingsRow(
-            title: "Prevent sleep while recording",
-            subtitle: "Keeps macOS awake during long dictation sessions."
-        ) {
-            Toggle("", isOn: Binding(
-                get: { appState.preventSleepDuringRecording },
-                set: { appState.preventSleepDuringRecording = $0 }
-            ))
-            .labelsHidden()
-            .toggleStyle(.switch)
-        }
-
-        DSSeparator()
-
-        DSSettingsRow(
-            title: "Reset onboarding",
-            subtitle: "Reopen the first-run wizard. Your API key, hotkey, and microphone choice stay put."
-        ) {
-            DSSecondaryButton(label: "Reset") {
-                showResetConfirm = true
-            }
-        }
-    }
-
-    private func loginItemRow(appState: AppState) -> some View {
-        let status = appState.loginItemController.status
-        let isOn = status.isEnabled
-        return VStack(alignment: .leading, spacing: 0) {
-            DSSettingsRow(
-                title: "Open NoType at login",
-                subtitle: status.requiresApproval
-                    ? "Approve NoType in System Settings → Login Items to finish enabling."
-                    : "Launch automatically when you sign in to your Mac."
-            ) {
-                HStack(spacing: DS.Space.s2) {
-                    if loginItemBusy {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                    Toggle("", isOn: Binding(
-                        get: { isOn },
-                        set: { newValue in
-                            loginItemBusy = true
-                            Task { @MainActor in
-                                await appState.loginItemController.setEnabled(newValue)
-                                loginItemBusy = false
-                            }
-                        }
-                    ))
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .disabled(loginItemBusy)
-                }
-            }
-            if status.requiresApproval {
-                HStack(spacing: DS.Space.s2) {
-                    Spacer()
-                    DSLinkButton(label: "Open Login Items in System Settings") {
-                        appState.loginItemController.openLoginItemsSettings()
-                    }
-                }
-                .padding(.horizontal, DS.Space.s4)
-                .padding(.bottom, DS.Space.s3)
-            }
-            if let err = appState.loginItemController.lastError {
-                Text(err)
-                    .font(DS.Font.bodySM())
-                    .foregroundStyle(DS.Color.dangerFg)
-                    .padding(.horizontal, DS.Space.s4)
-                    .padding(.bottom, DS.Space.s3)
-            }
-        }
-    }
-
-    // MARK: - Audio section (U4)
-    //
-    // One row: Music interruption picker (None / Mute / Pause) —
-    // Mute toggles the system default output's
-    // `kAudioDevicePropertyMute` for the recording-session duration;
-    // Pause sends a synthesised `NX_KEYTYPE_PLAY` media-key event on
-    // start (and again on stop) so apps that respond to system
-    // play/pause (Music, Spotify, Safari/YouTube, Chrome) toggle
-    // their playback. None = no-op.
-    //
-    // Sound-effects toggle deliberately not shipped — UI feedback
-    // (recording HUD, menu-bar icon state) is the visual confirmation
-    // surface; piping a system tone into the audio stack adds
-    // complexity without solving a real user problem.
-    //
-    // Silence-remover toggle deliberately not shipped — `PauseDetector`
-    // + Silero VAD already enforce pause boundaries, and an explicit
-    // RMS trim layered on top either duplicates that work or risks
-    // clipping stop-consonant closures the VAD correctly keeps inside
-    // the chunk.
-
-    @ViewBuilder
-    private func audioSectionBody(appState: AppState) -> some View {
-        @Bindable var appState = appState
-
-        DSSettingsRow(
-            title: "Music interruption",
-            subtitle: MusicInterruption.Mode.subtitle(for: appState.musicInterruptionMode)
-        ) {
-            Picker("", selection: $appState.musicInterruptionMode) {
-                ForEach(MusicInterruption.Mode.allCases, id: \.self) { mode in
-                    Text(mode.label).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 240)
-        }
-    }
-
-    // MARK: - Shortcuts section (U3 Phase 1)
-    //
-    // Two rebindable shortcuts + an explanation of how the press /
-    // release / double-tap state machine works. Hold+Space lock is a
-    // Phase 2 extension — the explanation here covers what actually
-    // ships today.
-
-    @ViewBuilder
-    private func shortcutsSectionBody() -> some View {
-        recordingShortcutRow()
-        DSSeparator()
-        cancelShortcutRow()
-        DSSeparator()
-        shortcutsExplanation()
-    }
-
-    private func recordingShortcutRow() -> some View {
-        DSSettingsRow(
-            title: "Recording shortcut",
-            subtitle: "Hold to record · double-tap or hold + Space to lock the session."
-        ) {
-            HStack(spacing: DS.Space.s3) {
-                ShortcutPill(binding: appState.hotkeyBinding)
-                DSSecondaryButton(label: "Change") {
-                    showRecordingRebind = true
-                }
-                .disabled(appState.recordingState != .idle)
-            }
-        }
-    }
-
-    private func cancelShortcutRow() -> some View {
-        DSSettingsRow(
-            title: "Cancel shortcut",
-            subtitle: "Press this key during a recording to abort without pasting. Default: Escape."
-        ) {
-            HStack(spacing: DS.Space.s3) {
-                ShortcutPill(binding: appState.cancelHotkeyBinding)
-                DSSecondaryButton(label: "Change") {
-                    showCancelRebind = true
-                }
-                .disabled(appState.recordingState != .idle)
-            }
-        }
-    }
-
-    private func shortcutsExplanation() -> some View {
-        VStack(alignment: .leading, spacing: DS.Space.s2) {
-            Text("How recording works")
-                .font(DS.Font.bodySM(.semibold))
-                .foregroundStyle(DS.Color.textPrimary)
-            ExplanationBullet(
-                heading: "Hold to record",
-                text: "Press and hold the recording shortcut, release to finalize and paste."
+    private func pane(for category: SettingsCategory) -> some View {
+        switch category {
+        case .general:
+            GeneralPane(onResetOnboarding: { showResetConfirm = true })
+        case .recording:
+            RecordingPane(
+                onChangeRecordingShortcut: { showRecordingRebind = true },
+                onChangeCancelShortcut: { showCancelRebind = true }
             )
-            ExplanationBullet(
-                heading: "Double-tap to lock",
-                text: "Tap the shortcut twice within 300 ms to keep recording hands-free. Tap once more to finalize and paste."
+        case .languagePaste:
+            LanguagePastePane(
+                onDeleteAllTranscripts: { showDeleteAllConfirm = true },
+                onDeleteAllAnalytics: { showDeleteAnalyticsConfirm = true }
             )
-            ExplanationBullet(
-                heading: "Hold + Space to lock",
-                text: "While holding the recording shortcut, press Space to lock the session — release and Space won't type into the focused app. Tap the shortcut to finalize and paste."
-            )
-            ExplanationBullet(
-                heading: "Cancel",
-                text: "Press the cancel shortcut at any time to abort the in-flight recording without pasting."
-            )
-        }
-        .padding(.horizontal, DS.Space.s4)
-        .padding(.vertical, DS.Space.s3 + 2)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    // MARK: - System section (U7)
-    //
-    // Paste restore delay (`PasteSettings.restoreDelayMs`) lives in
-    // code with a 150 ms default — covers AppKit / Slack / Discord /
-    // Terminal. Deliberately NOT surfaced in Settings (too technical
-    // for the average user). If a user reports "NoType pastes my old
-    // clipboard", the support recipe is to bump the UserDefaults key
-    // `notype.pasteRestoreDelayMs` to 200–250 ms manually.
-
-    @ViewBuilder
-    private func systemSectionBody(appState: AppState) -> some View {
-        OutputLanguagePicker()
-
-        DSSeparator()
-
-        DSSettingsRow(
-            title: "Delete all transcripts",
-            subtitle: "Removes the last-10 transcripts kept in the menu-bar popover. Stats are preserved."
-        ) {
-            DSSecondaryButton(label: "Delete all") {
-                showDeleteAllConfirm = true
-            }
-        }
-
-        DSSeparator()
-
-        updatesRow()
-    }
-
-    // MARK: - Updates row (U8)
-    //
-    // Manual "Check for updates" affordance + current-version
-    // display. The X chip on the sidebar `UpdateBanner` is the
-    // per-version skip surface (`SPUUserUpdateChoice.skip` via
-    // `UpdateController.skipThisVersion()`); this button just
-    // routes through `SPUUpdater.checkForUpdates()` so users
-    // don't have to wait for the 24 h scheduled check.
-
-    private func updatesRow() -> some View {
-        DSSettingsRow(
-            title: "Updates",
-            subtitle: "NoType \(Self.currentVersionString) · Checks automatically every 24 hours."
-        ) {
-            DSPrimaryButton(
-                label: updates.phase == .checking ? "Checking…" : "Check for updates",
-                size: .small,
-                isLoading: updates.phase == .checking,
-                isEnabled: updates.phase != .checking,
-                accessibilityLabelOverride: "Check for updates"
-            ) {
-                updates.checkForUpdates()
-            }
-        }
-    }
-
-    private static var currentVersionString: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
-    }
-}
-
-// MARK: - Shortcut row helpers
-
-/// Inline pill rendering a `HotkeyBinding` for the Settings rows.
-/// Matches the compact size used in the rebind sheet so the row + the
-/// sheet's captured-key chip read as the same surface.
-private struct ShortcutPill: View {
-    let binding: HotkeyBinding
-
-    var body: some View {
-        Text(binding.displayWord)
-            .font(.system(size: 12, weight: .medium, design: .monospaced))
-            .foregroundStyle(DS.Color.textPrimary)
-            .padding(.horizontal, DS.Space.s2 + 2)
-            .padding(.vertical, 4)
-            .background(
-                DS.Color.bgSurface,
-                in: RoundedRectangle(cornerRadius: DS.Radius.sm)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: DS.Radius.sm)
-                    .strokeBorder(DS.Color.borderSubtle, lineWidth: DS.Border.hairline)
-            )
-            .accessibilityLabel(binding.displayWord)
-    }
-}
-
-/// Single bullet inside the "How recording works" explanation block.
-/// Heading and body wrap on overflow so the section keeps a stable
-/// width regardless of localised copy length.
-private struct ExplanationBullet: View {
-    let heading: String
-    let text: String
-
-    var body: some View {
-        HStack(alignment: .top, spacing: DS.Space.s2) {
-            Text("•")
-                .font(DS.Font.bodySM())
-                .foregroundStyle(DS.Color.textTertiary)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(heading)
-                    .font(DS.Font.bodySM(.medium))
-                    .foregroundStyle(DS.Color.textSecondary)
-                Text(text)
-                    .font(DS.Font.bodySM())
-                    .foregroundStyle(DS.Color.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+        case .apiUsage:
+            APIUsagePane()
+        case .about:
+            AboutPane()
         }
     }
 }

@@ -457,6 +457,19 @@ final class AppState {
         }
     }
 
+    /// Wipe every aggregate stat (totals, day / app / day×app buckets,
+    /// token counters). Driven by Settings → "Delete all analytics".
+    /// Symmetric to `deleteAllHistory()` — independent so the user
+    /// can scrub one without the other. Optimistic in-memory update
+    /// + fire-and-forget disk write through the actor; the next
+    /// `record(_:tokens:)` call starts accumulating from zero.
+    func deleteAllStats() {
+        statsSummary = .empty
+        Task { [statsStore] in
+            await statsStore.deleteAll()
+        }
+    }
+
     // MARK: - API key
 
     /// Reads the cached key, falling back to env var + Keychain on first

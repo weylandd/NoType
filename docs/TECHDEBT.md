@@ -15,6 +15,7 @@ See `docs/solutions/README.md` for the frontmatter contract and body structure.
 - [Narrow BT-input avoidance to classic BT once LE Audio is reliably HFP-free](solutions/documentation-gaps/bt-le-audio-airpods-pro-2-narrowing-2026-05-16.md) — **M**; AirPods Pro 2 + LE Audio is in the fallback unnecessarily.
 - [Positive-spelling AX fixture for prompt-eval](solutions/documentation-gaps/positive-spelling-ax-fixture-2026-05-18.md) — **S**; recorded fixture missing, test removed in PR #47.
 - [Dynamic terminal-app detection via AppCategorizer](solutions/documentation-gaps/dynamic-terminal-detection-2026-05-18.md) — **M**; R5 gate bypassed for terminals outside the hardcoded 8-entry set.
+- [Token usage deltas + cache-hits indicator](solutions/documentation-gaps/token-usage-deltas-and-cache-hits-2026-05-18.md) — **M**; Settings → API & Usage panel ships v1 without per-period deltas or cache-hit %.
 
 ## Closing an entry
 
