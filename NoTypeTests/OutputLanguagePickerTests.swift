@@ -5,6 +5,11 @@ import XCTest
 /// chip-strip rendering. SwiftUI render is verified via interactive
 /// smoke (Settings → System → Output language → Edit) — no snapshot
 /// infrastructure in repo yet (mirrors the U1/U6 convention).
+///
+/// Marked `@MainActor` because `OutputLanguagePicker.subtitle(for:)`
+/// and `displayChips(for:)` are static methods on a SwiftUI `View`
+/// (implicitly `@MainActor` under Swift 6 strict concurrency).
+@MainActor
 final class OutputLanguagePickerTests: XCTestCase {
 
     // MARK: - subtitle(for:)

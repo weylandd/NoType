@@ -13,6 +13,11 @@ import XCTest
 ///   4. End-to-end via `StatsSnapshot.tokenTotals(overLastDays:today:calendar:)`
 ///      — windowed reads of synthetic day buckets feed cleanly into
 ///      both `Self.formatCount` and the pricing helpers.
+///
+/// Marked `@MainActor` because `TokenStatsPanel.formatCount(_:)` is
+/// a static method on a SwiftUI `View` (and SwiftUI Views are
+/// implicitly `@MainActor` under Swift 6 strict concurrency).
+@MainActor
 final class TokenStatsPanelTests: XCTestCase {
 
     // MARK: - Range → days mapping

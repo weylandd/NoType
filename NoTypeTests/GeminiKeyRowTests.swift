@@ -13,6 +13,12 @@ import XCTest
 ///   3. Case-mapped messages for `.missingKey` and `.http(401)`;
 ///      fallback to `error.localizedDescription` for everything
 ///      else (already body-redacted by `GeminiError`).
+///
+/// Marked `@MainActor` because `GeminiKeyRow` is a SwiftUI `View`
+/// and under Swift 6 strict concurrency its static methods inherit
+/// the `@MainActor` isolation. CI's Swift toolchain enforces this
+/// at compile time; older toolchains let it slide silently.
+@MainActor
 final class GeminiKeyRowTests: XCTestCase {
 
     // MARK: - Mask format
