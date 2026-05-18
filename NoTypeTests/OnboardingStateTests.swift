@@ -84,6 +84,31 @@ final class OnboardingStateTests: XCTestCase {
         XCTAssertNil(defaultsSuite.object(forKey: OnboardingState.completeKey))
     }
 
+    /// `resetWizard` must also clear the two `permissions.*.hasAsked`
+    /// flags so a user who re-opens the wizard via Settings sees the
+    /// neutral "REQUIRED" surface again on the Permissions step, not
+    /// the leftover red "DENIED" from their pre-reset state. Pinned
+    /// by Permissions/CLAUDE.md invariant 6.
+    @MainActor
+    func test_resetWizard_clearsPermissionHasAskedFlags() async {
+        // Simulate a user who completed onboarding and then explicitly
+        // refused (or just landed on the row) both permissions.
+        defaultsSuite.set(true, forKey: OnboardingState.completeKey)
+        defaultsSuite.set(true, forKey: AccessibilityPermission.hasAskedKey)
+        defaultsSuite.set(true, forKey: ScreenRecordingPermission.hasAskedKey)
+
+        OnboardingState.resetWizardDefaults(in: defaultsSuite)
+
+        XCTAssertNil(
+            defaultsSuite.object(forKey: AccessibilityPermission.hasAskedKey),
+            "resetWizard must clear the Accessibility hasAsked flag so the re-run wizard renders yellow REQUIRED instead of red DENIED."
+        )
+        XCTAssertNil(
+            defaultsSuite.object(forKey: ScreenRecordingPermission.hasAskedKey),
+            "resetWizard must clear the Screen Recording hasAsked flag for the same reason."
+        )
+    }
+
     // MARK: - Instance behaviour
 
     @MainActor
