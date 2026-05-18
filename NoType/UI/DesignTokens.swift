@@ -133,27 +133,41 @@ enum DS {
 
         // Settings primitives — Tier-1 redesign tokens (plan 2026-05-18-003).
         // Each replaces an inline `.opacity(...)` literal flagged by the
-        // project-standards reviewer. Theme-shared because they all
-        // operate as subtle overlays on top of dark or light surfaces;
-        // no per-mode override required.
+        // project-standards reviewer.
+        //
+        // Three of the four are theme-aware derivatives of existing
+        // dynamic colors, so they spell out per-theme RGBA tuples rather
+        // than wrapping `Color.opacity(_:)` over a dynamic NSColor at
+        // static-let scope — see
+        // `solutions/design-patterns/ds-primitives-opt-in-extension-patterns-2026-05-17.md`
+        // (Technique 4). `segmentedPressedShadow` is theme-shared black
+        // and stays as a single `Color.opacity` literal.
         //
         // `segmentedPressedShadow` — drop shadow under the pressed
-        //   `DSSegmented` segment. Fakes the spec's `inset 0 1px 0
-        //   rgba(0,0,0,0.20)` chip raise.
-        // `calloutSurface` — `bgInset` at 70 % alpha for the
-        //   "How recording works" callout, slightly more diffuse than
-        //   raw `bgInset` so it reads as a recessed card-in-card.
-        // `statusDotGlow` — 60 % of `successFg` painted as a glow on
-        //   the mic-source pill's active dot. Theme-shared (the dot's
-        //   base colour already adapts).
-        // `headerBackdropTint` — 40 % of `bgBase` layered over
-        //   `.ultraThinMaterial` for the Settings sticky header. The
-        //   material does the blur; this tint biases the result toward
-        //   the design's 88 % `bg-base` look.
+        //   `DSSegmented` segment. Theme-shared black @ 18 %.
+        // `calloutSurface` — bgInset @ 70 % for the "How recording
+        //   works" callout, slightly more diffuse than raw bgInset so
+        //   it reads as a recessed card-in-card.
+        //   Anchors: bgInset light=#F2F0EC, dark=#040507.
+        // `statusDotGlow` — successFg @ 60 % as a glow on the
+        //   mic-source pill's active dot.
+        //   Anchors: successFg light=#006317, dark=#5CD68A.
+        // `headerBackdropTint` — bgBase @ 40 % layered over
+        //   `.ultraThinMaterial` for the Settings sticky header.
+        //   Anchors: bgBase light=#FEFCF9, dark=#0D0E11.
         static let segmentedPressedShadow = SwiftUI.Color.black.opacity(0.18)
-        static let calloutSurface         = DS.Color.bgInset.opacity(0.7)
-        static let statusDotGlow          = DS.Color.successFg.opacity(0.6)
-        static let headerBackdropTint     = DS.Color.bgBase.opacity(0.4)
+        static let calloutSurface         = SwiftUI.Color.dsDynamic(
+            lightRGBA: (242/255, 240/255, 236/255, 0.70),
+            darkRGBA:  (  4/255,   5/255,   7/255, 0.70)
+        )
+        static let statusDotGlow          = SwiftUI.Color.dsDynamic(
+            lightRGBA: (  0/255,  99/255,  23/255, 0.60),
+            darkRGBA:  ( 92/255, 214/255, 138/255, 0.60)
+        )
+        static let headerBackdropTint     = SwiftUI.Color.dsDynamic(
+            lightRGBA: (254/255, 252/255, 249/255, 0.40),
+            darkRGBA:  ( 13/255,  14/255,  17/255, 0.40)
+        )
 
         // 40 % danger — used for the row background of a permission
         // that's in the `denied` state. Reads as a flag tint that the
