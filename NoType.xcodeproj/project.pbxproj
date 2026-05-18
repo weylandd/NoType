@@ -23,6 +23,7 @@
 		16D96B2C7909AAC01B86EDE1 /* code_switch_en_es.m4a in Resources */ = {isa = PBXBuildFile; fileRef = 47CF0C0DD773EAC8DB67A6CC /* code_switch_en_es.m4a */; };
 		17B80FF819A0E9FDF2E1134A /* GeminiClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7C9AEDB2C6A5F32D6870A5A /* GeminiClient.swift */; };
 		18C16507776B81CDFF6C9429 /* ErrorHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CD5FAA39C9FB564C0ACD614 /* ErrorHUD.swift */; };
+		1973C3B0112B7D8B4B3ED5CA /* UpdateControllerStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F17A0DC88E82D837C35A39C7 /* UpdateControllerStateTests.swift */; };
 		1E45318BC76B3378CFC174ED /* HotkeyBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED9E83013132F9DAF21E4CCC /* HotkeyBinding.swift */; };
 		1F9E6C413FB5AE9A3CF7CE5D /* HotkeyMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F882349365E9F505405CE99 /* HotkeyMonitor.swift */; };
 		2239C947F1842F2E6E44A1EC /* OnboardingFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40FA8D4F920AE01822A1F8E6 /* OnboardingFlow.swift */; };
@@ -297,6 +298,7 @@
 		EDE9F8818EBC3728E41B239F /* MicInputPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicInputPicker.swift; sourceTree = "<group>"; };
 		EFDC45D6025A918A7D76A25C /* TextInjector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextInjector.swift; sourceTree = "<group>"; };
 		F159E8C235DD94D991FE3771 /* DSComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DSComponents.swift; sourceTree = "<group>"; };
+		F17A0DC88E82D837C35A39C7 /* UpdateControllerStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateControllerStateTests.swift; sourceTree = "<group>"; };
 		F4E4B5E00C8DB6543B55825D /* AudioSpectrum.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioSpectrum.swift; sourceTree = "<group>"; };
 		F6A0D6ADDA12FA10A1E3ACE6 /* AccessibilityTreeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityTreeTests.swift; sourceTree = "<group>"; };
 		F7C09AE05BF032CD7B5770A5 /* ContextSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextSnapshot.swift; sourceTree = "<group>"; };
@@ -582,6 +584,7 @@
 				631D4A860096B1F0D33547B0 /* TextReplacementEngineTests.swift */,
 				A316EB133CAFF6FEB44D8797 /* TokenStatsPanelTests.swift */,
 				C0DC7098DB4AFCBD975E3972 /* TokenUsageTests.swift */,
+				F17A0DC88E82D837C35A39C7 /* UpdateControllerStateTests.swift */,
 				3C1C62F4FBC068F50C44F23A /* Fixtures */,
 			);
 			path = NoTypeTests;
@@ -936,6 +939,7 @@
 				507D5469915CEC43E4F27812 /* TextReplacementEngineTests.swift in Sources */,
 				15F2F4D59657AB01080765A7 /* TokenStatsPanelTests.swift in Sources */,
 				5B7AB75F219A3892F0C86298 /* TokenUsageTests.swift in Sources */,
+				1973C3B0112B7D8B4B3ED5CA /* UpdateControllerStateTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

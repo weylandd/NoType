@@ -3,7 +3,7 @@ title: Settings Screen — Implementation Progress
 plan: docs/plans/2026-05-18-001-feat-settings-screen-plan.md
 branch: feat/settings-screen
 status: in-progress
-last_updated: 2026-05-18 (U7 shipped)
+last_updated: 2026-05-18 (U8 wired — manual smoke pending)
 ---
 
 # Settings Screen — Implementation Progress
@@ -25,18 +25,21 @@ Entry-point convention for follow-up sessions: pick the next pending unit in dep
 | U4. Microphone & Audio — Core Audio HAL rewrite (R16 reframed) | §399-458 | ⏳ Pending | — | Depends on U1 (done). ~1-2 weeks of work. Characterization-first per execution note. Requires hardware smoke on AirPods + Music for primary success criterion |
 | U6. API section — Gemini key Edit + windowed token stats | §524-578 | ✅ Shipped | _next commit_ | `GeminiKeyRow` (masked `AIzaSy••••••••` + Edit sheet → validate-then-save reusing existing `validateGeminiKey` + `updateAPIKey`) / `TokenStatsPanel` (Today/7d/30d/All × Input/Output/Cached/Cache hit rate, divide-by-zero → `—`). Section unconditional in v1; `// TODO: when SaaS mode lands…` comment retained. 18 new tests (9 `GeminiKeyRowTests` + 9 `TokenStatsPanelTests`). Body-leak invariant pinned by `test_errorBody_doesNotLeakIntoUILabel` |
 | U7. System — Output language / Delete all + cache-prefix integration | §584-646 | ✅ Shipped | _next commit_ | New always-present cache-prefix section `User languages:` at position 4 (frozen at session start from `AppState.outputLanguages`, mirrors `User dictionary:` shape). Curated ~100-entry BCP-47 list bundled as `Settings/SupportedLanguages.json`. Sheet-based picker (search + multi-select + DSWordChip strip). `HistoryStore.deleteAll()` empties history only; stats untouched (cross-store test pins the carve-out). **Paste restore delay slider deliberately omitted from UI** — too technical; stays in `PasteSettings` with 150 ms default. System prompt enumerations extended in both full + lite paths; new `# User languages` subsections added with minimal prompt-master rubric (audio-wins, never-content-pool). 32 new tests (7 `GeminiRequestBuilderTests` userLanguages cases + extended fixtures, 11 `SupportedLanguagesTests`, 6 `OutputLanguagePickerTests`, 8 `HistoryStoreTests` cases) |
-| U8. Updates — Check button + per-version skip via X chip | §650-707 | ⏳ Pending | — | Depends on U1 (done). Manual smoke against EdDSA-signed staged release before removing `Updates/CLAUDE.md` Hard rule |
+| U8. Updates — Check button + per-version skip via X chip | §650-707 | 🟡 Wired (smoke pending) | _next commit_ | `UpdateController.checkForUpdates()` + `.skipThisVersion()` shipped; `AvailableBannerCard` carries trailing `DSCloseButton(size: .compact)`; System section `Updates` row drives the Check button (disabled during `.checking`). 10 new `UpdateControllerStateTests`. **Two CLAUDE.md Hard rules NOT removed yet** — preamble note added per plan §682-686 gating order: manual smoke against EdDSA-signed staged release first, then deletion |
 
 ---
 
 ## Recommended next session entry point
 
-**U8 (Updates — Check button + per-version skip via X chip).** Recommended next because:
-- Smallest remaining unit — Sparkle "Check now" button + per-version skip chip wired through the existing `UpdateController` / `UpdateUserDriver`.
-- No hardware dependency; manual smoke against an EdDSA-signed staged release is the only gate before lifting the `Updates/CLAUDE.md` Hard rule.
-- Same dependency profile as U6/U7 (just U1 — done).
+**U8 manual smoke** (post-shipping gate). Until this runs, the two `Updates/CLAUDE.md` Hard rules stay in place under a preamble note. Sequence per plan §682-686:
+1. Cut an EdDSA-signed staged release `v0.0.1-rc1` (CI workflow or `scripts/release.sh` + `scripts/publish_release.sh`).
+2. Install `rc1`, wait for the banner, click the X chip.
+3. Wait for the next scheduled check (override `SUScheduledCheckInterval` to 60 s in a debug Info.plist if you don't want to wait 24 h) → confirm **no** re-show for `rc1`.
+4. Publish `v0.0.1-rc2` → confirm banner reappears.
 
-**Alternatives if a different unit makes sense:**
+If smoke passes: tiny follow-up commit deletes the two rules + the preamble in `NoType/Updates/CLAUDE.md`. If smoke fails: add `notype.update.skippedVersion: String` UserDefaults flag and have `UpdateUserDriver.showUpdateFound(...)` filter against it before publishing `.available(update)` — Sparkle's persistence may live in `SPUStandardUserDriver` which we bypass.
+
+**Alternatives for the next session:**
 - **U3** if hotkey ergonomics are a felt pain (Hold+Space mode, custom cancel shortcut). Recording-mode `.effective(stored:hotkey:)` helper from carryover item #5 lands here.
 - **U4** is the largest single unit; tackle when there's a multi-day window with hardware (AirPods + Music) available for the R16-reframed smoke.
 
@@ -81,6 +84,15 @@ Entry-point convention for follow-up sessions: pick the next pending unit in dep
 - **No new `AppState` API surface for `outputLanguages`.** Same `var outputLanguages: [String] { didSet { UserDefaults… } }` pattern as `preventSleepDuringRecording` (U2 precedent). UserDefaults backing uses plist `[String]` directly via `array(forKey:) as? [String] ?? []`. The picker binds straight through `@Bindable var appState = appState`.
 - **Paste restore delay deliberately omitted from the System section UI.** Plan §584 / §641-642 specified exposing it as a 50–500 ms slider, but on visual review the slider read as too technical for the typical user (Slack/Discord/Terminal all work fine on the 150 ms default). The `PasteSettings.restoreDelayMs` getter/setter stays in code — `TextInjector` still reads it on every paste — so a support recipe of "bump UserDefaults key `notype.pasteRestoreDelayMs` to 200–250 ms" remains available for the rare "wrong text pasted" report. R25 closes without the slider; `TextInjector` behaviour is unchanged.
 
+### U8 (session 2026-05-18)
+
+- **`AvailableBannerCard` introduced as a sibling view to `BannerShell`**, not as a parameter on `BannerShell`. macOS SwiftUI does not let a nested `.plain` Button receive its own clicks when wrapped inside another `.plain` Button — the parent steals the tap. The fix is `.contentShape(Rectangle()) + .onTapGesture` on the main body (with explicit `accessibilityAddTraits(.isButton)`) so the inner `DSCloseButton` (itself a `.plain` Button) hit-tests normally. Other phases (`.downloading`, `.extracting`, `.installing`, hidden `.idle/.checking/.failed`) keep the existing `BannerShell` shape — only `.available` needs the two-target layout.
+- **Hard rules NOT removed yet.** Plan §682-686 is explicit: ship the code, smoke against a staged release, *then* delete the rules. Removal in this commit would be a documented-but-unverified claim. The preamble note in `NoType/Updates/CLAUDE.md` (under "### Hard rules pending smoke verification") spells out the smoke script and the fallback path (local `notype.update.skippedVersion` filter in `UpdateUserDriver.showUpdateFound`) if Sparkle's `.skip` persistence turns out to live in `SPUStandardUserDriver` (which our custom driver bypasses).
+- **Settings → System gets a third row, not a new section.** Plan §659 says "System section — Current version row + Check for updates button". Adding "Updates" as a 6th top-level section would have read as more weight than the surface deserves (one button + a subtitle line). The row pattern matches "Delete all transcripts" — secondary control on the right, descriptive subtitle on the left.
+- **`DSPrimaryButton` over `DSSecondaryButton`** for the Check button — primary because it's the row's call-to-action, mirrors how onboarding's "Continue" button reads as primary across the wizard. Disabled + spinner state during `.checking` reuses the existing `isLoading + isEnabled` parameters (no new component).
+- **Synthetic-closure tests over Sparkle SDK mocking.** `UpdateController.init` constructs an `SPUUpdater` against `Bundle.main` but never calls `start()`, so no Sparkle network / appcast / EdDSA work happens during a test. The pending `*Reply` slots are `internal` (already commented as the controller↔driver bridge surface) so tests can install a synthetic closure that captures the dispatched `SPUUserUpdateChoice` directly. The `@MainActor` annotation on the test class mirrors `FixedSizeWindowConfiguratorTests`.
+- **Reply slot guard belt-and-braces.** `skipThisVersion()` returns early when `pendingUpdateReply == nil` (no banner), and `installNow()` and `dismiss()` were already nil-guarded. Pinned by `test_skipThisVersion_doubleClick_isSafe` (second call after slot was nil'd must not crash and must not re-fire) and `test_skipThisVersion_withoutPendingReply_isNoOp`.
+
 ### U5 (session 2026-05-18)
 
 - **Path (a) chosen** (plan §473 recommended). Existing `transcribe / transcribeBatch / transcribeShort` keep `String` returns as backwards-compat shims; new `*WithUsage` overloads return `(text, tokens)` tuples. Private `sendRequest` / `performOnce` return types changed once, shared by both surfaces. PromptEvalHarness untouched (reads `lastUsage` separately — still populated).
@@ -123,8 +135,9 @@ Items the implementation surfaced that need attention in the relevant follow-up 
 | `SupportedLanguagesTests` | 11 | Bundle decode succeeds with ≥80 entries; common lookups (`en`/`ru`/`zh`/`ja`) resolve to expected English names; codes are unique; `byCode` index covers `all`; `filter` empty / whitespace query returns all; case-insensitive english-name + code match; native-script needle ("Русский") matches; non-existent needle returns empty |
 | `OutputLanguagePickerTests` | 6 | `subtitle(for:)` empty / non-empty / unknown-code paths; `displayChips(for:)` resolves known codes to native names, preserves order, falls back to bare code for unknown codes (covers future SupportedLanguages.json trims) |
 | `HistoryStoreTests` (new file) | 8 | Round-trip across instances; FIFO eviction at the 10-entry boundary; `remove(id:)` drops target / no-ops for missing id; `deleteAll` empties + persists across instances + is idempotent; cross-store contract pinned — `deleteAll` does not touch a sibling `stats.json` (AE7 carve-out boundary) |
+| `UpdateControllerStateTests` (new file) | 10 | `setPhase` transitions + same-value no-op; `skipThisVersion` dispatches `.skip` + clears all three pending slots + returns to `.idle`; double-click safe (single dispatch); no-op when reply slot empty; regression guard that `dismiss()` dispatches `.dismiss` and `installNow()` dispatches `.install` (never `.skip`); `AvailableUpdate` equality matches by `versionString` |
 
-**Net:** 635 / 635 pass excluding live-API `PromptEvalTests`.
+**Net:** 645 / 645 pass excluding live-API `PromptEvalTests` (pending build verification).
 
 ---
 

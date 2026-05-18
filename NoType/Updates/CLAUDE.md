@@ -4,10 +4,10 @@ Auto-update path for NoType, built on **Sparkle 2** (SPM dependency, `from: 2.6.
 
 ## Files
 
-- `UpdateController.swift` — `@MainActor @Observable` SwiftUI-facing controller. Wraps `SPUUpdater`, exposes `phase`, drives the sidebar banner.
-- `UpdateUserDriver.swift` — custom `SPUUserDriver`. Routes every Sparkle UI event into `UpdateController.phase` instead of showing Sparkle's modal alert. Captures Sparkle's reply callbacks so the banner's click can dispatch `.install` / `.dismiss` back into Sparkle's state machine.
+- `UpdateController.swift` — `@MainActor @Observable` SwiftUI-facing controller. Wraps `SPUUpdater`, exposes `phase`, drives the sidebar banner. Public methods: `installNow()` (banner main-body tap), `dismiss()` (postpone — `.dismiss`), `skipThisVersion()` (X chip on `.available` banner — `.skip`), `checkForUpdates()` (Settings → Updates button).
+- `UpdateUserDriver.swift` — custom `SPUUserDriver`. Routes every Sparkle UI event into `UpdateController.phase` instead of showing Sparkle's modal alert. Captures Sparkle's reply callbacks so the banner's click can dispatch `.install` / `.dismiss` / `.skip` back into Sparkle's state machine.
 
-UI surface: `NoType/UI/UpdateBanner.swift` (rendered at the bottom of the main-window sidebar via `MainWindowView.sidebar`).
+UI surface: `NoType/UI/UpdateBanner.swift` (rendered at the bottom of the main-window sidebar via `MainWindowView.sidebar`) — `.available` phase uses the `AvailableBannerCard` variant with a trailing X chip. Settings → Updates row in `NoType/UI/Settings/SettingsTabView.swift` drives `checkForUpdates()`.
 
 ## Invariants
 
@@ -26,9 +26,20 @@ UI surface: `NoType/UI/UpdateBanner.swift` (rendered at the bottom of the main-w
 ## Hard rules
 
 - **Forgetting `SUPublicEDKey` or pointing at the wrong key is silent at build time** — every update is rejected at runtime with a signature mismatch. The release workflow signs with the private counterpart via `sign_update`; the two must match.
-- **Don't ship a non-debug "Check for Updates" entry point** without a product discussion — it would also require a "skip this version" surface, which we don't have. For QA, add a temporary `#if DEBUG` wrapper around an `updater.checkForUpdates()` call inside `UpdateController` and don't commit it.
 - **`xcodebuild` must stay warning-free under `SWIFT_STRICT_CONCURRENCY: complete`** after touching this module. Sparkle's bridged Obj-C API will sometimes warn — prefer `@preconcurrency` over `nonisolated(unsafe)`.
-- **Don't restore `checkNow()` as production API.** It was removed in PR #8 — never wired up. Use the `#if DEBUG` recipe above if you need it for QA.
+
+### Hard rules pending smoke verification (plan 2026-05-18-001 §682–686)
+
+The next two rules historically prohibited a production "Check for Updates" entry point and a `checkNow()`-style API because there was no per-version skip surface. The Settings → Updates "Check for updates" button and the X chip on the `.available` banner — wired through `UpdateController.checkForUpdates()` and `UpdateController.skipThisVersion()` (dispatches `SPUUserUpdateChoice.skip`) — jointly close that prohibition (R23 + R24). **The rules stay in place until a manual smoke against an EdDSA-signed staged release confirms that Sparkle persists `.skip` per-version under our custom `SPUUserDriver`**:
+
+1. Install `v0.0.1-rc1` → wait for the banner → click X.
+2. Wait for the next scheduled check (or override `SUScheduledCheckInterval` to ~60 s in a debug build) → confirm **no** re-show for `v0.0.1-rc1`.
+3. Publish `v0.0.1-rc2` → confirm the banner reappears for the new version.
+
+If the smoke passes, delete the two rules below and this preamble. If it fails, add a fallback `notype.update.skippedVersion: String` UserDefaults flag and have `UpdateUserDriver.showUpdateFound(...)` filter against it before publishing `.available(update)` to the controller — Sparkle's persistence path may live in `SPUStandardUserDriver` (which we bypass), in which case our custom driver needs to persist locally instead.
+
+- **Don't ship a non-debug "Check for Updates" entry point** without a product discussion — it would also require a "skip this version" surface, which we don't have. For QA, add a temporary `#if DEBUG` wrapper around an `updater.checkForUpdates()` call inside `UpdateController` and don't commit it.
+- **Don't restore `checkNow()` as production API.** It was removed in PR #8 — never wired up. Use the `#if DEBUG` recipe above if you need it for QA. (The new method is named `checkForUpdates()` to avoid confusion with the deleted `checkNow()`.)
 
 ## Phase state machine
 
@@ -45,7 +56,7 @@ idle → checking → available → downloading → extracting → installing (p
 - **Local sanity:** rebuild after touching this module; xcodebuild stays warning-free under strict concurrency.
 - **End-to-end:** install version N, publish N+1 via the release workflow. A low `SUScheduledCheckInterval` (e.g. 60 s) in a debug Info.plist override lets you watch the banner. Click → download → relaunch.
 - **EdDSA tamper:** corrupt the `sparkle:edSignature` in `docs/appcast.xml` for a test release; Sparkle refuses to install and the banner clears (briefly `.failed` → `.idle`).
-- **No unit tests yet** — the Sparkle SDK isn't easily mockable; integration via the live release pipeline is the source of truth.
+- `NoTypeTests/UpdateControllerStateTests.swift` — pins the phase state machine + `skipThisVersion()` / `dismiss()` / `installNow()` reply-slot dispatch with synthetic closures. The Sparkle SDK itself isn't mocked; integration via the live release pipeline is the source of truth for everything past the controller's `pending*` slots.
 
 ## Pointers
 

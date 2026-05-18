@@ -27,12 +27,17 @@ struct UpdateBanner: View {
             case .idle, .checking, .failed:
                 EmptyView()
             case let .available(update):
-                BannerShell(
-                    title: "Relaunch to update",
-                    subtitle: "v\(update.versionString)",
-                    progress: nil,
-                    showsTrailingArrow: true,
-                    onClick: { updates.installNow() }
+                // Two interactive targets share the card — the main body
+                // taps `installNow()`, the trailing X chip dispatches
+                // `skipThisVersion()` (`SPUUserUpdateChoice.skip`). The
+                // outer Button used by other phases can't host a second
+                // inner Button on macOS (parent button steals the tap)
+                // — `AvailableBannerCard` uses a tap-gesture-driven body
+                // so the nested `DSCloseButton` receives its own clicks.
+                AvailableBannerCard(
+                    versionString: update.versionString,
+                    onInstall: { updates.installNow() },
+                    onSkip:    { updates.skipThisVersion() }
                 )
             case let .downloading(progress):
                 BannerShell(
@@ -184,6 +189,83 @@ private struct BannerShell: View {
         }
         let p = progress ?? 0
         return max(0, min(1, p)) * totalWidth
+    }
+}
+
+// MARK: - Available-update card with X-skip chip
+
+/// Variant of `BannerShell` used only for the `.available` phase: a
+/// tappable main body (download / relaunch) plus a trailing X chip
+/// that fires `SPUUserUpdateChoice.skip`. Visually mirrors
+/// `BannerShell` (same bgSurface card + borderSubtle + pulse dot +
+/// chevron affordance) so the chrome stays consistent across phases.
+///
+/// Implementation note: `Button` can't host a second nested `Button`
+/// on macOS — the parent steals the inner tap. The main body uses
+/// `.contentShape(Rectangle()) + .onTapGesture` instead so the
+/// `DSCloseButton` (itself a `.plain` Button) receives its own
+/// clicks. Accessibility traits are added explicitly to compensate
+/// for the missing `Button` wrap.
+private struct AvailableBannerCard: View {
+    let versionString: String
+    let onInstall: () -> Void
+    let onSkip: () -> Void
+
+    @State private var mainHovered = false
+
+    var body: some View {
+        HStack(spacing: DS.Space.s2) {
+            mainBody
+                .contentShape(Rectangle())
+                .onTapGesture { onInstall() }
+                .onHover { mainHovered = $0 }
+
+            DSCloseButton(
+                size: .compact,
+                label: "Skip this version",
+                action: onSkip
+            )
+            .padding(.trailing, DS.Space.s3)
+        }
+        .background(background, in: RoundedRectangle(cornerRadius: DS.Radius.md))
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.Radius.md)
+                .strokeBorder(DS.Color.borderSubtle, lineWidth: DS.Border.hairline)
+        )
+        .animation(DS.Motion.fast, value: mainHovered)
+    }
+
+    private var mainBody: some View {
+        HStack(spacing: DS.Space.s3) {
+            AccentPulseDot()
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Relaunch to update")
+                    .font(DS.Font.bodySM(.semibold))
+                    .foregroundStyle(DS.Color.textPrimary)
+                    .lineLimit(1)
+                Text("v\(versionString)")
+                    .font(DS.Font.caption())
+                    .foregroundStyle(DS.Color.textTertiary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            DSIcon(
+                name: .chevronRight,
+                size: 14,
+                color: mainHovered ? DS.Color.textPrimary : DS.Color.textTertiary
+            )
+            .animation(DS.Motion.fast, value: mainHovered)
+        }
+        .padding(.leading, DS.Space.s4)
+        .padding(.vertical, DS.Space.s3 + 1)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Relaunch to update — v\(versionString)")
+        .accessibilityAddTraits(.isButton)
+    }
+
+    private var background: Color {
+        mainHovered ? DS.Color.bgHover : DS.Color.bgSurface
     }
 }
 

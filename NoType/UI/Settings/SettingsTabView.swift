@@ -14,6 +14,7 @@ struct SettingsTabView: View {
     @Environment(AppState.self)            private var appState
     @Environment(AppearanceController.self) private var appearance
     @Environment(OnboardingState.self)     private var onboarding
+    @Environment(UpdateController.self)    private var updates
 
     @State private var showResetConfirm = false
     @State private var loginItemBusy = false
@@ -232,5 +233,39 @@ struct SettingsTabView: View {
                 showDeleteAllConfirm = true
             }
         }
+
+        DSSeparator()
+
+        updatesRow()
+    }
+
+    // MARK: - Updates row (U8)
+    //
+    // Manual "Check for updates" affordance + current-version
+    // display. The X chip on the sidebar `UpdateBanner` is the
+    // per-version skip surface (`SPUUserUpdateChoice.skip` via
+    // `UpdateController.skipThisVersion()`); this button just
+    // routes through `SPUUpdater.checkForUpdates()` so users
+    // don't have to wait for the 24 h scheduled check.
+
+    private func updatesRow() -> some View {
+        DSSettingsRow(
+            title: "Updates",
+            subtitle: "NoType \(Self.currentVersionString) · Checks automatically every 24 hours."
+        ) {
+            DSPrimaryButton(
+                label: updates.phase == .checking ? "Checking…" : "Check for updates",
+                size: .small,
+                isLoading: updates.phase == .checking,
+                isEnabled: updates.phase != .checking,
+                accessibilityLabelOverride: "Check for updates"
+            ) {
+                updates.checkForUpdates()
+            }
+        }
+    }
+
+    private static var currentVersionString: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
     }
 }
