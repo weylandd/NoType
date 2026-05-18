@@ -88,12 +88,24 @@ final class OnboardingStateTests: XCTestCase {
 
     @MainActor
     func test_resetWizard_instance_movesStateBackToWelcome() async {
-        let state = OnboardingState()
-        // Drive through to .complete. `goNext()` writes to
-        // `UserDefaults.standard` — we'll restore it on teardown via
-        // the suite isolation above (this test reads back via the
-        // public `currentStep` instead, so the standard-defaults
-        // pollution is bounded to this test process).
+        // Inject the suite-isolated defaults so `goNext()` /
+        // `resetWizard()` write into the per-test suite — NOT the
+        // host process's `UserDefaults.standard`. NoTypeTests is
+        // application-hosted in `NoType.app`, so `.standard` is
+        // `app.notype` on disk; without the injection this test
+        // would clear the developer's "onboarding complete" flag
+        // on every CI run and force the wizard on next launch.
+
+        // Snapshot the standard defaults' onboarding state BEFORE the
+        // test so we can prove instance methods never wrote through.
+        let stdCompleteBefore =
+            UserDefaults.standard.object(forKey: OnboardingState.completeKey) as? Bool
+        let stdCurrentBefore =
+            UserDefaults.standard.object(forKey: OnboardingState.currentStepKey) as? Int
+        let stdFurthestBefore =
+            UserDefaults.standard.object(forKey: OnboardingState.furthestStepKey) as? Int
+
+        let state = OnboardingState(defaults: defaultsSuite)
         for _ in 0..<5 { state.goNext() }
         XCTAssertEqual(state.currentStep, .complete)
         XCTAssertTrue(state.isComplete)
@@ -104,5 +116,22 @@ final class OnboardingStateTests: XCTestCase {
         XCTAssertEqual(state.furthestStep, .welcome)
         XCTAssertFalse(state.isComplete)
         XCTAssertTrue(state.isOnboarding)
+
+        // Regression guard — verify the standard defaults are bit-for-bit
+        // unchanged. Catches future regressions where someone re-introduces
+        // a `.standard` call inside an `OnboardingState` instance method.
+        XCTAssertEqual(
+            UserDefaults.standard.object(forKey: OnboardingState.completeKey) as? Bool,
+            stdCompleteBefore,
+            "Instance methods must never write to UserDefaults.standard — they would poison the developer's onboarding state across test runs."
+        )
+        XCTAssertEqual(
+            UserDefaults.standard.object(forKey: OnboardingState.currentStepKey) as? Int,
+            stdCurrentBefore
+        )
+        XCTAssertEqual(
+            UserDefaults.standard.object(forKey: OnboardingState.furthestStepKey) as? Int,
+            stdFurthestBefore
+        )
     }
 }
