@@ -45,6 +45,22 @@ actor HistoryStore {
         return entries
     }
 
+    /// Wipe every transcript. Used by Settings → System → "Delete all
+    /// transcripts" (plan §584-646, AE7). Privacy-only: does NOT touch
+    /// `stats.json` — usage aggregates (word count, session count,
+    /// duration, token totals) are preserved per the carve-out
+    /// documented in
+    /// `solutions/conventions/no-telemetry-with-statsstore-carveout-2026-05-15.md`.
+    /// Always writes — an empty file is the desired post-state — so
+    /// the on-disk snapshot reflects the wipe even when history was
+    /// already empty in-memory.
+    @discardableResult
+    func deleteAll() -> [HistoryEntry] {
+        let empty: [HistoryEntry] = []
+        write(empty)
+        return empty
+    }
+
     private func write(_ entries: [HistoryEntry]) {
         JSONFileStorage.write(entries, to: url, encoder: encoder, log: Self.log)
     }

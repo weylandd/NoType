@@ -530,6 +530,15 @@ struct ContextSnapshot: Sendable, Equatable {
     /// single source of truth at paste time, mirroring how the
     /// insertion target is captured once and reused at `stop()`.
     let replacements: [DictionaryReplacement]
+    /// BCP-47 language codes the user expects to dictate in. Shipped
+    /// in the `User languages:` cache-prefix section. Empty array →
+    /// section body is `(empty)`; the section itself is always
+    /// present so the prefix shape stays stable across sessions (and
+    /// across chunks of one session). Captured from
+    /// `AppState.outputLanguages` at session start and frozen — same
+    /// invariant as `dictionary` and the instructions snapshot. See
+    /// plan `2026-05-18-001-feat-settings-screen-plan.md` §584-646.
+    let userLanguages: [String]
     let tree: RedactedAXSnapshot
     let insertionTarget: InsertionTarget
     /// Optional OCR fallback for the active window. Populated only when
@@ -548,6 +557,7 @@ struct ContextSnapshot: Sendable, Equatable {
         categoryInstruction: String?,
         dictionary: [String] = [],
         replacements: [DictionaryReplacement] = [],
+        userLanguages: [String] = [],
         tree: RedactedAXSnapshot,
         insertionTarget: InsertionTarget,
         screenText: RedactedScreenText? = nil
@@ -558,6 +568,7 @@ struct ContextSnapshot: Sendable, Equatable {
         self.categoryInstruction = categoryInstruction
         self.dictionary = dictionary
         self.replacements = replacements
+        self.userLanguages = userLanguages
         self.tree = tree
         self.insertionTarget = insertionTarget
         self.screenText = screenText
@@ -580,6 +591,7 @@ struct ContextSnapshot: Sendable, Equatable {
             categoryInstruction: nil,
             dictionary: [],
             replacements: [],
+            userLanguages: [],
             tree: RedactedAXSnapshot(apps: []),
             insertionTarget: .empty,
             screenText: nil

@@ -75,6 +75,22 @@ final class AppState {
     /// continue to ship to Gemini).
     @ObservationIgnored fileprivate static let dictionaryEnabledKey = "notype.dictionaryEnabled"
 
+    /// BCP-47 language codes the user wants Gemini to bias transcription
+    /// towards. Persisted under `notype.outputLanguages` as a plist
+    /// `[String]`. Mirrored into `ContextSnapshot.userLanguages` at the
+    /// start of each `RecordingSession`, then frozen for that session
+    /// (mirrors the `DictionaryContext` sourcing pattern — see plan
+    /// `2026-05-18-001-feat-settings-screen-plan.md` §584-646). Default
+    /// is empty → the `User languages:` cache-prefix section ships
+    /// with body `(empty)`.
+    var outputLanguages: [String] = (UserDefaults.standard.array(forKey: AppState.outputLanguagesKey) as? [String]) ?? [] {
+        didSet {
+            UserDefaults.standard.set(outputLanguages, forKey: AppState.outputLanguagesKey)
+        }
+    }
+
+    @ObservationIgnored fileprivate static let outputLanguagesKey = "notype.outputLanguages"
+
     @ObservationIgnored private var hotkeyMonitor: HotkeyMonitor?
 
     /// Current hotkey binding. Read at init from `UserDefaults` (falls
@@ -364,6 +380,22 @@ final class AppState {
         }
     }
 
+    /// Wipe every transcript from the on-disk history file and the
+    /// in-memory mirror. Driven by Settings → System → "Delete all
+    /// transcripts" (plan §584-646). Stats are intentionally NOT
+    /// touched — usage aggregates (word count, session count, token
+    /// totals, per-app breakdown) survive the wipe per the
+    /// no-telemetry carve-out. The wording in the confirmation dialog
+    /// names this explicitly so users who inspect `stats.json` aren't
+    /// surprised. Fire-and-forget disk write mirrors
+    /// `deleteHistoryEntry`.
+    func deleteAllHistory() {
+        history.removeAll()
+        Task { [historyStore] in
+            await historyStore.deleteAll()
+        }
+    }
+
     // MARK: - API key
 
     /// Reads the cached key, falling back to env var + Keychain on first
@@ -543,11 +575,13 @@ final class AppState {
 
         let instructionsContext = currentInstructionsContext()
         let dictionaryContext = currentDictionaryContext()
+        let userLanguagesFrozen = outputLanguages
         do {
             try session.start(
                 apiKey: apiKey,
                 instructions: instructionsContext,
-                dictionary: dictionaryContext
+                dictionary: dictionaryContext,
+                userLanguages: userLanguagesFrozen
             )
         } catch {
             Self.log.error("session start failed: \(error.localizedDescription, privacy: .public)")

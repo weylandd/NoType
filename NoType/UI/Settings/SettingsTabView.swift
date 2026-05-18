@@ -17,6 +17,7 @@ struct SettingsTabView: View {
 
     @State private var showResetConfirm = false
     @State private var loginItemBusy = false
+    @State private var showDeleteAllConfirm = false
 
     var body: some View {
         @Bindable var appState = appState
@@ -54,9 +55,7 @@ struct SettingsTabView: View {
                 }
 
                 DSSettingsSection(title: "System") {
-                    // Filled by U7 (Output language, Delete all transcripts, Paste delay)
-                    // and U8 (Version + Check for updates button).
-                    sectionPlaceholder()
+                    systemSectionBody(appState: appState)
                 }
             }
             .padding(.horizontal, DS.Space.s6)
@@ -82,6 +81,18 @@ struct SettingsTabView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Your API key, hotkey, and microphone choice will be preserved.")
+        }
+        .confirmationDialog(
+            "Delete all transcripts?",
+            isPresented: $showDeleteAllConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Delete all", role: .destructive) {
+                appState.deleteAllHistory()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Your usage stats (session counts, word totals, token usage, and app breakdown) will be preserved.")
         }
     }
 
@@ -196,5 +207,30 @@ struct SettingsTabView: View {
             .foregroundStyle(DS.Color.textTertiary)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, DS.Space.s2)
+    }
+
+    // MARK: - System section (U7)
+    //
+    // Paste restore delay (`PasteSettings.restoreDelayMs`) lives in
+    // code with a 150 ms default — covers AppKit / Slack / Discord /
+    // Terminal. Deliberately NOT surfaced in Settings (too technical
+    // for the average user). If a user reports "NoType pastes my old
+    // clipboard", the support recipe is to bump the UserDefaults key
+    // `notype.pasteRestoreDelayMs` to 200–250 ms manually.
+
+    @ViewBuilder
+    private func systemSectionBody(appState: AppState) -> some View {
+        OutputLanguagePicker()
+
+        DSSeparator()
+
+        DSSettingsRow(
+            title: "Delete all transcripts",
+            subtitle: "Removes the last-10 transcripts kept in the menu-bar popover. Stats are preserved."
+        ) {
+            DSSecondaryButton(label: "Delete all") {
+                showDeleteAllConfirm = true
+            }
+        }
     }
 }

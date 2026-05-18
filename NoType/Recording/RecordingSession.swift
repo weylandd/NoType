@@ -172,6 +172,11 @@ final class RecordingSession {
     /// as `instructionsFrozen` — feeds `buildLiteSnapshot` for the
     /// short-session path.
     private var dictionaryFrozen: DictionaryContext = .empty
+    /// Frozen BCP-47 language codes captured at session start. Mirrors
+    /// `dictionaryFrozen` for the always-present `User languages:`
+    /// cache-prefix section. Frozen for the session's lifetime so the
+    /// Gemini cache prefix stays byte-stable across chunks.
+    private var userLanguagesFrozen: [String] = []
     private var contextTask: Task<ContextSnapshot, Never>?
     /// Mirror of `contextTask`'s eventual value, populated on the main
     /// actor the moment the snapshot is ready. Used by the **final-chunk**
@@ -271,15 +276,23 @@ final class RecordingSession {
     /// invariant as `instructions`: captured once, never re-read mid-
     /// session, so an edit on the Dictionary tab between press and
     /// release doesn't perturb the in-flight session.
+    ///
+    /// `userLanguages` is a frozen snapshot of the user's preferred
+    /// dictation languages (BCP-47 codes) shipped in the always-present
+    /// `User languages:` cache-prefix section. Same invariant — read
+    /// once on the main actor as a local constant by AppState before
+    /// invoking `start`, never re-read mid-session.
     func start(
         apiKey: String,
         instructions: InstructionsContext,
-        dictionary: DictionaryContext
+        dictionary: DictionaryContext,
+        userLanguages: [String]
     ) throws {
         self.apiKey = apiKey
         self.replacementsFrozen = dictionary.replacements
         self.instructionsFrozen = instructions
         self.dictionaryFrozen = dictionary
+        self.userLanguagesFrozen = userLanguages
         let frontmost = NSWorkspace.shared.frontmostApplication
         sourceApp = frontmost
         startedAt = Date()
@@ -307,6 +320,10 @@ final class RecordingSession {
         // latency budgets.
         let dictionaryEntries = dictionary.activeEntries
         let dictionaryReplacements = dictionary.replacements
+        // Bind to a local constant so the detached task captures the
+        // value, not `self` (we're @MainActor and the task is detached
+        // / non-isolated).
+        let userLanguagesLocal = userLanguages
         // Capture `activeBundleID` once on @MainActor (already done above
         // as `frontmost?.bundleIdentifier`) and pass it into the detached
         // AX task. Guardrail against re-introducing an
@@ -351,6 +368,7 @@ final class RecordingSession {
                 categoryInstruction: categoryInstruction,
                 dictionary: dictionaryEntries,
                 replacements: dictionaryReplacements,
+                userLanguages: userLanguagesLocal,
                 tree: resolvedTree,
                 insertionTarget: target,
                 screenText: shouldAttachOCR ? ocr : nil
@@ -1053,6 +1071,7 @@ final class RecordingSession {
             categoryInstruction: categoryInstruction,
             dictionary: dictionaryFrozen.activeEntries,
             replacements: dictionaryFrozen.replacements,
+            userLanguages: userLanguagesFrozen,
             tree: RedactedAXSnapshot(apps: []),
             insertionTarget: target,
             screenText: nil

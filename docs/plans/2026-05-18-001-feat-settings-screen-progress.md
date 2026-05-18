@@ -3,7 +3,7 @@ title: Settings Screen — Implementation Progress
 plan: docs/plans/2026-05-18-001-feat-settings-screen-plan.md
 branch: feat/settings-screen
 status: in-progress
-last_updated: 2026-05-18 (U6 shipped)
+last_updated: 2026-05-18 (U7 shipped)
 ---
 
 # Settings Screen — Implementation Progress
@@ -24,21 +24,20 @@ Entry-point convention for follow-up sessions: pick the next pending unit in dep
 | U3. Shortcuts — hotkey binding picker / Recording mode / Cancel shortcut | §341-396 | ⏳ Pending | — | Depends on U1 (done). Hotkey invariant 2 weakening for Hold+Space is load-bearing — secondary `.defaultTap` Space-only CGEventTap |
 | U4. Microphone & Audio — Core Audio HAL rewrite (R16 reframed) | §399-458 | ⏳ Pending | — | Depends on U1 (done). ~1-2 weeks of work. Characterization-first per execution note. Requires hardware smoke on AirPods + Music for primary success criterion |
 | U6. API section — Gemini key Edit + windowed token stats | §524-578 | ✅ Shipped | _next commit_ | `GeminiKeyRow` (masked `AIzaSy••••••••` + Edit sheet → validate-then-save reusing existing `validateGeminiKey` + `updateAPIKey`) / `TokenStatsPanel` (Today/7d/30d/All × Input/Output/Cached/Cache hit rate, divide-by-zero → `—`). Section unconditional in v1; `// TODO: when SaaS mode lands…` comment retained. 18 new tests (9 `GeminiKeyRowTests` + 9 `TokenStatsPanelTests`). Body-leak invariant pinned by `test_errorBody_doesNotLeakIntoUILabel` |
-| U7. System — Output language / Delete all / Paste delay + cache-prefix integration | §584-646 | ⏳ Pending | — | Depends on U1 (done). Cache-prefix part-count change will break ≥5 `GeminiRequestBuilderTests` — test-first per execution note |
+| U7. System — Output language / Delete all + cache-prefix integration | §584-646 | ✅ Shipped | _next commit_ | New always-present cache-prefix section `User languages:` at position 4 (frozen at session start from `AppState.outputLanguages`, mirrors `User dictionary:` shape). Curated ~100-entry BCP-47 list bundled as `Settings/SupportedLanguages.json`. Sheet-based picker (search + multi-select + DSWordChip strip). `HistoryStore.deleteAll()` empties history only; stats untouched (cross-store test pins the carve-out). **Paste restore delay slider deliberately omitted from UI** — too technical; stays in `PasteSettings` with 150 ms default. System prompt enumerations extended in both full + lite paths; new `# User languages` subsections added with minimal prompt-master rubric (audio-wins, never-content-pool). 32 new tests (7 `GeminiRequestBuilderTests` userLanguages cases + extended fixtures, 11 `SupportedLanguagesTests`, 6 `OutputLanguagePickerTests`, 8 `HistoryStoreTests` cases) |
 | U8. Updates — Check button + per-version skip via X chip | §650-707 | ⏳ Pending | — | Depends on U1 (done). Manual smoke against EdDSA-signed staged release before removing `Updates/CLAUDE.md` Hard rule |
 
 ---
 
 ## Recommended next session entry point
 
-**U7 (System section — Output language + Delete all + Paste delay + cache-prefix integration).** Recommended next because:
-- Adds the most user-visible polish surface still missing (output-language picker + the destructive "Delete all transcripts" affordance).
-- Cache-prefix part-count change is contained — test-first: extend `GeminiRequestBuilderTests` fixtures + add the 5 new positioning tests BEFORE modifying `buildRequestBody` / `buildLiteRequestBody`.
-- Same dependency profile as U6 (just U1 — done). No hardware smoke needed.
+**U8 (Updates — Check button + per-version skip via X chip).** Recommended next because:
+- Smallest remaining unit — Sparkle "Check now" button + per-version skip chip wired through the existing `UpdateController` / `UpdateUserDriver`.
+- No hardware dependency; manual smoke against an EdDSA-signed staged release is the only gate before lifting the `Updates/CLAUDE.md` Hard rule.
+- Same dependency profile as U6/U7 (just U1 — done).
 
 **Alternatives if a different unit makes sense:**
 - **U3** if hotkey ergonomics are a felt pain (Hold+Space mode, custom cancel shortcut). Recording-mode `.effective(stored:hotkey:)` helper from carryover item #5 lands here.
-- **U8** for a quick win — Updates section is the smallest remaining unit (Sparkle "Check now" button + per-version skip chip).
 - **U4** is the largest single unit; tackle when there's a multi-day window with hardware (AirPods + Music) available for the R16-reframed smoke.
 
 ---
@@ -68,6 +67,20 @@ Entry-point convention for follow-up sessions: pick the next pending unit in dep
 - **`TokenStatsRange` chose Today/7d/30d/All over HomeRange's 7D/30D/90D/All.** Token usage moves fast — "today" is the most useful at-a-glance window, and "90D" is rarely interesting relative to "All". The `.days` mapping (`1 / 7 / 30 / nil`) and ordering are pinned by `TokenStatsPanelTests.test_allCases_orderingIsTodayLast7Last30All`.
 - **No new AppState methods.** `validateGeminiKey` + `updateAPIKey` + `currentAPIKey` + `statsSummary` were all already on AppState from earlier units (U2 keychain UX work / U5 stats wiring); U6 is a pure UI consumer.
 
+### U7 (session 2026-05-18)
+
+- **Cache-prefix part-count change shipped clean.** `GeminiRequestBuilderTests` had 5 part-count assertions to update (minimum 6→7, full 8→9, lite minimum 4→5, lite full 6→7, JSON-encoding 9→10). Test-first per execution note: extended `ctx`/`fullCtx` fixtures with `userLanguages: [String] = []` parameter, rewrote part-count assertions, added 7 new positioning tests, all failed → then modified `buildRequestBody` + `buildLiteRequestBody` to insert `User languages:` part at position 4 → all 635 tests pass.
+- **`userLanguages` sourcing does NOT route through `InstructionsContext`.** Mirrors the plan §612 decision: `InstructionsContext` is scoped to Instructions-module concerns. Instead `RecordingSession.start(...)` gained a `userLanguages: [String]` parameter that AppState reads from `appState.outputLanguages` as a frozen local constant right before calling `start`. Same sourcing pattern as `DictionaryContext.replacements`. Stored on the session as `userLanguagesFrozen` so the lite-path `buildLiteSnapshot` can synchronously assemble a context.
+- **SupportedLanguages bundled as a plain JSON resource.** `NoType/Settings/SupportedLanguages.json` — 102 curated BCP-47 entries (Gemini-supported common subset) with `{code, name (native), englishName}`. `xcodebuild` auto-classified it as a bundle resource via the existing `path: NoType` sources globbing — no `project.yml` edit needed. Verified at `Contents/Resources/SupportedLanguages.json` (7.2 KB) post-build.
+- **Sheet-based picker over inline ScrollView.** Plan §608 suggested "ScrollView containing TextField + filtered LazyVStack". Building inline would nest a second ScrollView inside the SettingsTabView's outer one — vertical drag gestures fight. Sheet gives the language list its own scroll surface. Selected chips render in two places (collapsed row under "Output language" in the section + at the top of the sheet) so the user always sees their selection.
+- **Saved-but-not-in-bundle codes survive.** `OutputLanguagePicker.displayChips(for:)` falls back to rendering the bare BCP-47 code when `SupportedLanguages.lookup` misses — covers future trims of `SupportedLanguages.json` so saved codes don't silently vanish from the user's selection. Pinned by `OutputLanguagePickerTests.test_displayChips_unknownCodeFallsBackToBareCode` + subtitle counterpart.
+- **`HistoryStore.deleteAll` always writes** (even when in-memory state is already empty) so the on-disk file reflects the wipe. Avoids the "user clicks Delete all on an empty history → next launch shows yesterday's transcripts because a crash dropped them between memory and disk" failure mode.
+- **Stats-cross-store test added.** `test_deleteAll_doesNotTouchStatsFile` writes a raw `stats.json` sentinel next to `history.json` and asserts byte-equality after `deleteAll`. Pins the AE7 carve-out at the store-layer boundary without dragging `StatsStore` into the test setup.
+- **Confirmation dialog wording names `token usage` explicitly.** Per plan §618 — users who inspect `stats.json` post-deletion shouldn't be surprised that per-day token aggregates remain.
+- **System prompt enumerations + `# User languages` subsections added** (full + lite). Minimal prompt-master rubric applied inline: enumeration extension (universal "never echo context" rule covers the new section), short subsection (audio-wins, "(empty)" → ignore). `test_systemPrompts_pinAntiCompletionClause` still passes — anchor phrases unchanged.
+- **No new `AppState` API surface for `outputLanguages`.** Same `var outputLanguages: [String] { didSet { UserDefaults… } }` pattern as `preventSleepDuringRecording` (U2 precedent). UserDefaults backing uses plist `[String]` directly via `array(forKey:) as? [String] ?? []`. The picker binds straight through `@Bindable var appState = appState`.
+- **Paste restore delay deliberately omitted from the System section UI.** Plan §584 / §641-642 specified exposing it as a 50–500 ms slider, but on visual review the slider read as too technical for the typical user (Slack/Discord/Terminal all work fine on the 150 ms default). The `PasteSettings.restoreDelayMs` getter/setter stays in code — `TextInjector` still reads it on every paste — so a support recipe of "bump UserDefaults key `notype.pasteRestoreDelayMs` to 200–250 ms" remains available for the rare "wrong text pasted" report. R25 closes without the slider; `TextInjector` behaviour is unchanged.
+
 ### U5 (session 2026-05-18)
 
 - **Path (a) chosen** (plan §473 recommended). Existing `transcribe / transcribeBatch / transcribeShort` keep `String` returns as backwards-compat shims; new `*WithUsage` overloads return `(text, tokens)` tuples. Private `sendRequest` / `performOnce` return types changed once, shared by both surfaces. PromptEvalHarness untouched (reads `lastUsage` separately — still populated).
@@ -85,7 +98,7 @@ Items the implementation surfaced that need attention in the relevant follow-up 
 
 2. **PromptEvalTests flakiness** (observed during U5 full test run). `test_longMonologueEN_full` + `test_silenceOnly_full` failed against Gemini 3.1 Flash-Lite — model output variance (numeric formatting, silence-only hallucination). **Not caused by U5** (no prompt content modified; verified by full test run with `-skip-testing:NoTypeTests/PromptEvalTests` → 569 / 569 pass). Flakiness is pre-existing. **Action:** revisit if it gets worse or if Gemini behavior shifts; consider adding `XCTSkip` semantics or moving these out of the default `xcodebuild test` invocation.
 
-3. **U7 cache-prefix part count change** (carryover from plan §470-472). `GeminiRequestBuilderTests` pins the current part count (6 minimum / 8 full); adding `User languages:` at position 4 will break ≥5 tests. Plan execution note already calls this out — start U7 by updating fixtures + adding new positioning tests FIRST, then modify `buildRequestBody` / `buildLiteRequestBody`.
+3. ~~**U7 cache-prefix part count change** (carryover from plan §470-472).~~ **Closed by U7 (this session).** Cache prefix is now 7 minimum / 9 full (full path) and 5 minimum / 7 full (lite path). `User languages:` lives at position 4 with body `(empty)` when no languages picked.
 
 4. ~~**U2 SleepAssertion ownership in AppState** (plan §304 / §314).~~ **Closed by U2 (this session).** `AppState.activeSleepAssertion` is `@MainActor`-isolated single-owner; acquire/release wired into the three session-end paths. No partial-recovery double-release risk.
 
@@ -106,8 +119,12 @@ Items the implementation surfaced that need attention in the relevant follow-up 
 | `OnboardingStateTests` | 4 | `resetWizard` clears all three onboarding keys; preserves hotkey binding + selected mic UID; idempotent on cleared defaults; instance `currentStep` returns to `.welcome` |
 | `GeminiKeyRowTests` | 9 | Mask format (long key `AIzaSy` prefix + 8 dots, short key tolerated, empty key dot-only); error translation table (`.missingKey` → "Invalid key — check format"; `.http(401)` / `.http(403)` → "Authentication failed (\(s))"; other `.http` falls back to body-redacted `errorDescription`; `URLError.notConnectedToInternet` / `.timedOut` → friendly copy; generic `LocalizedError` → its own description); body-leak invariant pinned with `secret-project-id-12345` sentinel never appearing in the rendered string |
 | `TokenStatsPanelTests` | 9 | Range → days mapping (today=1 / last7=7 / last30=30 / all=nil); `allCases` ordering pinned (Today/7d/30d/All); cache hit rate format (divide-by-zero → "—", 300/1300 → "23%", 0/500 → "100%", 500/0 → "0%", 1/1 → "50%"); end-to-end against synthetic `StatsSnapshot` (today bucket vs 3-days-ago; 400-days-ago contributes to `.all` lifetime) |
+| `GeminiRequestBuilderTests` (additions) | 7 | New `User languages:` cache-prefix section pinned: appears at position 4 (after Category instruction, before User dictionary); empty body renders as `(empty)`, section never dropped; single code emits no trailing comma; multi-language renders comma-separated; CJK + Thai BCP-47 codes round-trip via UTF-8; byte-stable across chunks of one session; appears in lite path at the same position |
+| `SupportedLanguagesTests` | 11 | Bundle decode succeeds with ≥80 entries; common lookups (`en`/`ru`/`zh`/`ja`) resolve to expected English names; codes are unique; `byCode` index covers `all`; `filter` empty / whitespace query returns all; case-insensitive english-name + code match; native-script needle ("Русский") matches; non-existent needle returns empty |
+| `OutputLanguagePickerTests` | 6 | `subtitle(for:)` empty / non-empty / unknown-code paths; `displayChips(for:)` resolves known codes to native names, preserves order, falls back to bare code for unknown codes (covers future SupportedLanguages.json trims) |
+| `HistoryStoreTests` (new file) | 8 | Round-trip across instances; FIFO eviction at the 10-entry boundary; `remove(id:)` drops target / no-ops for missing id; `deleteAll` empties + persists across instances + is idempotent; cross-store contract pinned — `deleteAll` does not touch a sibling `stats.json` (AE7 carve-out boundary) |
 
-**Net:** 604 / 604 pass excluding live-API `PromptEvalTests`.
+**Net:** 635 / 635 pass excluding live-API `PromptEvalTests`.
 
 ---
 
