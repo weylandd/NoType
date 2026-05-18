@@ -7,7 +7,7 @@ SwiftUI surfaces: menu-bar icon, history popover, the main app window (Home tab 
 **Design system primitives:**
 
 - `DesignTokens.swift` — `enum DS` namespace: `.Color`, `.Space`, `.Radius`, `.Size`, `.Font`, `.Motion`. Source of truth for all visual values. Mirrors `tokens.css` of the design bundle.
-- `DSComponents.swift` — shared building blocks (`DSSeparator`, `DSIconButton`, `DSBadge`, `DSKbd`, `DSCloseButton`, `DSGlyphChip`, `DSPrimaryButton`, `DSSecondaryButton`, `DSLinkButton`, `DSStatusPill`, `DSWordChip`) + `dsHudChrome()` modifier.
+- `DSComponents.swift` — shared building blocks (`DSSeparator`, `DSIconButton`, `DSBadge`, `DSKbd`, `DSCloseButton`, `DSGlyphChip`, `DSPrimaryButton`, `DSSecondaryButton`, `DSDestructiveButton`, `DSLinkButton`, `DSStatusPill`, `DSWordChip`, `DSCard`, `DSCardRow`, `DSSettingsSection`, `DSSettingsRow`) + `dsHudChrome()` modifier.
 - `DSIcon.swift` — typed enum `DSIconName` wrapping the line-icon assets in `Assets.xcassets`.
 
 **Surfaces:**
@@ -24,7 +24,12 @@ SwiftUI surfaces: menu-bar icon, history popover, the main app window (Home tab 
 - `HUDPanel.swift` — `NSPanel` subclass with embedded `NSVisualEffectView` blur.
 - `AudioSpectrum.swift` — vDSP-backed FFT for the recording-HUD meter.
 - `SpectrumMeter.swift` — shared FFT spectrum meter view used by both the recording HUD (`RecordingHUD.swift`) and the onboarding mic-check step (`NoType/Onboarding/Steps/OnboardingMicCheckStep.swift`). Owns the `.task`-driven 30 fps frame loop + `@State` arrays; the two call sites only supply geometry (bar count, spacing, padding, corner radius, max height).
-- `Settings/SettingsTabView.swift` — Settings tab in main window (scrolled-with-headers form, 6 sections: General · Shortcuts · Microphone · Audio · API · System). Opened via the popover header gear or sidebar nav. Replaces the old sheet-based `SettingsView` (removed in plan 2026-05-18-001).
+- `Settings/SettingsTabView.swift` — Settings tab in main window. Two-column shell: a 200 pt secondary sidebar (`SettingsSidebar`) drives a 5-pane switch (General / Recording / Language & Paste / API & Usage / About) inside a `ScrollView` with a sticky `SettingsContentHeader` (title + breadcrumb pill). Each pane composes one or more `DSCard`s. Opened via the popover header gear or sidebar nav. Replaces the older single-column scrolled-with-headers shell from plan 2026-05-18-001 (see plan 2026-05-18-003 for the redesign rationale + window-width pivot to 1180×820).
+- `Settings/SettingsCategory.swift` — enum + label/crumb/icon for the 5 secondary panes.
+- `Settings/SettingsSidebar.swift` — secondary nav rail (`bgBase` recess + hairline-trailing border).
+- `Settings/SettingsContentHeader.swift` — sticky title + mono breadcrumb pill over an `.ultraThinMaterial` backdrop.
+- `Settings/Panes/{General,Recording,LanguagePaste,APIUsage,About}Pane.swift` — pane bodies; each composes `DSCard` + `DSCardRow` from `DSComponents.swift` (the new card primitive family — `DSSettingsSection` / `DSSettingsRow` stays in DSComponents for any future consumer but the Settings panes no longer use it).
+- `Settings/Components/{VersionBlock,PermissionChip,GitHubRow,MicSourcePill,HowRecordingWorksCallout}.swift` — leaf chips and blocks the panes consume.
 
 ## Invariants
 

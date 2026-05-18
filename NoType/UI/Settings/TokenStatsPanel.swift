@@ -28,24 +28,25 @@ struct TokenStatsPanel: View {
             output: totals.output,
             cached: totals.cached
         )
-        VStack(alignment: .leading, spacing: DS.Space.s3) {
+        VStack(alignment: .leading, spacing: DS.Space.s4) {
             HStack(alignment: .center) {
-                Text("Token usage")
-                    .font(DS.Font.body(.medium))
-                    .foregroundStyle(DS.Color.textPrimary)
-                Spacer()
                 TokenStatsRangePicker(selection: $range)
+                Spacer(minLength: 0)
             }
 
-            HStack(alignment: .top, spacing: DS.Space.s4) {
+            HStack(alignment: .top, spacing: DS.Space.s3) {
                 TokenStatCell(label: "Input",  value: Self.formatCount(totals.input))
                 TokenStatCell(label: "Output", value: Self.formatCount(totals.output))
                 TokenStatCell(label: "Cost",   value: GeminiPricing.formatCost(cost))
             }
         }
-        .padding(.horizontal, DS.Space.s4)
-        .padding(.vertical, DS.Space.s3 + 2)
+        .padding(.horizontal, DS.Space.s5 - 2)
+        .padding(.vertical, DS.Space.s4 + 2)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(
+            DS.Color.borderSubtle.frame(height: DS.Border.hairline),
+            alignment: .top
+        )
     }
 
     // MARK: - Pure helpers (testable)
@@ -143,18 +144,30 @@ private struct TokenStatCell: View {
     let value: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 4) {
             Text(label)
                 .font(DS.Font.labelMono())
                 .textCase(.uppercase)
                 .foregroundStyle(DS.Color.textTertiary)
-                .tracking(0.5)
+                .tracking(0.7)
                 .lineLimit(1)
             Text(value)
-                .font(DS.Font.title(.medium))
+                .font(.system(size: 22, weight: .medium, design: .default))
                 .foregroundStyle(DS.Color.textPrimary)
                 .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, DS.Space.s4 + 2)
+        .padding(.vertical, DS.Space.s4)
+        .background(
+            DS.Color.bgBase,
+            in: RoundedRectangle(cornerRadius: DS.Radius.md)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.Radius.md)
+                .strokeBorder(DS.Color.borderSubtle, lineWidth: DS.Border.hairline)
+        )
     }
 }

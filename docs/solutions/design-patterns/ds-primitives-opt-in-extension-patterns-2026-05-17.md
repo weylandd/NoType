@@ -19,7 +19,7 @@ tags: [swiftui, design-system, backwards-compatibility, component-evolution, dsc
 
 ## Context
 
-NoType's UI module enforces two standing constraints via `UI/CLAUDE.md` Hard rules: (1) all visual values must flow through `DesignTokens.swift` — never inline raw hex or `.opacity(_:)` literals at call sites — and (2) any button, chip, or pill that appears in two or more surfaces must live in `DSComponents.swift`. These rules make `DSComponents.swift` the single source of truth for shared primitives: `DSPrimaryButton`, `DSSecondaryButton`, `DSGlyphChip`, `DSCloseButton`, and friends, used by every HUD, the popover, the main window, and (as of PR #43) five onboarding screens.
+NoType's UI module enforces two standing constraints via `UI/CLAUDE.md` Hard rules: (1) all visual values must flow through `DesignTokens.swift` — never inline raw hex or `.opacity(_:)` literals at call sites — and (2) any button, chip, or pill that appears in two or more surfaces must live in `DSComponents.swift`. These rules make `DSComponents.swift` the single source of truth for shared primitives: `DSPrimaryButton`, `DSSecondaryButton`, `DSDestructiveButton`, `DSGlyphChip`, `DSCloseButton`, `DSCard`, `DSCardRow`, `DSKeycapPill`, `DSSegmented`, and friends, used by every HUD, the popover, the main window, five onboarding screens (PR #43), and the five-pane Settings shell (PR #52).
 
 When the onboarding wizard was first wired up, step files contained hand-rolled inline components: a custom 44 pt icon tile, a custom 36 pt footer CTA, and a custom 28 pt row CTA — each duplicating visual idioms already present in the shared primitives. Code review flagged all three as violations of the "second use → refactor" rule and requested that the shared components be extended instead.
 

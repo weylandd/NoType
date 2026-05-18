@@ -23,6 +23,7 @@ Two siblings: the rolling **last-10** transcript window (`HistoryStore`) and the
 
 - **`StatsSnapshot.init(from:)` is a tolerant decoder** — every field is `decodeIfPresent` with a default. v1 files (no `dayAppBuckets`) load with `[:]`. v2 files are healed on read via `healIfPreV3` (duration fields zeroed, version → 3). Text totals are preserved.
 - **Don't decrement counts on `deleteHistoryEntry`.** Deleting a history row removes the transcript preview but leaves aggregate counts alone — treating the per-row trash as "redact from analytics too" would let a user silently zero out yesterday's word count, which is more confusing than helpful.
+- **Two independent wipe paths.** `HistoryStore.deleteAll()` (driven by `AppState.deleteAllHistory()`, Settings → "Delete all transcripts") clears the last-10 transcripts but leaves `StatsStore` alone. `StatsStore.deleteAll()` (driven by `AppState.deleteAllStats()`, Settings → "Delete all analytics") clears every aggregate but leaves the transcripts alone. Don't combine them — the explicit two-button UX is the contract.
 - **Don't backfill stats from existing `history.json`.** No de-duplication metadata. Stats start accumulating from the first session under the StatsStore-aware build.
 - **`stats.json` never leaves the device.** No network call touches this file. Local-only carve-out documented in `solutions/conventions/no-telemetry-with-statsstore-carveout-2026-05-15.md`.
 

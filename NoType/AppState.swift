@@ -457,6 +457,32 @@ final class AppState {
         }
     }
 
+    /// Wipe every aggregate stat (totals, day / app / day×app buckets,
+    /// token counters). Driven by Settings → "Delete all analytics".
+    /// Symmetric to `deleteAllHistory()` — independent so the user
+    /// can scrub one without the other.
+    ///
+    /// Race shape we have to defend against: `finalizeRecording()`
+    /// fires `Task { record(...); MainActor.run { statsSummary = snap } }`.
+    /// The `StatsStore` actor serialises `record()` and `deleteAll()` on
+    /// disk + actor cache, but the `MainActor` mirror write-back from a
+    /// concurrent `record()` continuation can land *after* an optimistic
+    /// `statsSummary = .empty`, re-publishing the just-deleted snapshot to
+    /// Home + Token usage. So we do NOT pre-clear the mirror — instead we
+    /// await the actor wipe and then assign the actor-confirmed empty
+    /// snapshot on the same MainActor hop. If a concurrent `record()`
+    /// raced ahead and updated the mirror in between, our post-`deleteAll`
+    /// assignment still wins because we run after the actor confirmed the
+    /// disk-truth.
+    func deleteAllStats() {
+        Task { [statsStore] in
+            let empty = await statsStore.deleteAll()
+            await MainActor.run { [weak self] in
+                self?.statsSummary = empty
+            }
+        }
+    }
+
     // MARK: - API key
 
     /// Reads the cached key, falling back to env var + Keychain on first

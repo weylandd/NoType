@@ -18,11 +18,13 @@ tags: [settings, screen-capture, ocr-fallback, ui, tech-debt]
 
 The screenshot + OCR fallback (see `solutions/architecture-patterns/screenshot-ocr-fallback-2026-05-15.md`) is currently gated purely by Screen Recording TCC permission state. Granting in onboarding (or System Settings) turns the feature on; there is **no in-app way to disable it** without revoking the TCC grant.
 
+The Settings redesign (PR #52) added a Screen Recording permission **chip** to the About pane that surfaces the grant state and opens System Settings on click — but that's a status display, not a runtime toggle. The gap this doc describes remains open: a user who wants OCR off but doesn't want to revoke TCC permission still has no in-app recourse.
+
 ## Guidance
 
-When users start asking for an off-switch that doesn't require revoking system permission, add a Settings section with: a status badge (granted / denied / needed), an explicit "Use screen capture for context" toggle that gates the runtime independently of permission, a "Re-open onboarding step" link, and a short explanation of when the fallback fires.
+When users start asking for an off-switch that doesn't require revoking system permission, add a Settings section with: a status badge (granted / denied / needed), an explicit "Use screen capture for context" toggle that gates the runtime independently of permission, a "Re-open onboarding step" link, and a short explanation of when the fallback fires. The natural home is the **Recording** pane in the new shell, adjacent to "Input device" and "Music interruption" — close to the other capture-related settings.
 
-Until then, leave the Settings sheet as-is.
+Until then, leave the existing About-pane permission chip as-is.
 
 ## Why This Matters
 
@@ -35,15 +37,22 @@ V1 ships the feature behind the simplest possible gate so we don't expand the Se
 
 ## Examples
 
-The new section would be one of the bullets in `SettingsView`, between the Gemini API key field and any future settings:
+The new control lives as a `DSCard` inside `RecordingPane`, alongside the existing Input device card:
 
 ```swift
-// SettingsView.swift — sketch
-Section("Screen capture for context") {
-    StatusBadge(state: screenCapture.permissionState)
-    Toggle("Use screen capture", isOn: $screenCapture.userOverride)
-    Link("Re-open onboarding step", ...)
-    Text("Used when AX returns no content for the active app...")
+// NoType/UI/Settings/Panes/RecordingPane.swift — sketch
+DSCard(title: "Screen capture") {
+    DSCardRow(
+        title: "Use screen capture for context",
+        subtitle: "Fires only when accessibility returns no content for the active app — primarily Electron / web-views."
+    ) {
+        Toggle("", isOn: $appState.screenCaptureFallbackEnabled)
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(DS.Color.accent)
+    }
+    // Status row links into the About-pane permission chip when ungranted.
 }
 ```
 

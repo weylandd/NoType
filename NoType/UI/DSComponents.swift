@@ -427,6 +427,49 @@ extension DSPrimaryButton.Size {
     fileprivate var cornerRadius:   CGFloat { self == .large ? 8 : 6 }
 }
 
+/// Outline secondary button variant in danger red — same shape as
+/// `DSSecondaryButton` but tinted by `DS.Color.dangerFg` /
+/// `DS.Color.dangerBorder`. Used for destructive confirms like
+/// "Delete all transcripts".
+struct DSDestructiveButton: View {
+    typealias Size = DSPrimaryButton.Size
+
+    let label: String
+    var size: Size = .small
+    var leadingSystemSymbol: String? = nil
+    let action: () -> Void
+
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: size.contentSpacing) {
+                if let symbol = leadingSystemSymbol {
+                    Image(systemName: symbol)
+                        .font(.system(size: size.symbolSize, weight: .semibold))
+                }
+                Text(label)
+                    .font(.system(size: size.fontSize, weight: .medium))
+            }
+            .foregroundStyle(DS.Color.dangerFg)
+            .padding(.horizontal, size.horizontalPadding)
+            .frame(minHeight: size.height)
+            .background(
+                hovered ? DS.Color.dangerSoft : .clear,
+                in: RoundedRectangle(cornerRadius: size.cornerRadius)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: size.cornerRadius)
+                    .strokeBorder(DS.Color.dangerBorder, lineWidth: DS.Border.hairline)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .animation(DS.Motion.fast, value: hovered)
+        .accessibilityLabel(label)
+    }
+}
+
 /// Quiet text-style secondary action ("View logs", "Learn more"). Used
 /// alongside `DSPrimaryButton` / `DSSecondaryButton` in HUD action rows.
 struct DSLinkButton: View {
@@ -648,6 +691,239 @@ struct DSSettingsRow<Trailing: View>: View {
         .padding(.horizontal, DS.Space.s4)
         .padding(.vertical, DS.Space.s3 + 2)  // 10 pt — comfortable for toggles + slider tracks
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// MARK: - DSKeycapPill
+//
+// Shared keycap chrome used by Settings → Recording (shortcut row +
+// "How recording works" callout). Two emerging call sites in PR #52
+// matched the DS convention's 2+ surfaces rule (UI/CLAUDE.md), so
+// the shape lives here instead of duplicated as private structs in
+// each pane component.
+//
+// `style` selects between the dense pill used inline next to a
+// "Change" button (.compact, 12 pt mono medium) and the larger
+// callout chip (.callout, 12 pt mono regular, taller hit area)
+// with no behavioural difference — just per-site visual tuning.
+
+struct DSKeycapPill: View {
+    enum Style {
+        case compact   // shortcut row keycap (24 pt tall, weight medium)
+        case callout   // how-recording-works callout (24+ pt, weight regular)
+    }
+
+    let label: String
+    var style: Style = .compact
+
+    var body: some View {
+        Text(label)
+            .font(font)
+            .foregroundStyle(DS.Color.textPrimary)
+            .padding(.horizontal, padding)
+            .frame(minWidth: minWidth, minHeight: minHeight)
+            .background(background, in: RoundedRectangle(cornerRadius: DS.Radius.sm))
+            .overlay(
+                RoundedRectangle(cornerRadius: DS.Radius.sm)
+                    .strokeBorder(DS.Color.borderDefault, lineWidth: DS.Border.hairline)
+            )
+            .accessibilityLabel(label)
+    }
+
+    private var font: Font {
+        switch style {
+        case .compact: return .system(size: 12, weight: .medium, design: .monospaced)
+        case .callout: return .system(size: 12, design: .monospaced)
+        }
+    }
+
+    private var padding: CGFloat {
+        style == .callout ? 7 : DS.Space.s2 + 2
+    }
+
+    private var minWidth: CGFloat {
+        style == .callout ? 24 : 0
+    }
+
+    private var minHeight: CGFloat {
+        style == .callout ? 24 : 22
+    }
+
+    private var background: Color {
+        style == .callout ? DS.Color.bgOverlay : DS.Color.bgInset
+    }
+}
+
+// MARK: - DSCard + DSCardRow
+//
+// Card chrome for the redesigned Settings screen. Each Settings pane
+// (General / Recording / Language & Paste / API & Usage / About)
+// stacks one or more DSCards; each card contains a head (title +
+// optional meta text) and one or more DSCardRows.
+//
+// Why a second card family alongside the older DSSettingsSection +
+// DSSettingsRow pair: the design moved from a flat scroll-with-headers
+// form to a card-grouped two-column shell. The card surface needs a
+// proper title bar with optional right-side meta (e.g.
+// "Disabled while recording"), a slightly elevated background
+// (bg-surface, not bg-canvas), and rows that grow internal hairlines
+// between siblings — the older primitive's section title sits OUTSIDE
+// the card and has no meta slot. Kept side-by-side rather than
+// refactored to avoid disturbing surfaces that already consume the
+// old pair.
+
+/// Card-style grouping surface used by every pane of the Settings
+/// screen. Provides an optional head row (title + optional meta text
+/// floated right), a hairline border at radius 10, and a vertical
+/// stack body slot. Rows inside the body are separated by hairlines
+/// rendered by the row primitive itself — the card doesn't draw
+/// dividers, callers do via `DSCardRow` siblings.
+struct DSCard<Content: View>: View {
+    var title: String? = nil
+    var meta: String? = nil
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let title, !title.isEmpty {
+                head(title: title, meta: meta)
+            }
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            DS.Color.bgSurface,
+            in: RoundedRectangle(cornerRadius: DS.Radius.lg)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.Radius.lg)
+                .strokeBorder(DS.Color.borderSubtle, lineWidth: DS.Border.hairline)
+        )
+    }
+
+    private func head(title: String, meta: String?) -> some View {
+        HStack(alignment: .center, spacing: DS.Space.s3) {
+            Text(title)
+                .font(DS.Font.body(.semibold))
+                .foregroundStyle(DS.Color.textPrimary)
+            Spacer(minLength: DS.Space.s3)
+            if let meta, !meta.isEmpty {
+                Text(meta)
+                    .font(DS.Font.labelMono())
+                    .textCase(.uppercase)
+                    .foregroundStyle(DS.Color.textQuaternary)
+                    .tracking(0.5)
+            }
+        }
+        .padding(.horizontal, DS.Space.s5 - 2)
+        .padding(.top, DS.Space.s4 + 2)
+        .padding(.bottom, DS.Space.s2 + 2)
+    }
+}
+
+/// Single row inside a `DSCard`. Two layouts:
+/// - `.row`  (default): title + subtitle on the leading side, trailing
+///                      control docked right.
+/// - `.col`           : title + subtitle on top, trailing control wraps
+///                      below — used for chip arrays and other wide
+///                      controls.
+///
+/// Renders a top-edge hairline so siblings inside one card grow
+/// dividers between them. The first row sits flush against the card
+/// head; if you need a divider above the very first row, the head's
+/// own bottom padding plus the row's top border handle it.
+struct DSCardRow<Trailing: View>: View {
+    enum Layout { case row, col }
+
+    let title: String
+    var subtitle: AttributedString? = nil
+    var layout: Layout = .row
+    /// When true, suppress the top hairline. Use for the first row of
+    /// a card with no head, or when stacking custom blocks that own
+    /// their own dividers.
+    var hideTopBorder: Bool = false
+    @ViewBuilder let trailing: () -> Trailing
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if !hideTopBorder {
+                DS.Color.borderSubtle
+                    .frame(height: DS.Border.hairline)
+            }
+            content
+                .padding(.horizontal, DS.Space.s5 - 2)
+                .padding(.vertical, DS.Space.s4 + 2)
+                .frame(minHeight: 56)
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch layout {
+        case .row:
+            HStack(alignment: .center, spacing: DS.Space.s5) {
+                meta
+                Spacer(minLength: DS.Space.s3)
+                trailing()
+            }
+        case .col:
+            VStack(alignment: .leading, spacing: DS.Space.s3 + 2) {
+                meta
+                trailing()
+            }
+        }
+    }
+
+    private var meta: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(DS.Font.body(.medium))
+                .foregroundStyle(DS.Color.textPrimary)
+            if let subtitle, subtitle.characters.isEmpty == false {
+                Text(subtitle)
+                    .font(DS.Font.bodySM())
+                    .foregroundStyle(DS.Color.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+extension DSCardRow where Trailing == EmptyView {
+    init(
+        title: String,
+        subtitle: AttributedString? = nil,
+        layout: Layout = .row,
+        hideTopBorder: Bool = false
+    ) {
+        self.init(
+            title: title,
+            subtitle: subtitle,
+            layout: layout,
+            hideTopBorder: hideTopBorder,
+            trailing: { EmptyView() }
+        )
+    }
+}
+
+/// Convenience initializer accepting a plain String subtitle. Most
+/// rows have plain copy; AttributedString stays available for rows
+/// that need inline bold or accented spans (e.g. Music interruption).
+extension DSCardRow {
+    init(
+        title: String,
+        subtitle: String?,
+        layout: Layout = .row,
+        hideTopBorder: Bool = false,
+        @ViewBuilder trailing: @escaping () -> Trailing
+    ) {
+        self.init(
+            title: title,
+            subtitle: subtitle.map(AttributedString.init),
+            layout: layout,
+            hideTopBorder: hideTopBorder,
+            trailing: trailing
+        )
     }
 }
 

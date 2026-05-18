@@ -25,28 +25,37 @@ struct GeminiKeyRow: View {
 
     var body: some View {
         let key = appState.currentAPIKey ?? ""
-        DSSettingsRow(
-            title: "Gemini API key",
-            subtitle: "Stored in macOS Keychain. NoType never sends it anywhere except Gemini."
+        DSCardRow(
+            title: "API key",
+            subtitle: Self.subtitle,
+            hideTopBorder: true
         ) {
             HStack(spacing: DS.Space.s3) {
-                Text(Self.maskedDisplay(for: key))
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(DS.Color.textSecondary)
-                DSSecondaryButton(label: "Edit") {
+                MaskedKeyPill(value: Self.maskedDisplay(for: key))
+                DSSecondaryButton(
+                    label: "Edit",
+                    leadingSystemSymbol: "pencil"
+                ) {
                     showingEditSheet = true
                 }
             }
         }
-        // Sheet is attached to the row's own body (not nested
-        // inside the trailing closure of DSSettingsRow) to avoid
-        // the macOS-15 quirk where `.sheet(...)` on a deeply
-        // nested view inside a `ScrollView` can flicker or
-        // self-dismiss on presentation.
         .sheet(isPresented: $showingEditSheet) {
             EditAPIKeySheet(isPresented: $showingEditSheet)
                 .environment(appState)
         }
+    }
+
+    /// Subtitle copy that includes an inline link to Google AI Studio
+    /// — matches the design's "Need one? Get a key in Google AI Studio ↗".
+    private static var subtitle: AttributedString {
+        var s = AttributedString("Need one? ")
+        s.foregroundColor = DS.Color.textTertiary
+        var link = AttributedString("Get a key in Google AI Studio ↗")
+        link.foregroundColor = DS.Color.accentFg
+        link.link = URL(string: "https://aistudio.google.com/app/apikey")
+        s.append(link)
+        return s
     }
 
     // MARK: - Pure helpers (testable)
@@ -60,7 +69,32 @@ struct GeminiKeyRow: View {
         let prefix = key.prefix(6)
         return prefix + String(repeating: "•", count: 8)
     }
+}
 
+/// Masked key display pill — lock glyph + first 6 chars + 8 middle
+/// dots, monospaced and slightly tracked so the dots read evenly.
+private struct MaskedKeyPill: View {
+    let value: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            DSIcon(name: .lock, size: 11, color: DS.Color.textQuaternary)
+            Text(value)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(DS.Color.textPrimary)
+                .tracking(0.5)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 28)
+        .background(DS.Color.bgInset, in: RoundedRectangle(cornerRadius: DS.Radius.sm))
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.Radius.sm)
+                .strokeBorder(DS.Color.borderSubtle, lineWidth: DS.Border.hairline)
+        )
+    }
+}
+
+extension GeminiKeyRow {
     /// Translate a thrown error from the validate / save path into
     /// the inline label shown inside the Edit sheet. Case-mapped
     /// for the two common authentication outcomes (missingKey,

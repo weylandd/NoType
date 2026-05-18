@@ -8,7 +8,7 @@ import SwiftUI
 ///   2. `MainWindowView.body` — `.frame(min==max ...)`.
 ///   3. `MainWindowView.body` — `FixedSizeWindowConfigurator(size:)`.
 enum MainWindowMetrics {
-    static let canvasSize = NSSize(width: 1080, height: 760)
+    static let canvasSize = NSSize(width: 1180, height: 820)
 }
 
 /// Tabs available in the main window's left navigation.
