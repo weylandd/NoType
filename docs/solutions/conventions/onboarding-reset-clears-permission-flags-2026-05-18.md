@@ -27,7 +27,7 @@ Two NoType permissions emulate the macOS `.notDetermined` state via UserDefaults
 
 The friction: `OnboardingState.resetWizardDefaults` originally cleared only the three onboarding keys (`currentStep`, `furthestStep`, `complete`). A user who reset onboarding via Settings → Reset Onboarding kept the sticky `hasAsked` flag, so the re-run wizard rendered the Permissions step with **red "DENIED"** on Accessibility and Screen Recording — the exact UX the `hasAsked` pattern was meant to eliminate for users who refused nothing in the current wizard run.
 
-Caught by the `ce-code-review` adversarial reviewer on PR #51 (the original parent fix that introduced AX's `hasAsked` flag). Not pre-existing — the bug shipped the moment AccessibilityPermission gained the `hasAsked` flag, because Reset Onboarding was the second user-visible state-reset surface and nobody propagated the new key into it.
+Caught by the `ce-code-review` adversarial reviewer on PR #51 (the parent fix that introduced AX's `hasAsked` flag). The bug technically pre-existed PR #51: ScreenRecording's `hasAsked` flag survived `resetWizardDefaults` from the day Screen Recording adopted the pattern. PR #51 made it twice as visible (now two rows render red "DENIED" on a wizard re-run instead of one) and is the catalyst that surfaced the broader cross-module gap.
 
 ## Guidance
 
@@ -118,7 +118,7 @@ Pinned by `OnboardingStateTests.test_resetWizard_clearsPermissionHasAskedFlags`.
 - `NoType/Permissions/CLAUDE.md` invariant 6 — the canonical `hasAsked` pattern documentation.
 - `NoType/Onboarding/OnboardingState.swift:113` — `resetWizardDefaults` definition.
 - `NoType/Permissions/AccessibilityPermission.swift:21` — the first permission to surface this gap.
-- `NoType/Permissions/ScreenRecordingPermission.swift:23` — the canonical reference for the `hasAsked` pattern (predates Accessibility's adoption).
-- `docs/solutions/architecture-patterns/screenshot-ocr-fallback-2026-05-15.md` — original ADR that established the `hasAsked` workaround for Screen Recording.
+- `NoType/Permissions/ScreenRecordingPermission.swift:14-34` — the file-header comment block is the canonical rationale for the `hasAsked` workaround pattern; this is where the pattern was first introduced (predates Accessibility's adoption). The pattern itself has no dedicated ADR — it lives in code + CLAUDE.md invariant 6.
+- `docs/solutions/architecture-patterns/screenshot-ocr-fallback-2026-05-15.md` — ADR for the OCR fallback strategy gated by `ScreenRecordingPermission`. Adjacent context (Screen Recording is the canonical reference for `hasAsked`) but the ADR's topic is the OCR fallback decision, not the permission state-machine emulation.
 - PR #51 — the diff that introduced this guidance, including the `ce-code-review` adversarial finding that surfaced the original gap.
 - `docs/plans/2026-05-18-002-fix-accessibility-not-determined-state-plan.md` — parent plan.
