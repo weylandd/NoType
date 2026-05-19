@@ -8,8 +8,11 @@ import SwiftUI
 /// 2. **Personal dictionary** — canonical spellings shipped in the
 ///    `User dictionary:` Gemini cache-prefix section to bias
 ///    transcription. Mix of user-typed (sticky) and auto-extracted
-///    (FIFO trim past 100 total) entries; once the user has ≥80 manual
-///    entries, auto-extraction pauses entirely (ADR-016).
+///    (FIFO trim past 100 total) entries; once the user has all
+///    `DictionarySnapshot.maxTotalEntries` (100) slots filled with
+///    manual entries, auto-extraction pauses entirely (ADR-016). The
+///    count chip turns warning-coloured at ≥80 manual entries as an
+///    earlier soft signal, but only the 100-mark gates the harvester.
 ///
 /// Layout: header → two section blocks. Each block has a mono section
 /// heading (label + short hint + a trailing scope pill) and a
@@ -60,7 +63,7 @@ struct DictionaryView: View {
     private var header: some View {
         HStack(spacing: DS.Space.s4) {
             Text("Dictionary")
-                .font(.system(size: 18, weight: .semibold))
+                .font(DS.Font.title(.semibold))
                 .foregroundStyle(DS.Color.textPrimary)
             DictScopeCrumb(text: "Vocabulary · Auto-replace")
             Spacer(minLength: 0)
@@ -259,7 +262,7 @@ struct DictionaryView: View {
                 DSIcon(name: .warning, size: 12, color: DS.Color.warningFg)
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text("Dictionary almost full of manual entries.")
+                Text("Dictionary full of manual entries.")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(DS.Color.textPrimary)
                 Text("Auto-harvest is paused — remove a few words to let NoType pick up new ones again.")
@@ -735,7 +738,7 @@ private struct DictAddTextField: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        TextField(placeholder, text: $text, onCommit: onCommit)
+        TextField(placeholder, text: $text)
             .textFieldStyle(.plain)
             .font(.system(size: 12.5, design: monospaced ? .monospaced : .default))
             .foregroundStyle(DS.Color.textPrimary)
@@ -753,6 +756,7 @@ private struct DictAddTextField: View {
                     .padding(-2)
             )
             .focused($focused)
+            .onSubmit(onCommit)
             .animation(DS.Motion.fast, value: focused)
     }
 }
@@ -773,11 +777,12 @@ private struct DictAddEntryField: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            TextField(placeholder, text: $text, onCommit: onCommit)
+            TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
                 .foregroundStyle(DS.Color.textPrimary)
                 .focused($focused)
+                .onSubmit(onCommit)
                 .onChange(of: text) { _, newValue in
                     if newValue.count > maxLength {
                         text = String(newValue.prefix(maxLength))
@@ -935,6 +940,7 @@ private struct ClearStagedButton: View {
         .help(destructive
               ? "Clear all your typed terms too."
               : "Clear auto-extracted terms. Your typed ones stay.")
+        .accessibilityLabel(label)
     }
 
     private var foreground: Color {
