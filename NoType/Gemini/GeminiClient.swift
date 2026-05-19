@@ -34,11 +34,42 @@ actor GeminiClient {
             case .http(let s, _) where s == 403:    "Gemini API key is not authorized for this model."
             case .http(let s, _) where s == 429:    "Gemini rate limit reached. Try again in a moment."
             case .http(let s, _) where s >= 500:    "Gemini is having trouble (HTTP \(s))."
-            case .http(let s, _):                   "Gemini error \(s)."
+            case .http(let s, let body):
+                Self.knownGoogleErrorMessage(status: s, body: body)
+                    ?? "Gemini error \(s)."
             case .decoding:                         "Couldn't read Gemini's response."
             case .empty:                            "Gemini returned an empty transcription."
             case .blocked(let reason):              "Gemini blocked the request: \(reason)."
             }
+        }
+
+        /// Whitelist-match Google's response body against known
+        /// failure shapes and return our own user-facing copy.
+        ///
+        /// **Security contract (plan §548 / §571):** the raw `body`
+        /// can carry partial key echo, project-id, or quota
+        /// identifiers — it must NEVER be surfaced verbatim. So we
+        /// match on a small set of substrings that Google ships in
+        /// the `error.message` field and return a constant string
+        /// of our own. The body is only ever an input to the
+        /// substring test, never to the output. `GeminiKeyRowTests`'
+        /// body-leak guard pins this contract.
+        ///
+        /// Returns `nil` when no whitelisted shape matches — the
+        /// caller falls back to a generic `Gemini error <N>.` line.
+        private static func knownGoogleErrorMessage(status: Int, body: String) -> String? {
+            // Region-block: Gemini API rejects requests from a set
+            // of countries (Russia, Belarus, …) even with a valid
+            // paid key. The endpoint returns HTTP 400 +
+            // `FAILED_PRECONDITION` + this exact phrase in
+            // `error.message`. We surface it explicitly because the
+            // generic "Gemini error 400." gave a tester no idea what
+            // to do (the actual fix is "use a VPN", not "fix your
+            // key").
+            if body.contains("User location is not supported") {
+                return "Gemini isn't available in your region. Try connecting through a VPN."
+            }
+            return nil
         }
     }
 

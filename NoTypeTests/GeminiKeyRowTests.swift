@@ -134,4 +134,59 @@ final class GeminiKeyRowTests: XCTestCase {
         let rendered = GeminiKeyRow.errorMessage(for: Toy())
         XCTAssertEqual(rendered, "something else")
     }
+
+    // MARK: - Whitelisted Google error shapes
+
+    func test_errorMessage_http400_userLocationNotSupported_isExplainedAsRegionBlock() {
+        // Gemini API rejects requests from a set of countries with
+        // a HTTP 400 + this exact phrase in `error.message`. The
+        // generic "Gemini error 400." gave a tester no idea what to
+        // do — surface the actionable hint ("use a VPN") instead.
+        // Body fixture is the real shape Google returns, so a
+        // future Google rename will fail this test loudly.
+        let body = #"""
+        {
+          "error": {
+            "code": 400,
+            "message": "User location is not supported for the API use.",
+            "status": "FAILED_PRECONDITION"
+          }
+        }
+        """#
+        let err = GeminiClient.GeminiError.http(status: 400, body: body)
+        let rendered = GeminiKeyRow.errorMessage(for: err)
+        XCTAssertEqual(
+            rendered,
+            "Gemini isn't available in your region. Try connecting through a VPN."
+        )
+        // Body-leak guard: even though we matched on body content,
+        // the raw JSON / status string must NOT appear in the output.
+        XCTAssertFalse(rendered.contains("FAILED_PRECONDITION"))
+        XCTAssertFalse(rendered.contains("\"error\""))
+    }
+
+    func test_errorMessage_http400_unrelatedBody_fallsBackToGenericLine() {
+        // Regression: only the whitelisted phrase triggers the
+        // region-block copy. Other 400s keep the generic line so
+        // we don't accidentally claim "region block" for, say, a
+        // malformed-request bug.
+        let body = #"{"error":{"code":400,"message":"Invalid argument","status":"INVALID_ARGUMENT"}}"#
+        let err = GeminiClient.GeminiError.http(status: 400, body: body)
+        let rendered = GeminiKeyRow.errorMessage(for: err)
+        XCTAssertEqual(rendered, "Gemini error 400.")
+        XCTAssertFalse(rendered.contains("Invalid argument"))
+    }
+
+    func test_errorMessage_http500_bodyContainingTriggerPhrase_doesNotMisroute() {
+        // The location-match runs only for the generic .http arm,
+        // but a 5xx with the trigger phrase in its body must still
+        // route through the 5xx-specific case and NOT inherit the
+        // region-block copy. Defends the case-order in errorDescription.
+        let err = GeminiClient.GeminiError.http(
+            status: 500,
+            body: "User location is not supported for the API use."
+        )
+        let rendered = GeminiKeyRow.errorMessage(for: err)
+        XCTAssertEqual(rendered, "Gemini is having trouble (HTTP 500).")
+    }
 }
