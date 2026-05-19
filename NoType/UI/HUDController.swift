@@ -190,8 +190,8 @@ final class HUDController {
     func showErrorHUD(
         payload: ErrorPayload,
         autoDismissAfter: TimeInterval? = 8,
-        onRetry:     (() -> Void)? = nil,
-        onSecondary: (() -> Void)? = nil
+        onRetry:     (@MainActor () -> Void)? = nil,
+        onSecondary: (@MainActor () -> Void)? = nil
     ) {
         errorPanel?.hide()
         errorPanel?.close()
@@ -201,13 +201,13 @@ final class HUDController {
             payload: payload,
             onDismiss: { [weak self] in self?.hideErrorHUD() },
             onRetry: onRetry.map { handler in
-                { [weak self] in
+                { @MainActor [weak self] in
                     handler()
                     self?.hideErrorHUD()
                 }
             },
             onSecondary: onSecondary.map { handler in
-                { [weak self] in
+                { @MainActor [weak self] in
                     handler()
                     self?.hideErrorHUD()
                 }

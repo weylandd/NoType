@@ -33,7 +33,7 @@ SwiftUI surfaces: menu-bar icon, history popover, the main app window (Home tab 
 
 ## Invariants
 
-1. **Errors surface only via `HUDController.showErrorHUD(...)`** — translated from the private `NoTypeErrorKind` table in `AppState.surfaceError`. Adding a new error mode = extend the enum + add a `payload` case + call `surfaceError(.foo)` at the failure site.
+1. **Errors surface only via `HUDController.showErrorHUD(...)`** — translated from the `internal NoTypeErrorKind` table in `AppState.surfaceError`. Adding a new error mode = extend the enum + add a `payload` case + call `surfaceError(.foo)` at the failure site. Visibility is `internal` so `MissingKeyHUDRetryTests` can pin the catalog's regression guard ("every `payload.retryLabel != nil` kind must ship a non-`nil` `retryHandler`") via `@testable import NoType`.
 2. **`HUDPanel` is `NSPanel` with `NSVisualEffectView` `contentView`** (`material = .menu`, `blendingMode = .behindWindow`, `state = .active`). Embedding the blur inside SwiftUI's `.background(...)` silently fails to pick up `behindWindow` blur context — see comment at the top of `HUDPanel.swift`.
 3. **`MenuBarExtra(isInserted: $onboarding.isComplete)`** — tray suppressed during onboarding.
 4. **`Scene.defaultLaunchBehavior(_:)` drives first-launch presentation** — `.presented` while onboarding pending, `.automatic` once complete. macOS 15+ API; loss of this is the regression that drove ADR-001.

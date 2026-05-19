@@ -23,27 +23,42 @@ struct MenuBarIcon: View {
     @Environment(AppState.self)             var appState
     @Environment(PermissionsViewModel.self) var permissions
     @Environment(OnboardingState.self)      var onboarding
+    @Environment(\.openWindow)              private var openWindow
 
     var body: some View {
-        switch appState.recordingState {
-        case .idle:
-            Image("menu_icon_fill")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 18, height: 18)
+        Group {
+            switch appState.recordingState {
+            case .idle:
+                Image("menu_icon_fill")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 18, height: 18)
 
-        case .recording(let startedAt):
-            RecordingTrayPill(startedAt: startedAt)
+            case .recording(let startedAt):
+                RecordingTrayPill(startedAt: startedAt)
 
-        case .sending:
-            Image("menu_icon_fill")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 18, height: 18)
+            case .sending:
+                Image("menu_icon_fill")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 18, height: 18)
 
-        case .error:
-            Image(systemName: "mic.slash")
-                .foregroundStyle(DS.Color.dangerBase)
+            case .error:
+                Image(systemName: "mic.slash")
+                    .foregroundStyle(DS.Color.dangerBase)
+            }
+        }
+        // Bridge SwiftUI's `openWindow` into AppState. The menu-bar icon
+        // is always alive once onboarding completes (NoTypeApp suppresses
+        // the entire MenuBarExtra during onboarding), so this is the most
+        // reliable always-on hook. `.task` fires once on first appearance
+        // and does NOT cause repaints — distinct from the TimelineView
+        // repaint-storm hazard called out at the top of this file.
+        // Idempotent re-binding is harmless; the closure is `nonisolated`-
+        // safe because openWindow is itself `@MainActor`-bound and we're
+        // already on MainActor here.
+        .task {
+            appState.openMainWindowRequest = { openWindow(id: "main") }
         }
     }
 }

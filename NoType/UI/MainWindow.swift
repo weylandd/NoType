@@ -38,27 +38,42 @@ enum MainTab: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Pure-function consumer for the cross-window
-    /// `pendingTabSelection` flag (popover gear → main window
-    /// navigation). Reads + clears the pending tab atomically and
-    /// returns the new effective `selectedTab` value. Used by
-    /// `MainWindowView` in both `.onAppear` and `scenePhase ==
-    /// .active`; extracted so it can be tested in isolation without
-    /// standing up a `Window` scene.
-    ///
-    /// Clear-first-apply-second order is load-bearing per plan §270 —
-    /// guards against a stale flag (set hours ago) hijacking an
-    /// unrelated window-open trigger (e.g. Sparkle banner click).
-    /// Even if `pending` is non-nil here we still clear it; the
-    /// caller can decide whether to apply.
+    /// Cross-window `pendingTabSelection` consumer (popover gear →
+    /// main window navigation). Delegates to the shared generic
+    /// `consumeAndClearPendingSelection` helper — see its doc-comment
+    /// for the clear-first-apply-second discipline. Kept as an
+    /// enum-scoped static for backwards compatibility with
+    /// `MainTabTests`.
     static func consumePendingSelection(
         pending: inout MainTab?,
         current: MainTab
     ) -> MainTab {
-        let captured = pending
-        pending = nil
-        return captured ?? current
+        consumeAndClearPendingSelection(pending: &pending, current: current)
     }
+}
+
+/// Shared generic consumer for cross-surface "pending selection"
+/// flags (`pendingTabSelection`, `pendingSettingsCategory`). Reads +
+/// clears `pending` atomically; returns `current` if nothing was
+/// pending. Clear-first-apply-second is load-bearing per plan §270 —
+/// guards against a stale flag (set hours ago) hijacking an unrelated
+/// trigger (Sparkle banner click → tab/category switch, etc.). Even
+/// when `pending` is non-nil here we still clear it; the caller
+/// decides whether to apply the returned value.
+///
+/// Distinct name from the enum-scoped `consumePendingSelection`
+/// statics to avoid unqualified-name lookup ambiguity from their
+/// bodies. Extracted from byte-for-byte duplication between
+/// `MainTab.consumePendingSelection` and
+/// `SettingsCategory.consumePendingSelection`; both statics delegate
+/// here so existing test surfaces stay unchanged.
+func consumeAndClearPendingSelection<T>(
+    pending: inout T?,
+    current: T
+) -> T {
+    let captured = pending
+    pending = nil
+    return captured ?? current
 }
 
 /// Root view of the main app window. A 220 pt sidebar (brand + nav)

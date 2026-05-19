@@ -37,7 +37,7 @@ Services (`GeminiClient`, `AudioRecorder`, `HistoryStore`) are injected into vie
 
 ### Modules own their own errors
 
-Each module declares `enum FooError: Error` and surfaces only its own type. **Don't `throw` an `Error` across module boundaries** — translate at the UI seam in `AppState.surfaceError(_:)` via the private `NoTypeErrorKind` table.
+Each module declares `enum FooError: Error` and surfaces only its own type. **Don't `throw` an `Error` across module boundaries** — translate at the UI seam in `AppState.surfaceError(_:)` via the internal `NoTypeErrorKind` table. (Visibility is `internal` solely so `NoTypeTests` can pin the catalog's regression-guard invariant — every `payload.retryLabel != nil` kind must also ship a non-`nil` `retryHandler` — via `@testable import NoType`. `surfaceError` itself remains `private` so the set of error sites stays unchanged.)
 
 ### Naming & files
 

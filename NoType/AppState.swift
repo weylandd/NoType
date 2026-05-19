@@ -30,6 +30,34 @@ final class AppState {
     /// instead of the update detail).
     var pendingTabSelection: MainTab?
 
+    /// Deep-link into a Settings sub-pane (e.g. the missing-API-key
+    /// HUD's "Open Settings" button landing directly on API & Usage,
+    /// not the default General pane). Consumed by `SettingsTabView`
+    /// with the same clear-first-apply-second discipline as
+    /// `pendingTabSelection`.
+    var pendingSettingsCategory: SettingsCategory?
+
+    /// Bridge for SwiftUI's `@Environment(\.openWindow)` into AppState.
+    /// AppState is not a SwiftUI View and can't read the environment
+    /// directly, so `MenuBarIcon`'s `.task` (always alive once
+    /// onboarding completes — `NoTypeApp` suppresses the entire
+    /// `MenuBarExtra` during onboarding) injects the closure on first
+    /// appearance. Mirrors the post-init injection patterns already
+    /// used for `NoTypeAppDelegate.terminationHandler` and
+    /// `AppCategorizer.onAssignmentChanged`.
+    ///
+    /// Callers should prefer raising an already-created window via
+    /// `NSApp.windows` first and fall through to this closure for the
+    /// lazy-Window-scene case — see `NoTypeErrorKind.retryHandler` for
+    /// the canonical pattern.
+    ///
+    /// `nil` window: during onboarding `MenuBarExtra` is suppressed so
+    /// this slot is unset, but `handleHotkeyPress` also short-circuits
+    /// to `onboardingHotkeyPressObserver`, so error HUDs that would
+    /// invoke this closure cannot fire in that state.
+    @ObservationIgnored
+    var openMainWindowRequest: (() -> Void)?
+
     /// Lifetime aggregate of every recorded session — survives the
     /// 10-entry cap on `history`. Source of truth for Home tab stats
     /// (words/time saved/WPM), the top-apps panel, and the activity
@@ -1538,8 +1566,8 @@ final class AppState {
     /// shows it. Persistent — the HUD stays until dismissed or replaced.
     private func surfaceError(_ kind: NoTypeErrorKind) {
         let payload = kind.payload
-        let onRetry: (() -> Void)? = kind.retryHandler.map { handler in
-            { [weak self] in handler(self) }
+        let onRetry: (@MainActor () -> Void)? = kind.retryHandler.map { handler in
+            { @MainActor [weak self] in handler(self) }
         }
         hud.showErrorHUD(payload: payload, onRetry: onRetry)
     }
@@ -1550,7 +1578,14 @@ final class AppState {
 /// Mapping table from internal error sources to ErrorHUD payloads.
 /// Centralising this here keeps strings out of the per-call sites and
 /// makes it obvious how each failure mode is surfaced to the user.
-private enum NoTypeErrorKind {
+///
+/// Visibility is `internal` (default) so `NoTypeTests` can pin the
+/// catalogue's invariant via `@testable import NoType` — specifically
+/// the regression-guard that every `payload.retryLabel != nil` kind
+/// also ships a non-`nil` `retryHandler` (see
+/// `MissingKeyHUDRetryTests`). Was previously `private`; nobody outside
+/// this file references it.
+enum NoTypeErrorKind {
     case missingAPIKey
     case vadLoadFailed
     case sessionStartFailed(Error)
@@ -1611,12 +1646,54 @@ private enum NoTypeErrorKind {
         }
     }
 
-    var retryHandler: ((AppState?) -> Void)? {
+    var retryHandler: (@MainActor (AppState?) -> Void)? {
         switch self {
         case .missingAPIKey:
-            // No native settings entry point yet — punt to a notification
-            // until the picker exists. Closure resolved at call site.
-            return nil
+            // The closure type is `@MainActor` — compile-time
+            // enforcement that every call site (the
+            // `@MainActor () -> Void` wrapper in `surfaceError`, fired
+            // from `HUDController.showErrorHUD`'s onRetry → SwiftUI
+            // button action) is on the main actor. Previously this
+            // body used `MainActor.assumeIsolated`, which is the
+            // rejected pattern per
+            // `docs/solutions/runtime-errors/onhover-mainactor-inheritance-crash-2026-05-19.md`
+            // (same `swift_task_isCurrentExecutor*` family that
+            // crashed `.onHover` on macOS 26.2).
+            return { app in
+                guard let app else { return }
+                app.pendingTabSelection = .settings
+                app.pendingSettingsCategory = .apiUsage
+                // Tracks whether we issued a real raise/open so the
+                // stale-flag-hijack guard below can run. If we leave
+                // the pending flags set without anything happening
+                // visibly, a later unrelated window-open trigger
+                // (popover gear) silently lands the user on API &
+                // Usage instead of General.
+                let didRaise: Bool
+                if let window = NSApp.windows.first(where: {
+                    $0.identifier?.rawValue == "main"
+                }) {
+                    window.makeKeyAndOrderFront(nil)
+                    didRaise = true
+                } else if let openMainWindow = app.openMainWindowRequest {
+                    // `Window` scenes are lazily created and aren't in
+                    // NSApp.windows until SwiftUI's openWindow triggers
+                    // them — fall through to the injected closure.
+                    openMainWindow()
+                    didRaise = true
+                } else {
+                    didRaise = false
+                }
+                if !didRaise {
+                    app.pendingTabSelection = nil
+                    app.pendingSettingsCategory = nil
+                    return
+                }
+                // Activate the app so the just-raised window lands in
+                // front of whatever the user was previously in (Slack /
+                // Notes / ...). Same pattern as `HistoryPopover.openSettings`.
+                NSApp.activate(ignoringOtherApps: true)
+            }
         default:
             return nil
         }

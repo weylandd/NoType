@@ -39,7 +39,7 @@ Prefer `guard let … else { throw … }` or `guard let … else { return }` wit
 
 - **Recoverable errors** → `throw`, caller decides.
 - **Programming errors** → `precondition` / `assertionFailure`. Crashing in dev is fine; in release these become silent and the system tries to keep going.
-- **User-facing errors** → translate at the UI boundary into an `ErrorPayload` via the private `NoTypeErrorKind` table in `AppState.swift`, surface through `HUDController.showErrorHUD(...)`.
+- **User-facing errors** → translate at the UI boundary into an `ErrorPayload` via the internal `NoTypeErrorKind` table in `AppState.swift`, surface through `HUDController.showErrorHUD(...)`. (The catalog is `internal` so `MissingKeyHUDRetryTests` can pin the "every payload with a `retryLabel` ships a non-`nil` `retryHandler`" regression guard via `@testable import NoType`; `surfaceError` itself stays `private`.)
 - **Never swallow errors silently.** If you intentionally ignore one, write `_ = try? …` *and* log at `.debug`.
 
 ### Logging

@@ -19,6 +19,7 @@ import SwiftUI
 struct SettingsTabView: View {
     @Environment(AppState.self) private var appState
     @Environment(OnboardingState.self) private var onboarding
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var selectedCategory: SettingsCategory = .general
 
@@ -55,6 +56,28 @@ struct SettingsTabView: View {
             // the user made in System Settings → Login Items without
             // a restart.
             appState.loginItemController.refresh()
+            consumePendingCategorySelection()
+        }
+        // Three triggers, same belt-and-braces shape as MainWindowView's
+        // pendingTabSelection consumer:
+        //   1. `.onAppear` — SettingsTabView freshly mounted (user
+        //      navigated to Settings from another tab; pending flag was
+        //      set just before the mount).
+        //   2. `.onChange(of: scenePhase)` — main window blurred (e.g.
+        //      by the popover) and refocused; the flag may have been
+        //      set during the blur window via the HUD button. Without
+        //      this trigger, a stale flag from a focus-and-blur cycle
+        //      could linger silently until the next `.onAppear`.
+        //   3. `.onChange(of: appState.pendingSettingsCategory)` —
+        //      direct watcher for the case where Settings is already on
+        //      screen and focused when the HUD button fires (no
+        //      scenePhase transition, but the flag write itself is
+        //      observable).
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { consumePendingCategorySelection() }
+        }
+        .onChange(of: appState.pendingSettingsCategory) { _, new in
+            if new != nil { consumePendingCategorySelection() }
         }
         .confirmationDialog(
             "Reopen the onboarding wizard?",
@@ -128,6 +151,13 @@ struct SettingsTabView: View {
                 }
             )
         }
+    }
+
+    private func consumePendingCategorySelection() {
+        selectedCategory = SettingsCategory.consumePendingSelection(
+            pending: &appState.pendingSettingsCategory,
+            current: selectedCategory
+        )
     }
 
     @ViewBuilder
