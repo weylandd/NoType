@@ -43,30 +43,32 @@ actor GeminiClient {
             }
         }
 
+        /// `true` when Google's response body indicates the caller's
+        /// country is on Gemini's unsupported-region list (Russia,
+        /// Belarus, …). The block is independent of key validity —
+        /// a valid paid key in a blocked region still gets HTTP 400
+        /// + `FAILED_PRECONDITION` + this exact `error.message`.
+        ///
+        /// Single source of truth for the trigger phrase: callers
+        /// in `errorDescription` (onboarding key validation),
+        /// `OnboardingAPIKeyStep.continueTapped`, and
+        /// `AppState.payloadForSessionFailure` all consult this
+        /// helper so a Google rewording is a one-line fix.
+        ///
+        /// **Security contract (plan §548 / §571):** body is the
+        /// input to the predicate, never the output. Callers must
+        /// keep the predicate-then-constant-string shape — never
+        /// interpolate `body` into the user-facing copy.
+        static func isRegionBlocked(body: String) -> Bool {
+            body.contains("User location is not supported")
+        }
+
         /// Whitelist-match Google's response body against known
         /// failure shapes and return our own user-facing copy.
-        ///
-        /// **Security contract (plan §548 / §571):** the raw `body`
-        /// can carry partial key echo, project-id, or quota
-        /// identifiers — it must NEVER be surfaced verbatim. So we
-        /// match on a small set of substrings that Google ships in
-        /// the `error.message` field and return a constant string
-        /// of our own. The body is only ever an input to the
-        /// substring test, never to the output. `GeminiKeyRowTests`'
-        /// body-leak guard pins this contract.
-        ///
         /// Returns `nil` when no whitelisted shape matches — the
         /// caller falls back to a generic `Gemini error <N>.` line.
         private static func knownGoogleErrorMessage(status: Int, body: String) -> String? {
-            // Region-block: Gemini API rejects requests from a set
-            // of countries (Russia, Belarus, …) even with a valid
-            // paid key. The endpoint returns HTTP 400 +
-            // `FAILED_PRECONDITION` + this exact phrase in
-            // `error.message`. We surface it explicitly because the
-            // generic "Gemini error 400." gave a tester no idea what
-            // to do (the actual fix is "use a VPN", not "fix your
-            // key").
-            if body.contains("User location is not supported") {
+            if isRegionBlocked(body: body) {
                 return "Gemini isn't available in your region. Try connecting through a VPN."
             }
             return nil

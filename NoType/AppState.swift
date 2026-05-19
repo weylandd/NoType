@@ -1752,6 +1752,14 @@ enum NoTypeErrorKind {
                     severity: .danger,
                     iconSymbol: "exclamationmark.triangle.fill"
                 )
+            case .http(_, let body) where GeminiClient.GeminiError.isRegionBlocked(body: body):
+                return ErrorPayload(
+                    title: "Gemini unavailable in your region",
+                    description: "The Gemini API is restricted in your country. Connect through a VPN and try again.",
+                    code: "ERR_REGION · 400",
+                    severity: .danger,
+                    iconSymbol: "exclamationmark.shield.fill"
+                )
             case .http(let s, _):
                 return ErrorPayload(
                     title: "Gemini rejected the request",

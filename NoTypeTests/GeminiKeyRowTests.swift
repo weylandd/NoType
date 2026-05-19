@@ -189,4 +189,35 @@ final class GeminiKeyRowTests: XCTestCase {
         let rendered = GeminiKeyRow.errorMessage(for: err)
         XCTAssertEqual(rendered, "Gemini is having trouble (HTTP 500).")
     }
+
+    // MARK: - Region-block predicate (shared trigger phrase)
+
+    func test_isRegionBlocked_matchesGoogleRealResponse() {
+        // Single source of truth for the trigger phrase across three
+        // consumers: GeminiError.errorDescription, OnboardingAPIKeyStep,
+        // and AppState.payloadForSessionFailure. If Google reworded
+        // "User location is not supported" all three would silently
+        // regress; this test catches it once.
+        let realBody = #"""
+        {
+          "error": {
+            "code": 400,
+            "message": "User location is not supported for the API use.",
+            "status": "FAILED_PRECONDITION"
+          }
+        }
+        """#
+        XCTAssertTrue(GeminiClient.GeminiError.isRegionBlocked(body: realBody))
+    }
+
+    func test_isRegionBlocked_rejectsUnrelatedBodies() {
+        XCTAssertFalse(GeminiClient.GeminiError.isRegionBlocked(body: ""))
+        XCTAssertFalse(GeminiClient.GeminiError.isRegionBlocked(body: "{}"))
+        XCTAssertFalse(GeminiClient.GeminiError.isRegionBlocked(
+            body: #"{"error":{"code":400,"message":"Invalid argument"}}"#
+        ))
+        XCTAssertFalse(GeminiClient.GeminiError.isRegionBlocked(
+            body: "user supplied a key from an unsupported region"  // close but no match
+        ))
+    }
 }
