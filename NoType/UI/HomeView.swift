@@ -232,9 +232,7 @@ private struct HomeStatsRow: View {
                 label: "Words transcribed",
                 value: stats.totalWords.formatted(.number.grouping(.automatic)),
                 unit: "words",
-                delta: stats.totalWords > 0
-                    ? stats.range.scopeLabel
-                    : "No words yet — hold ⌥ to dictate",
+                delta: Self.wordsCardDelta(for: stats),
                 deltaTone: .neutral
             )
             StatCard(
@@ -258,6 +256,19 @@ private struct HomeStatsRow: View {
                 deltaTone: .neutral
             )
         }
+    }
+
+    /// Words-card subtitle. Replaces the previous range-label
+    /// ("Last 30 days") with the user's actual dictation time over the
+    /// window — the range is already shown in the page header pill and
+    /// repeated on every card was redundant. Fallback to the range
+    /// label is only for legacy sessions that have words but no
+    /// duration data (totalDuration ≈ 0), where rendering "0m of
+    /// dictation" alongside a non-zero word count would mislead.
+    static func wordsCardDelta(for stats: HomeStats) -> String {
+        if stats.totalWords == 0 { return "No words yet — hold ⌥ to dictate" }
+        if stats.totalDurationSeconds <= 0 { return stats.range.scopeLabel }
+        return "\(formatDuration(stats.totalDurationSeconds)) of dictation"
     }
 
     /// Formats positive seconds as "Xh YYm" / "YYm" / "YYs". We don't
