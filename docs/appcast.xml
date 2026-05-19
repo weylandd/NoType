@@ -22,6 +22,66 @@
     <description>NoType release feed for Sparkle 2 auto-updates.</description>
     <language>en</language>
     <item>
+      <title>Version 0.1.8</title>
+      <pubDate>Tue, 19 May 2026 07:09:06 +0000</pubDate>
+      <sparkle:version>10</sparkle:version>
+      <sparkle:shortVersionString>0.1.8</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+Surface-redesign release. Settings, Instructions, Home stats, and now
+the Dictionary tab all moved to the new card-based design language;
+the app icon and menu-bar glyph picked up the new waveform mark along
+the way. One bug fix in the permissions surface.
+
+### Changed
+- **Dictionary tab redesigned** (#56) to match the new design
+  handoff. Two section blocks (Auto-replacement, Dictionary) each
+  carry a mono section header, a scope pill (`Local only` vs
+  `Sent to Gemini`), and a `bg-surface` card grouping rows + add
+  row + footer. Replacement rows show `from` as a left-aligned
+  monospace pill → centered arrow → `to`; the trash slot shares a
+  fixed trailing-gutter width with the Add button below so both
+  arrow columns line up. The dictionary card gains a `12/100`
+  count (warning-coloured at ≥80), an inline `Use dictionary`
+  toggle in the head, an embedded character counter in the
+  add-entry field, a warn banner when the manual cap is reached,
+  a chip cloud with user / auto-harvested variants, and a footer
+  with a status dot + two-stage Clear button.
+- **Settings and Instructions tabs redesigned** (#52, #53) as a
+  two-column shell — a secondary sidebar drives a 5-pane switch
+  (General / Recording / Language & Paste / API & Usage / About)
+  inside a `ScrollView` with a sticky header. Each pane composes
+  one or more `DSCard` sections from a new `DSCard` + `DSCardRow`
+  primitive family in `DSComponents.swift`.
+- **App icon and menu-bar glyph refreshed** to the new waveform
+  mark (#54) — both the rounded-square Dock / About icon and the
+  monochrome menu-bar template image were redrawn from the same
+  source asset.
+- **Home tab: dictation time appears under the Words transcribed
+  card** (#55), surfacing the total measured speaking time per the
+  current `HomeRange` window. Driven by the new
+  `StatsSnapshot.totalDurationSeconds` field already populated by
+  `StatsStore`.
+
+### Fixed
+- **Accessibility permission surfaces a neutral `.notDetermined`
+  state on first launch instead of red `DENIED`** (#51). On a
+  fresh install the system API returns `false` for both "never
+  asked" and "explicitly denied"; we now emulate `.notDetermined`
+  via a `notype.permissions.accessibility.hasAsked` UserDefaults
+  flag (same shape as the existing Screen Recording flag), so the
+  onboarding row reads `REQUIRED` until the user actually clicks
+  Grant. Includes a one-time backfill so users who completed
+  onboarding under an older build keep the correct
+  `DENIED + Open Settings` surface when they had refused.
+- **macOS 26 audio crash on first hotkey press** addressed in #53
+  (audio-engine init re-ordering — see the PR for details).
+      ]]></description>
+      <enclosure url="https://github.com/weylandd/NoType/releases/download/v0.1.8/NoType-0.1.8.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="3TjKpVpg0owk7NKXzfe/bfjHB4LUZ4Ro5nQxh4DppC69OK7H01Jt2567YkAFw0ZQotsghcKbuTeINpWvgbJbCA==" length="5937304" />
+    </item>
+    <item>
       <title>Version 0.1.7</title>
       <pubDate>Sun, 17 May 2026 11:07:46 +0000</pubDate>
       <sparkle:version>9</sparkle:version>
