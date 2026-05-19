@@ -240,11 +240,20 @@ final class AudioRecorder: @unchecked Sendable {
         lock.unlock()
 
         var procID: AudioDeviceIOProcID?
+        // The IOProc block runs on `ioQueue`, NOT on `@MainActor`.
+        // Without `@Sendable` the closure literal inherits the enclosing
+        // `@MainActor` isolation; under macOS 26's runtime the prologue
+        // then asserts it's running on the main queue and traps with
+        // `_swift_task_checkIsolatedSwift` → `dispatch_assert_queue` →
+        // `EXC_BREAKPOINT`. `@Sendable` strips the inheritance so the
+        // body executes as non-isolated, matching `handleIOProc`'s
+        // declaration. See
+        // `docs/solutions/runtime-errors/audio-ioproc-mainactor-inheritance-crash-2026-05-19.md`.
         let createStatus = AudioDeviceCreateIOProcIDWithBlock(
             &procID,
             device.id,
             ioQueue
-        ) { [weak self] _, inInputData, _, _, _ in
+        ) { @Sendable [weak self] _, inInputData, _, _, _ in
             self?.handleIOProc(inputData: inInputData)
         }
         guard createStatus == noErr, let proc = procID else {
