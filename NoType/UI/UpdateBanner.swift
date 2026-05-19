@@ -150,7 +150,7 @@ private struct BannerShell: View {
         }
         .buttonStyle(.plain)
         .disabled(onClick == nil)
-        .onHover { isHovered = $0 && onClick != nil }
+        .dsOnHover { isHovered = $0 && onClick != nil }
         .animation(DS.Motion.fast, value: isHovered)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityAddTraits(onClick != nil ? .isButton : [])
@@ -218,7 +218,7 @@ private struct AvailableBannerCard: View {
             mainBody
                 .contentShape(Rectangle())
                 .onTapGesture { onInstall() }
-                .onHover { mainHovered = $0 }
+                .dsOnHover { mainHovered = $0 }
 
             DSCloseButton(
                 size: .compact,

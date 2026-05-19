@@ -342,7 +342,7 @@ private struct SidebarNavItem: View {
             .background(background, in: RoundedRectangle(cornerRadius: DS.Radius.sm))
         }
         .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
+        .dsOnHover { isHovered = $0 }
         .animation(DS.Motion.fast, value: isHovered)
     }
 

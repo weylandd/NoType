@@ -718,7 +718,7 @@ private struct ReplacementRow: View {
         .padding(.vertical, DS.Space.s3 + 2)
         .background(hovered ? DS.Color.bgHover : .clear)
         .overlay(DS.Color.borderSubtle.frame(height: 1), alignment: .top)
-        .onHover { hovered = $0 }
+        .dsOnHover { hovered = $0 }
         .animation(DS.Motion.fast, value: hovered)
     }
 }
@@ -860,7 +860,7 @@ private struct DictChip: View {
         .frame(height: 26)
         .background(background, in: RoundedRectangle(cornerRadius: 999))
         .overlay(borderOverlay)
-        .onHover { hovered = $0 }
+        .dsOnHover { hovered = $0 }
         .animation(DS.Motion.fast, value: hovered)
     }
 
@@ -934,7 +934,7 @@ private struct ClearStagedButton: View {
             )
         }
         .buttonStyle(.plain)
-        .onHover { hovered = $0 }
+        .dsOnHover { hovered = $0 }
         .animation(DS.Motion.fast, value: hovered)
         .animation(DS.Motion.fast, value: destructive)
         .help(destructive

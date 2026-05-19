@@ -395,7 +395,7 @@ private struct RecheckLink: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .onHover { hovered = $0 }
+        .dsOnHover { hovered = $0 }
         .animation(DS.Motion.fast, value: hovered)
         .accessibilityLabel("Re-check permission")
     }

@@ -73,7 +73,7 @@ private struct Segment: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .onHover { hovering = $0 }
+        .dsOnHover { hovering = $0 }
         .accessibilityLabel(label)
         .accessibilityAddTraits(isPressed ? [.isSelected] : [])
     }
