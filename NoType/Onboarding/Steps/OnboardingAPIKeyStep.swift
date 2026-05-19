@@ -331,8 +331,10 @@ struct OnboardingAPIKeyStep: View {
                 switch g {
                 case .http(let s, _) where s == 401 || s == 403:
                     errorMessage = "Gemini didn't accept this key. Double-check it in Google AI Studio."
-                case .http(let s, _):
-                    errorMessage = "Gemini error \(s). Try again."
+                case .http(let s, let body):
+                    errorMessage = GeminiClient.GeminiError.descriptionForGenericHTTP(
+                        status: s, body: body, trailing: "Try again."
+                    )
                 case .missingKey:
                     errorMessage = "Paste a key first."
                 case .decoding, .empty, .blocked:

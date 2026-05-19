@@ -34,11 +34,90 @@ actor GeminiClient {
             case .http(let s, _) where s == 403:    "Gemini API key is not authorized for this model."
             case .http(let s, _) where s == 429:    "Gemini rate limit reached. Try again in a moment."
             case .http(let s, _) where s >= 500:    "Gemini is having trouble (HTTP \(s))."
-            case .http(let s, _):                   "Gemini error \(s)."
+            case .http(let s, let body):
+                Self.descriptionForGenericHTTP(status: s, body: body)
             case .decoding:                         "Couldn't read Gemini's response."
             case .empty:                            "Gemini returned an empty transcription."
             case .blocked(let reason):              "Gemini blocked the request: \(reason)."
             }
+        }
+
+        /// `true` when Google's response body indicates the caller's
+        /// country is on Gemini's unsupported-region list (Russia,
+        /// Belarus, …). The block is independent of key validity —
+        /// a valid paid key in a blocked region still gets HTTP 400
+        /// + `FAILED_PRECONDITION` + this exact `error.message`.
+        /// All three consumers (`errorDescription`,
+        /// `OnboardingAPIKeyStep.continueTapped`,
+        /// `AppState.payloadForSessionFailure`) call this so a
+        /// Google rewording is a one-line fix.
+        static func isRegionBlocked(body: String) -> Bool {
+            body.contains("User location is not supported")
+        }
+
+        /// Extracts Google's `error.message` from the JSON body and
+        /// masks API-key-shaped substrings before returning it.
+        /// Returns `nil` when the body is not JSON, has no
+        /// `error.message`, or the message is empty after trimming.
+        ///
+        /// **Security contract (revised from plan §548 / §571):**
+        /// the raw body must not be surfaced verbatim, but the
+        /// sanitized `error.message` may be — it's typically the
+        /// most actionable piece of info Google gives the user
+        /// ("API key not valid", "Generative Language API has not
+        /// been used in project …", "Quota exceeded for …").
+        /// The redactor masks the AIzaSy-prefixed 39-char key
+        /// pattern so a partial key echo (Google sometimes includes
+        /// one in invalid-key responses) never reaches the UI.
+        /// Add new redaction patterns here when a new leak shape
+        /// is observed in the wild; do NOT surface body bytes that
+        /// haven't been through this filter.
+        static func sanitizedGoogleMessage(body: String) -> String? {
+            guard let data = body.data(using: .utf8),
+                  let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let errorObj = root["error"] as? [String: Any],
+                  let raw = errorObj["message"] as? String else {
+                return nil
+            }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            return redactSecrets(in: trimmed)
+        }
+
+        /// Pattern + literal for AIzaSy-prefixed Google API keys
+        /// (39 chars total: 6-char prefix + 33-char body). Compiled
+        /// once at type init — force-unwrap is the documented
+        /// project exception for compile-time-known regex literals.
+        private static let apiKeyRedactor = try! NSRegularExpression(
+            pattern: #"AIzaSy[A-Za-z0-9_-]{33}"#
+        )
+
+        private static func redactSecrets(in s: String) -> String {
+            let range = NSRange(s.startIndex..<s.endIndex, in: s)
+            return Self.apiKeyRedactor.stringByReplacingMatches(
+                in: s,
+                range: range,
+                withTemplate: "AIzaSy••••••••"
+            )
+        }
+
+        /// Renders the user-facing copy for the generic `.http(_,_)`
+        /// arm — region-block hint when the body matches, sanitized
+        /// `error.message` from Google when present, generic
+        /// fallback otherwise. The three consumers should all reach
+        /// this through `errorDescription` (Settings path),
+        /// `descriptionForGenericHTTP(status:body:trailing:)` (UI
+        /// callers wanting to append " Try again." etc.), or via
+        /// `sanitizedGoogleMessage(body:)` directly when assembling
+        /// a richer `ErrorPayload`.
+        static func descriptionForGenericHTTP(status: Int, body: String, trailing: String = "") -> String {
+            if isRegionBlocked(body: body) {
+                return "Gemini isn't available in your region. Try connecting through a VPN.\(trailing.isEmpty ? "" : " \(trailing)")"
+            }
+            if let msg = sanitizedGoogleMessage(body: body) {
+                return "Gemini error \(status): \(msg).\(trailing.isEmpty ? "" : " \(trailing)")"
+            }
+            return "Gemini error \(status).\(trailing.isEmpty ? "" : " \(trailing)")"
         }
     }
 
