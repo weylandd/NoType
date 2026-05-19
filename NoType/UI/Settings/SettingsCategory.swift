@@ -41,4 +41,20 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .about:         return .info
         }
     }
+
+    /// Pure-function consumer for the cross-surface
+    /// `pendingSettingsCategory` flag (e.g. missing-API-key HUD →
+    /// API & Usage pane). Reads + clears atomically and returns the
+    /// new effective `selectedCategory`. Clear-first-apply-second is
+    /// load-bearing per plan §270 — guards against a stale flag
+    /// hijacking an unrelated Settings-tab open. Mirrors
+    /// `MainTab.consumePendingSelection`.
+    static func consumePendingSelection(
+        pending: inout SettingsCategory?,
+        current: SettingsCategory
+    ) -> SettingsCategory {
+        let captured = pending
+        pending = nil
+        return captured ?? current
+    }
 }

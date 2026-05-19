@@ -55,6 +55,16 @@ struct SettingsTabView: View {
             // the user made in System Settings → Login Items without
             // a restart.
             appState.loginItemController.refresh()
+            consumePendingCategorySelection()
+        }
+        // Three triggers (same belt-and-braces shape as MainWindowView's
+        // pendingTabSelection consumer): `.onAppear` covers the case
+        // where SettingsTabView is freshly mounted, `.onChange` of
+        // pendingSettingsCategory covers the case where the user is
+        // already on Settings when the flag flips (e.g., HUD click while
+        // Settings → General is on-screen).
+        .onChange(of: appState.pendingSettingsCategory) { _, new in
+            if new != nil { consumePendingCategorySelection() }
         }
         .confirmationDialog(
             "Reopen the onboarding wizard?",
@@ -128,6 +138,13 @@ struct SettingsTabView: View {
                 }
             )
         }
+    }
+
+    private func consumePendingCategorySelection() {
+        selectedCategory = SettingsCategory.consumePendingSelection(
+            pending: &appState.pendingSettingsCategory,
+            current: selectedCategory
+        )
     }
 
     @ViewBuilder

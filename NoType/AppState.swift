@@ -30,6 +30,26 @@ final class AppState {
     /// instead of the update detail).
     var pendingTabSelection: MainTab?
 
+    /// Deep-link into a Settings sub-pane (e.g. the missing-API-key
+    /// HUD's "Open Settings" button landing directly on API & Usage,
+    /// not the default General pane). Consumed by `SettingsTabView`
+    /// with the same clear-first-apply-second discipline as
+    /// `pendingTabSelection`.
+    var pendingSettingsCategory: SettingsCategory?
+
+    /// Bridge for SwiftUI's `@Environment(\.openWindow)` into AppState.
+    /// AppState is not a SwiftUI View and can't read the environment
+    /// directly, so a long-lived SwiftUI surface — `MenuBarIcon`'s
+    /// `.task` (always alive once onboarding completes) and
+    /// `MainWindowView`'s `.task` (covers the onboarding window path)
+    /// — set this slot on appearance. Mirrors the post-init injection
+    /// patterns already used for `NoTypeAppDelegate.terminationHandler`
+    /// and `AppCategorizer.onAssignmentChanged`. May be `nil` in the
+    /// narrow window before any wired view has appeared; callers should
+    /// also try `NSApp.windows` for an already-created window.
+    @ObservationIgnored
+    var openMainWindowRequest: (() -> Void)?
+
     /// Lifetime aggregate of every recorded session — survives the
     /// 10-entry cap on `history`. Source of truth for Home tab stats
     /// (words/time saved/WPM), the top-apps panel, and the activity
@@ -1550,7 +1570,14 @@ final class AppState {
 /// Mapping table from internal error sources to ErrorHUD payloads.
 /// Centralising this here keeps strings out of the per-call sites and
 /// makes it obvious how each failure mode is surfaced to the user.
-private enum NoTypeErrorKind {
+///
+/// Visibility is `internal` (default) so `NoTypeTests` can pin the
+/// catalogue's invariant via `@testable import NoType` — specifically
+/// the regression-guard that every `payload.retryLabel != nil` kind
+/// also ships a non-`nil` `retryHandler` (see
+/// `MissingKeyHUDRetryTests`). Was previously `private`; nobody outside
+/// this file references it.
+enum NoTypeErrorKind {
     case missingAPIKey
     case vadLoadFailed
     case sessionStartFailed(Error)
@@ -1614,9 +1641,39 @@ private enum NoTypeErrorKind {
     var retryHandler: ((AppState?) -> Void)? {
         switch self {
         case .missingAPIKey:
-            // No native settings entry point yet — punt to a notification
-            // until the picker exists. Closure resolved at call site.
-            return nil
+            // `NoTypeErrorKind` is a non-isolated catalog enum, but
+            // every concrete call site that invokes the handler (the
+            // `() -> Void` wrapper built in `AppState.surfaceError` and
+            // fired by `HUDController.showErrorHUD`'s onRetry → SwiftUI
+            // button action) is on MainActor. `MainActor.assumeIsolated`
+            // lets us touch MainActor state (`AppState` properties,
+            // `NSApp`, `NSWindow`) without changing the catalog's
+            // (non-isolated) closure type and rippling through every
+            // catalog kind. The runtime precondition catches any future
+            // off-main caller.
+            return { app in
+                MainActor.assumeIsolated {
+                    guard let app else { return }
+                    // Deep-link: Settings tab + API & Usage pane.
+                    app.pendingTabSelection = .settings
+                    app.pendingSettingsCategory = .apiUsage
+                    // Belt-and-braces window raise. If the NSWindow
+                    // already exists (user opened it earlier this
+                    // launch), focus it directly. Otherwise delegate to
+                    // the openWindow closure injected from a long-lived
+                    // SwiftUI view — `Window` scenes are lazily created
+                    // and aren't in NSApp.windows until SwiftUI's
+                    // openWindow triggers them.
+                    if let window = NSApp.windows.first(where: {
+                        $0.identifier?.rawValue == "main"
+                    }) {
+                        window.makeKeyAndOrderFront(nil)
+                    } else {
+                        app.openMainWindowRequest?()
+                    }
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+            }
         default:
             return nil
         }
