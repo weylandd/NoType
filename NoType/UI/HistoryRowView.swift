@@ -38,7 +38,7 @@ struct HistoryRowView: View {
         }
         .background(rowBackground)
         .contentShape(Rectangle())
-        .onHover { isHovered = $0 }
+        .dsOnHover { isHovered = $0 }
         .onTapGesture { isExpanded.toggle() }
         .animation(.easeOut(duration: 0.12), value: isHovered)
         .animation(.easeInOut(duration: 0.15), value: isExpanded)

@@ -623,7 +623,7 @@ private struct ArrowButton: View {
             )
         }
         .buttonStyle(.plain)
-        .onHover { hovered = $0 }
+        .dsOnHover { hovered = $0 }
         .animation(DS.Motion.fast, value: hovered)
     }
 }
@@ -682,7 +682,7 @@ private struct CalendarDayCell: View {
         .opacity(cell.isInside ? 1 : 0.4)
         .scaleEffect(hovered && cell.isInside ? 1.04 : 1.0)
         .animation(DS.Motion.fast, value: hovered)
-        .onHover { hovered = $0 }
+        .dsOnHover { hovered = $0 }
     }
 
     private func textColor(level: Int) -> Color {

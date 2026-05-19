@@ -275,7 +275,7 @@ private struct OpenMainWindowButton: View {
             )
         }
         .buttonStyle(.plain)
-        .onHover { hovered = $0 }
+        .dsOnHover { hovered = $0 }
         .animation(DS.Motion.fast, value: hovered)
         .help("Open NoType")
     }

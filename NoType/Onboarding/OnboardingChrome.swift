@@ -184,7 +184,7 @@ private struct BackCornerButton: View {
             )
         }
         .buttonStyle(.plain)
-        .onHover { hovered = $0 }
+        .dsOnHover { hovered = $0 }
         .animation(DS.Motion.fast, value: hovered)
         .accessibilityLabel("Back")
     }

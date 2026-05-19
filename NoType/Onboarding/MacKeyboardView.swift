@@ -349,7 +349,7 @@ private struct KeyCapView: View {
                 .animation(DS.Motion.fast, value: hovered)
         }
         .buttonStyle(.plain)
-        .onHover { hovered = $0 }
+        .dsOnHover { hovered = $0 }
     }
 
     private var cornerRadius: CGFloat { key.height < 1 ? 5 : 7 }

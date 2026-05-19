@@ -76,7 +76,7 @@ private struct NavItem: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .onHover { isHovering = $0 }
+        .dsOnHover { isHovering = $0 }
         .accessibilityLabel(category.label)
         .accessibilityAddTraits(isActive ? [.isSelected] : [])
     }

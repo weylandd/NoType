@@ -193,7 +193,7 @@ private struct AddLanguageChip: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .onHover { isHovering = $0 }
+        .dsOnHover { isHovering = $0 }
         .accessibilityLabel("Add language")
     }
 }

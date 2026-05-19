@@ -39,7 +39,7 @@ struct DSIconButton: View {
                 )
         }
         .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
+        .dsOnHover { isHovered = $0 }
         .animation(.easeOut(duration: 0.08), value: isHovered)
     }
 
@@ -139,7 +139,7 @@ struct DSCloseButton: View {
                         in: RoundedRectangle(cornerRadius: radius))
         }
         .buttonStyle(.plain)
-        .onHover { hovered = $0 }
+        .dsOnHover { hovered = $0 }
         .animation(DS.Motion.fast, value: hovered)
         .accessibilityLabel(label)
     }
@@ -325,7 +325,7 @@ struct DSPrimaryButton: View {
         }
         .buttonStyle(.plain)
         .disabled(!isEnabled || isLoading)
-        .onHover { hovered = $0 && isEnabled }
+        .dsOnHover { hovered = $0 && isEnabled }
         // `.onHover` only fires on cursor enter/leave, so if the parent
         // flips `isEnabled` false → true while the cursor was hovering
         // a disabled button, `hovered` stays true and the re-enabled
@@ -384,7 +384,7 @@ struct DSSecondaryButton: View {
             )
         }
         .buttonStyle(.plain)
-        .onHover { hovered = $0 }
+        .dsOnHover { hovered = $0 }
         .animation(DS.Motion.fast, value: hovered)
         .accessibilityLabel(label)
     }
@@ -464,7 +464,7 @@ struct DSDestructiveButton: View {
             )
         }
         .buttonStyle(.plain)
-        .onHover { hovered = $0 }
+        .dsOnHover { hovered = $0 }
         .animation(DS.Motion.fast, value: hovered)
         .accessibilityLabel(label)
     }
@@ -489,7 +489,7 @@ struct DSLinkButton: View {
                             in: RoundedRectangle(cornerRadius: 4))
         }
         .buttonStyle(.plain)
-        .onHover { hovered = $0 }
+        .dsOnHover { hovered = $0 }
         .animation(DS.Motion.fast, value: hovered)
     }
 }
@@ -581,7 +581,7 @@ struct DSWordChip: View {
             RoundedRectangle(cornerRadius: DS.Radius.sm)
                 .strokeBorder(border, lineWidth: DS.Border.hairline)
         )
-        .onHover { hovered = $0 }
+        .dsOnHover { hovered = $0 }
         .animation(DS.Motion.fast, value: hovered)
     }
 
@@ -936,6 +936,47 @@ private extension View {
                 .onChanged { _ in onPress() }
                 .onEnded   { _ in onRelease() }
         )
+    }
+}
+
+// MARK: - Hover wrapper (macOS-26 executor-check workaround)
+//
+// `.onHover { hovered = $0 }` written inside a `@MainActor` View body
+// inherits the body's `@MainActor` isolation per SE-0420. The closure
+// prologue then calls `swift_task_isCurrentExecutorWithFlagsImpl` to
+// assert the current executor is `MainActor.shared` before running the
+// body. On macOS 26.2 the SerialExecutorRef SwiftUI hands the
+// concurrency runtime via `HoverResponder.updatePhase(_:)` carries an
+// invalid identity (faulting at `0x1`) — the check reads the
+// executor's isa via `swift_getObjectType` and SIGSEGV's.
+//
+// `@Sendable` strips the inherited isolation so the broken closure
+// prologue check is omitted entirely (same mechanic as the audio IOProc
+// fix in PR #53 / cd36c48 —
+// `solutions/runtime-errors/audio-ioproc-mainactor-inheritance-crash-2026-05-19.md`).
+// `Task { @MainActor in ... }` then schedules the `@State` write
+// through the Swift task scheduler — different machinery from the
+// broken closure-prologue path. The executor reference the scheduler
+// builds for the MainActor hop is well-formed, so the hop succeeds
+// even on macOS 26.2. The async hop costs ~one frame (~8 ms) of
+// latency, imperceptible for hover state — `.animation(value:)`
+// already smooths the transition.
+//
+// We deliberately avoid `MainActor.assumeIsolated` here even though
+// `NSHostingView.mouseMoved` empirically runs on the main thread today:
+// `assumeIsolated` ultimately calls `_taskIsCurrentExecutor` (the same
+// function family as the original crash) and traps unconditionally if
+// SwiftUI ever dispatches `.onHover` off-main (drag preview, window
+// restore, future macOS versions). The `Task` hop is fail-soft.
+//
+// Hard rule: every `.onHover` in NoType goes through this wrapper — see
+// `NoType/UI/CLAUDE.md` and the solutions doc above.
+
+extension View {
+    func dsOnHover(_ action: @escaping @MainActor (Bool) -> Void) -> some View {
+        onHover { @Sendable isHovering in
+            Task { @MainActor in action(isHovering) }
+        }
     }
 }
 

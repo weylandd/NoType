@@ -35,7 +35,7 @@ struct GitHubRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .onHover { hovering = $0 }
+        .dsOnHover { hovering = $0 }
         .accessibilityLabel("View source on GitHub")
     }
 

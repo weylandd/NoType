@@ -67,7 +67,7 @@ struct PermissionChip: View {
             .contentShape(RoundedRectangle(cornerRadius: DS.Radius.md))
         }
         .buttonStyle(.plain)
-        .onHover { hovering = $0 }
+        .dsOnHover { hovering = $0 }
         .accessibilityLabel("\(kind.name), \(stateLabelText)")
     }
 

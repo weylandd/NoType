@@ -151,7 +151,7 @@ private struct PathCard: View {
         }
         .buttonStyle(.plain)
         .disabled(isDisabled)
-        .onHover { hovered = $0 }
+        .dsOnHover { hovered = $0 }
         .animation(DS.Motion.fast, value: hovered)
         .help(isDisabled ? "Coming soon" : "")
     }
