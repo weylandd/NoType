@@ -22,6 +22,51 @@
     <description>NoType release feed for Sparkle 2 auto-updates.</description>
     <language>en</language>
     <item>
+      <title>Version 0.1.9</title>
+      <pubDate>Tue, 19 May 2026 09:03:29 +0000</pubDate>
+      <sparkle:version>11</sparkle:version>
+      <sparkle:shortVersionString>0.1.9</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+Hotfix release. One bug fix.
+
+### Fixed
+- **SwiftUI `.onHover` no longer crashes the app on macOS 26.2** (#57).
+  Third instance of the macOS 26 Swift concurrency executor-check
+  family (after `TimelineView` in PR #41 and Core Audio HAL IOProc in
+  PR #53 / cd36c48). On macOS 26.2 the closure prologue's
+  `swift_task_isCurrentExecutorWithFlagsImpl` check faulted at
+  `swift_getObjectType(0x1)`, reading an invalid `SerialExecutorRef`
+  identity that SwiftUI's `HoverResponder.updatePhase` handed the
+  runtime via `.onHover` closures that inherited `@MainActor` from
+  their enclosing View body (per SE-0420). Symptom: instant
+  `EXC_BAD_ACCESS` on first cursor movement over almost any
+  hover-tracked surface in the main window.
+
+  Fix introduces a `dsOnHover` wrapper in `NoType/UI/DSComponents.swift`
+  that pairs `@Sendable` (strips the inherited `@MainActor` so the
+  broken closure-prologue check is omitted) with a
+  `Task { @MainActor in ... }` bridge (schedules the `@State` write
+  through the task scheduler — different code path from the broken
+  closure-prologue check; ~one-frame latency, imperceptible for hover
+  state). All 28 raw `.onHover` callsites converted to `.dsOnHover`.
+
+  A new `NoTypeTests/DSComponentsHoverTests` pins the convention via
+  a `FileManager` walk that fails any new raw `.onHover` outside the
+  wrapper definition — closes the lint gap that let this family
+  escape twice already.
+
+  Solutions doc: `docs/solutions/runtime-errors/onhover-mainactor-inheritance-crash-2026-05-19.md`.
+  Cross-references extended across the two prior family docs
+  (`timelineview-...`, `audio-ioproc-...`) and the swift-6 concurrency
+  convention. `NoType/UI/CLAUDE.md` hard rule added next to the
+  existing TimelineView rule.
+      ]]></description>
+      <enclosure url="https://github.com/weylandd/NoType/releases/download/v0.1.9/NoType-0.1.9.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="1mlzGJyD7HSAavcNxDtzUoLU4zhlki+bmIvK//xSp5Jp+3BBT9JHC9Fi8ei1hKKThar6+52VSL3u/GYyxiBLCw==" length="5937337" />
+    </item>
+    <item>
       <title>Version 0.1.8</title>
       <pubDate>Tue, 19 May 2026 07:09:06 +0000</pubDate>
       <sparkle:version>10</sparkle:version>
