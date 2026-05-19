@@ -4,15 +4,19 @@ import SwiftUI
 ///
 /// 1. **Auto-replacement** — find/replace pairs applied to the final
 ///    transcript before paste (pure client-side, see
-///    `TextReplacementEngine`).
+///    `TextReplacementEngine`). Local-only — never sent to Gemini.
 /// 2. **Personal dictionary** — canonical spellings shipped in the
 ///    `User dictionary:` Gemini cache-prefix section to bias
 ///    transcription. Mix of user-typed (sticky) and auto-extracted
-///    (FIFO trim past 100 total) entries; once the user has ≥80 manual
-///    entries, auto-extraction pauses entirely (ADR-016).
+///    (FIFO trim past 100 total) entries; once the user has all
+///    `DictionarySnapshot.maxTotalEntries` (100) slots filled with
+///    manual entries, auto-extraction pauses entirely (ADR-016). The
+///    count chip turns warning-coloured at ≥80 manual entries as an
+///    earlier soft signal, but only the 100-mark gates the harvester.
 ///
-/// Mirrors the Instructions tab's sticky-header + scroll body layout
-/// and reuses `InstructionsPanel` for the panel chrome.
+/// Layout: header → two section blocks. Each block has a mono section
+/// heading (label + short hint + a trailing scope pill) and a
+/// `bg-surface` card body grouping rows, an add row, and a footer.
 struct DictionaryView: View {
     @Environment(AppState.self) private var appState
 
@@ -42,13 +46,14 @@ struct DictionaryView: View {
         VStack(spacing: 0) {
             header
             ScrollView {
-                VStack(alignment: .leading, spacing: DS.Space.s7) {
-                    replacementsPanel
-                    dictionaryPanel
+                VStack(alignment: .leading, spacing: DS.Space.s6 + 2) {
+                    replacementsSection
+                    dictionarySection
                 }
-                .padding(.horizontal, DS.Space.s7)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, DS.Space.s7 + 4)
                 .padding(.top, DS.Space.s7)
-                .padding(.bottom, DS.Space.s7)
+                .padding(.bottom, DS.Space.s9)
             }
         }
     }
@@ -58,16 +63,12 @@ struct DictionaryView: View {
     private var header: some View {
         HStack(spacing: DS.Space.s4) {
             Text("Dictionary")
-                .font(.system(size: 18, weight: .semibold))
+                .font(DS.Font.title(.semibold))
                 .foregroundStyle(DS.Color.textPrimary)
-            Text("Replacements & canonical spellings")
-                .font(DS.Font.labelMono())
-                .foregroundStyle(DS.Color.textTertiary)
-                .textCase(.uppercase)
-                .tracking(0.6)
+            DictScopeCrumb(text: "Vocabulary · Auto-replace")
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, DS.Space.s7)
+        .padding(.horizontal, DS.Space.s7 + 4)
         .padding(.top, DS.Space.s5)
         .padding(.bottom, DS.Space.s5)
         .background(
@@ -79,60 +80,109 @@ struct DictionaryView: View {
         )
     }
 
-    // MARK: - Replacements panel
+    // MARK: - Auto-replacement section
 
-    private var replacementsPanel: some View {
-        InstructionsPanel(
-            title: "Auto-replacement",
-            meta: "APPLIED AFTER TRANSCRIPTION"
-        ) {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(appState.dictionaryReplacements) { pair in
-                    ReplacementRow(
-                        replacement: pair,
-                        onRemove: { appState.removeReplacement(id: pair.id) }
+    private var replacementsSection: some View {
+        VStack(alignment: .leading, spacing: DS.Space.s3 + 2) {
+            DictSectionHeader(
+                title: "Auto-replacement",
+                hint: "find \u{2192} replace, whole words, applied before paste",
+                scope: .localOnly
+            )
+            DictCard {
+                cardHead(
+                    title: "Pairs",
+                    count: "\(appState.dictionaryReplacements.count)",
+                    trailing: AnyView(
+                        Text("Lowercase keys auto-match capitalised forms")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(DS.Color.textTertiary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                     )
-                    DSSeparator(leadingPadding: DS.Space.s5 + 2)
+                )
+
+                if appState.dictionaryReplacements.isEmpty {
+                    replacementsEmpty
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(appState.dictionaryReplacements) { pair in
+                            ReplacementRow(
+                                replacement: pair,
+                                onRemove: { appState.removeReplacement(id: pair.id) }
+                            )
+                        }
+                    }
                 }
 
                 addReplacementRow
 
-                Text("Each pair is matched on whole words. When the search side starts with a lowercase letter, the capitalized variant is auto-applied — a pair \u{201C}btw\u{201D} \u{2192} \u{201C}by the way\u{201D} also fires at the start of a sentence, replacing \u{201C}Btw\u{201D} with \u{201C}By the way\u{201D}.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(DS.Color.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, DS.Space.s5 + 2)
-                    .padding(.top, DS.Space.s3)
-                    .padding(.bottom, DS.Space.s5)
+                cardFootNote(
+                    icon: .lock,
+                    bold: "Local.",
+                    rest: " Pairs are applied on your Mac after the transcript comes back. Never sent to Gemini."
+                )
             }
         }
     }
 
-    private var addReplacementRow: some View {
-        HStack(spacing: DS.Space.s3) {
-            DSInlineTextField(
-                placeholder: "find phrase",
-                text: $draftFrom,
-                onCommit: addPair
-            )
-            .frame(minWidth: 140)
-
-            DSIcon(name: .arrowRight, size: 13, color: DS.Color.textTertiary)
-
-            DSInlineTextField(
-                placeholder: "replace with",
-                text: $draftTo,
-                onCommit: addPair
-            )
-            .frame(minWidth: 140)
-
-            DSPrimaryButton(label: "Add", action: addPair)
-                .disabled(draftFrom.trimmingCharacters(in: .whitespaces).isEmpty
-                       || draftTo.trimmingCharacters(in: .whitespaces).isEmpty)
+    private var replacementsEmpty: some View {
+        VStack(spacing: 4) {
+            Text("No replacements yet")
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(DS.Color.textSecondary)
+            Text("Add shortcuts you type a lot — they'll be expanded after the transcript comes back from Gemini.")
+                .font(.system(size: 11.5))
+                .foregroundStyle(DS.Color.textQuaternary)
+                .multilineTextAlignment(.center)
+                .lineSpacing(1.5)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 340)
         }
-        .padding(.horizontal, DS.Space.s5 + 2)
-        .padding(.vertical, DS.Space.s4)
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 18)
+        .padding(.top, 22)
+        .padding(.bottom, 26)
+        .overlay(DS.Color.borderSubtle.frame(height: 1), alignment: .top)
     }
+
+    private var addReplacementRow: some View {
+        HStack(alignment: .center, spacing: DS.Space.s4) {
+            DictAddTextField(
+                placeholder: "btw",
+                text: $draftFrom,
+                monospaced: true,
+                onCommit: addPair
+            )
+            DSIcon(name: .arrowRight, size: 13, color: DS.Color.textQuaternary)
+                .frame(width: 18, alignment: .center)
+            DictAddTextField(
+                placeholder: "by the way",
+                text: $draftTo,
+                monospaced: false,
+                onCommit: addPair
+            )
+            DSPrimaryButton(
+                label: "Add",
+                size: .medium,
+                action: addPair
+            )
+            .disabled(draftFrom.trimmingCharacters(in: .whitespaces).isEmpty
+                   || draftTo.trimmingCharacters(in: .whitespaces).isEmpty)
+            .frame(width: Self.trailingGutter, alignment: .trailing)
+        }
+        .padding(.leading, 18)
+        .padding(.trailing, 14)
+        .padding(.vertical, DS.Space.s4 - 1)
+        .background(DS.Color.bgInset.opacity(0.30))
+        .overlay(DS.Color.borderSubtle.frame(height: 1), alignment: .top)
+    }
+
+    /// Shared right-side column width used by both `ReplacementRow` and
+    /// `addReplacementRow`. Keeping the trailing slot a fixed width
+    /// guarantees the two arrows sit at the same X column across the
+    /// list rows and the inline add form.
+    fileprivate static let trailingGutter: CGFloat = 64
 
     private func addPair() {
         let f = draftFrom.trimmingCharacters(in: .whitespaces)
@@ -143,42 +193,51 @@ struct DictionaryView: View {
         draftTo = ""
     }
 
-    // MARK: - Dictionary panel
+    // MARK: - Dictionary section
 
-    private var dictionaryPanel: some View {
-        InstructionsPanel(
-            title: "Dictionary (\(totalCount)/100)",
-            meta: autoExtractionPaused ? "AUTO-EXTRACTION PAUSED" : nil,
-            trailing: { dictionaryHeaderControls }
-        ) {
-            VStack(alignment: .leading, spacing: 0) {
-                addEntryRow
+    private var dictionarySection: some View {
+        VStack(alignment: .leading, spacing: DS.Space.s3 + 2) {
+            DictSectionHeader(
+                title: "Dictionary",
+                hint: "canonical spellings sent to Gemini as a hint",
+                scope: appState.dictionaryEnabled ? .sentToGemini : .paused
+            )
+            DictCard {
+                cardHead(
+                    title: "Words",
+                    count: "\(totalCount)",
+                    countSuffix: "/\(DictionarySnapshot.maxTotalEntries)",
+                    countIsNear: userCount >= 80,
+                    trailing: AnyView(useDictionaryToggle)
+                )
 
-                if autoExtractionPaused {
-                    pausedHint
+                Group {
+                    if autoExtractionPaused {
+                        warnBanner
+                    }
+
+                    addEntryRow
+
+                    if totalCount == 0 {
+                        emptyDictionary
+                    } else {
+                        legend
+                        chipCloud
+                    }
+
+                    dictionaryFoot
                 }
-
-                if totalCount == 0 {
-                    emptyState
-                } else {
-                    tagCloud
-                }
+                .opacity(appState.dictionaryEnabled ? 1 : 0.45)
+                .animation(DS.Motion.base, value: appState.dictionaryEnabled)
             }
-            .opacity(appState.dictionaryEnabled ? 1 : 0.45)
-            .animation(DS.Motion.base, value: appState.dictionaryEnabled)
         }
     }
 
-    /// Trailing controls in the dictionary panel header: optional
-    /// two-stage Clear-all button + master enable toggle.
-    private var dictionaryHeaderControls: some View {
+    private var useDictionaryToggle: some View {
         HStack(spacing: DS.Space.s3) {
-            if totalCount > 0 {
-                ClearAllButton(
-                    destructive: autoCount == 0,
-                    action: clearAllStaged
-                )
-            }
+            Text("Use dictionary")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(DS.Color.textPrimary)
             Toggle(
                 "Use dictionary",
                 isOn: Binding(
@@ -194,6 +253,193 @@ struct DictionaryView: View {
         }
     }
 
+    private var warnBanner: some View {
+        HStack(alignment: .top, spacing: DS.Space.s3) {
+            ZStack {
+                RoundedRectangle(cornerRadius: DS.Radius.sm)
+                    .fill(DS.Color.warningSoft)
+                    .frame(width: 22, height: 22)
+                DSIcon(name: .warning, size: 12, color: DS.Color.warningFg)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Dictionary full of manual entries.")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(DS.Color.textPrimary)
+                Text("Auto-harvest is paused — remove a few words to let NoType pick up new ones again.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(DS.Color.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(11)
+        .background(
+            RoundedRectangle(cornerRadius: DS.Radius.md)
+                .fill(DS.Color.warningSoft)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.Radius.md)
+                .strokeBorder(DS.Color.warningBorder, lineWidth: DS.Border.hairline)
+        )
+        .padding(.horizontal, 18)
+        .padding(.top, DS.Space.s4 - 1)
+    }
+
+    private var addEntryRow: some View {
+        HStack(alignment: .center, spacing: DS.Space.s3 + 2) {
+            DictAddEntryField(
+                placeholder: "Add a word — brand, name, jargon",
+                text: $draftWord,
+                onCommit: addEntry,
+                maxLength: DictionarySnapshot.maxEntryLength
+            )
+            DSPrimaryButton(
+                label: "Add",
+                size: .medium,
+                action: addEntry
+            )
+            .disabled(draftWord.trimmingCharacters(in: .whitespaces).isEmpty)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, DS.Space.s4 - 1)
+        .overlay(DS.Color.borderSubtle.frame(height: 1), alignment: .top)
+    }
+
+    private func addEntry() {
+        let w = draftWord.trimmingCharacters(in: .whitespaces)
+        guard !w.isEmpty, w.count <= DictionarySnapshot.maxEntryLength else { return }
+        appState.addUserDictionaryEntry(w)
+        draftWord = ""
+    }
+
+    private var emptyDictionary: some View {
+        VStack(spacing: 6) {
+            ZStack {
+                Circle()
+                    .fill(DS.Color.bgInset)
+                    .frame(width: 36, height: 36)
+                DSIcon(name: .bookmark, size: 14, color: DS.Color.textTertiary)
+            }
+            .padding(.bottom, 2)
+            Text("Build your dictionary")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(DS.Color.textSecondary)
+            Text("Add brands, names and jargon you dictate often — Gemini will spell them the way you wrote them (GitHub, not git hub; Cursor, not курсор).")
+                .font(.system(size: 12))
+                .foregroundStyle(DS.Color.textQuaternary)
+                .multilineTextAlignment(.center)
+                .lineSpacing(1.5)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 360)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 22)
+        .padding(.top, 28)
+        .padding(.bottom, 32)
+        .overlay(DS.Color.borderSubtle.frame(height: 1), alignment: .top)
+    }
+
+    private var legend: some View {
+        HStack(spacing: 14) {
+            legendItem(label: "You added", style: .user)
+            legendItem(label: "Auto-harvested", style: .auto)
+        }
+        .font(.system(size: 10, design: .monospaced))
+        .tracking(0.6)
+        .textCase(.uppercase)
+        .foregroundStyle(DS.Color.textQuaternary)
+        .padding(.horizontal, 18)
+        .padding(.top, DS.Space.s3)
+        .padding(.bottom, 2)
+    }
+
+    private func legendItem(label: String, style: DictEntryStyle) -> some View {
+        HStack(spacing: 6) {
+            Group {
+                switch style {
+                case .user:
+                    Circle()
+                        .fill(DS.Color.accentSoft)
+                        .overlay(Circle().strokeBorder(DS.Color.accentBorder, lineWidth: DS.Border.hairline))
+                case .auto:
+                    Circle()
+                        .fill(Color.clear)
+                        .overlay(
+                            Circle()
+                                .strokeBorder(
+                                    DS.Color.borderDefault,
+                                    style: StrokeStyle(lineWidth: DS.Border.hairline + 0.2, dash: [1.2, 1.2])
+                                )
+                        )
+                }
+            }
+            .frame(width: 10, height: 10)
+            Text(label)
+        }
+    }
+
+    private var chipCloud: some View {
+        FlowLayout(spacing: 6, runSpacing: 6) {
+            ForEach(sortedEntries) { entry in
+                DictChip(
+                    text: entry.word,
+                    style: entry.source == .user ? .user : .auto,
+                    onRemove: { appState.removeDictionaryEntry(id: entry.id) }
+                )
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, DS.Space.s3 + 2)
+        .padding(.bottom, DS.Space.s5)
+    }
+
+    @ViewBuilder
+    private var dictionaryFoot: some View {
+        let active = appState.dictionaryEnabled
+        let metaText = active
+            ? "Active · attached as cache prefix"
+            : "Paused · words kept, not sent to Gemini"
+        let canClear = totalCount > 0
+
+        HStack(spacing: DS.Space.s3) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(active ? DS.Color.accentFg : DS.Color.textQuaternary)
+                    .frame(width: 5, height: 5)
+                    // Accent-tinted halo matching the design's
+                    // `box-shadow: 0 0 6px var(--accent-fg)` on the
+                    // active dot. Same shape as the existing
+                    // `statusDotGlow` token but in the accent hue;
+                    // not promoted to a token until a second site
+                    // wants the same glow.
+                    .shadow(color: active ? DS.Color.accentFg.opacity(0.6) : .clear, radius: 3)
+                Text(metaText)
+            }
+            .font(.system(size: 10.5, design: .monospaced))
+            .tracking(0.4)
+            .textCase(.uppercase)
+            .foregroundStyle(DS.Color.textQuaternary)
+            Spacer(minLength: DS.Space.s3)
+            if canClear {
+                ClearStagedButton(
+                    label: clearButtonLabel,
+                    destructive: autoCount == 0,
+                    action: clearAllStaged
+                )
+            }
+        }
+        .padding(.leading, 18)
+        .padding(.trailing, 14)
+        .padding(.vertical, DS.Space.s3)
+        .overlay(DS.Color.borderSubtle.frame(height: 1), alignment: .top)
+    }
+
+    private var clearButtonLabel: String {
+        if autoCount > 0 { return "Clear \(autoCount) auto-harvested" }
+        if userCount > 0 { return "Clear all \(userCount)" }
+        return "Clear"
+    }
+
     /// Stage 1 (auto entries present) → wipe auto.
     /// Stage 2 (only user entries left) → wipe user.
     /// Stage 0 (nothing) — button is hidden so this is unreachable.
@@ -205,144 +451,211 @@ struct DictionaryView: View {
         }
     }
 
-    private var addEntryRow: some View {
-        HStack(spacing: DS.Space.s3) {
-            DSInlineTextField(
-                placeholder: "Add a term, brand, or name…",
-                text: $draftWord,
-                onCommit: addEntry,
-                maxLength: DictionarySnapshot.maxEntryLength
-            )
-            DSPrimaryButton(label: "Add", action: addEntry)
-                .disabled(draftWord.trimmingCharacters(in: .whitespaces).isEmpty)
-            Spacer(minLength: 0)
-            Text("\(DictionarySnapshot.maxEntryLength - draftWord.count) chars left")
-                .font(DS.Font.labelMono())
-                .foregroundStyle(draftWord.count > DictionarySnapshot.maxEntryLength
-                    ? DS.Color.dangerFg
-                    : DS.Color.textQuaternary)
-                .tracking(0.4)
-                .monospacedDigit()
-        }
-        .padding(.horizontal, DS.Space.s5 + 2)
-        .padding(.vertical, DS.Space.s4)
-    }
+    // MARK: - Card chrome helpers
 
-    private func addEntry() {
-        let w = draftWord.trimmingCharacters(in: .whitespaces)
-        guard !w.isEmpty, w.count <= DictionarySnapshot.maxEntryLength else { return }
-        appState.addUserDictionaryEntry(w)
-        draftWord = ""
-    }
-
-    private var pausedHint: some View {
-        HStack(alignment: .top, spacing: DS.Space.s3) {
-            DSIcon(name: .info, size: 14, color: DS.Color.warningFg)
-                .padding(.top, 1)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Dictionary full")
-                    .font(.system(size: 12, weight: .semibold))
+    @ViewBuilder
+    private func cardHead(
+        title: String,
+        count: String,
+        countSuffix: String? = nil,
+        countIsNear: Bool = false,
+        trailing: AnyView
+    ) -> some View {
+        HStack(alignment: .center, spacing: DS.Space.s3) {
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(DS.Color.textPrimary)
-                Text("All \(DictionarySnapshot.maxTotalEntries) slots are taken by your manual entries. Auto-harvest can't add new words until you remove some.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(DS.Color.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 0) {
+                    Text(count)
+                        .foregroundStyle(countIsNear ? DS.Color.warningFg : DS.Color.textTertiary)
+                    if let suffix = countSuffix {
+                        Text(suffix)
+                            .foregroundStyle(DS.Color.textQuaternary)
+                    }
+                }
+                .font(.system(size: 11.5, design: .monospaced))
+                .monospacedDigit()
             }
+            Spacer(minLength: DS.Space.s3)
+            trailing
         }
-        .padding(.horizontal, DS.Space.s5 + 2)
-        .padding(.vertical, DS.Space.s3)
+        .padding(.horizontal, 18)
+        .padding(.top, DS.Space.s4 + 2)
+        .padding(.bottom, DS.Space.s4 - 2)
+    }
+
+    @ViewBuilder
+    private func cardFootNote(icon: DSIconName, bold: String, rest: String) -> some View {
+        HStack(spacing: 6) {
+            DSIcon(name: icon, size: 11, color: DS.Color.textQuaternary)
+            (Text(bold).foregroundStyle(DS.Color.textSecondary)
+              + Text(rest).foregroundStyle(DS.Color.textQuaternary))
+                .font(.system(size: 10.5, design: .monospaced))
+                .tracking(0.4)
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, DS.Space.s3)
+        .padding(.bottom, DS.Space.s3 + 2)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(DS.Color.warningSoft.opacity(0.6))
-        .overlay(
-            DS.Color.warningBorder.frame(height: 1),
-            alignment: .top
-        )
-        .overlay(
-            DS.Color.warningBorder.frame(height: 1),
-            alignment: .bottom
-        )
-    }
-
-    private var emptyState: some View {
-        VStack(spacing: DS.Space.s2) {
-            DSIcon(name: .bookmark, size: 24, color: DS.Color.textQuaternary)
-            Text("No terms yet")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(DS.Color.textSecondary)
-            Text("Add brands, names, or jargon you dictate often. Gemini will pick up canonical spellings the same way.")
-                .font(.system(size: 11))
-                .foregroundStyle(DS.Color.textTertiary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, DS.Space.s5)
-        .padding(.top, DS.Space.s5)
-        .padding(.bottom, DS.Space.s6)
-    }
-
-    private var tagCloud: some View {
-        FlowLayout(spacing: 6, runSpacing: 6) {
-            ForEach(sortedEntries) { entry in
-                DSWordChip(
-                    text: entry.word,
-                    style: entry.source == .user ? .user : .auto,
-                    onRemove: { appState.removeDictionaryEntry(id: entry.id) }
-                )
-            }
-        }
-        .padding(.horizontal, DS.Space.s5 + 2)
-        .padding(.bottom, DS.Space.s5)
+        .overlay(DS.Color.borderSubtle.frame(height: 1), alignment: .top)
     }
 }
 
-// MARK: - Clear-all button
-//
-// Small text-style button in the dictionary panel header. Always
-// labelled "Clear all" — the two-stage behaviour (first click wipes
-// auto entries, second click wipes the user's typed ones) is delivered
-// by the parent view, not the label. The destructive flag flips the
-// resting colour to `dangerFg` so the second click reads visually
-// distinct without a confirmation dialog.
+// MARK: - Dict card chrome
 
-private struct ClearAllButton: View {
-    let destructive: Bool
-    let action: () -> Void
-
-    @State private var hovered = false
+/// `bg-surface` card with hairline border, radius 10, overflow clipped.
+/// Differs from `DSCard` in that it doesn't render a head — callers
+/// stack their own head row + content rows + footer with hairlines
+/// rendered by each child as a top-edge overlay (matches the design's
+/// "every block has a top border" rule rather than DSCard's row-owns-top
+/// rule which would force `hideTopBorder` flags everywhere).
+private struct DictCard<Content: View>: View {
+    @ViewBuilder let content: () -> Content
 
     var body: some View {
-        Button(action: action) {
-            Text("Clear all")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(foreground)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(hovered ? hoverFill : .clear,
-                            in: RoundedRectangle(cornerRadius: 4))
+        VStack(alignment: .leading, spacing: 0) {
+            content()
         }
-        .buttonStyle(.plain)
-        .onHover { hovered = $0 }
-        .animation(DS.Motion.fast, value: hovered)
-        .animation(DS.Motion.fast, value: destructive)
-        .help(destructive
-              ? "Clear all your typed terms too."
-              : "Clear auto-extracted terms. Your typed ones stay.")
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            DS.Color.bgSurface,
+            in: RoundedRectangle(cornerRadius: DS.Radius.lg - 2)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.Radius.lg - 2)
+                .strokeBorder(DS.Color.borderSubtle, lineWidth: DS.Border.hairline)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: DS.Radius.lg - 2))
+    }
+}
+
+// MARK: - Section header (mono H2 + hint + scope pill)
+
+private struct DictSectionHeader: View {
+    let title: String
+    let hint: String
+    let scope: DictScopePill.Variant
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(title)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .tracking(0.88)
+                .textCase(.uppercase)
+                .foregroundStyle(DS.Color.textTertiary)
+            Text(hint)
+                .font(.system(size: 11.5))
+                .foregroundStyle(DS.Color.textQuaternary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: DS.Space.s3)
+            DictScopePill(variant: scope)
+        }
+        .padding(.horizontal, 2)
+        .padding(.bottom, 2)
+    }
+}
+
+// MARK: - Scope pill (mono uppercase chip with hairline border)
+
+private struct DictScopePill: View {
+    enum Variant {
+        case localOnly       // hairline border, quaternary fg
+        case sentToGemini    // accent soft fill + accent border, accent fg
+        case paused          // same neutral as localOnly with sparkle
+    }
+
+    let variant: Variant
+
+    var body: some View {
+        HStack(spacing: 5) {
+            DSIcon(name: icon, size: 10, color: foreground)
+            Text(label)
+                .font(.system(size: 10, design: .monospaced))
+                .tracking(0.6)
+                .textCase(.uppercase)
+                .foregroundStyle(foreground)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(background, in: RoundedRectangle(cornerRadius: DS.Radius.xs))
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.Radius.xs)
+                .strokeBorder(border, lineWidth: DS.Border.hairline)
+        )
+        .help(help)
+    }
+
+    private var icon: DSIconName {
+        switch variant {
+        case .localOnly:     return .lock
+        case .sentToGemini:  return .sparkle
+        case .paused:        return .sparkle
+        }
+    }
+
+    private var label: String {
+        switch variant {
+        case .localOnly:     return "Local only"
+        case .sentToGemini:  return "Sent to Gemini"
+        case .paused:        return "Paused"
+        }
     }
 
     private var foreground: Color {
-        if destructive {
-            return hovered ? DS.Color.dangerFg : DS.Color.dangerFg.opacity(0.8)
+        switch variant {
+        case .localOnly, .paused: return DS.Color.textQuaternary
+        case .sentToGemini:       return DS.Color.accentFg
         }
-        return hovered ? DS.Color.textPrimary : DS.Color.textTertiary
     }
 
-    private var hoverFill: Color {
-        destructive ? DS.Color.dangerSoft : DS.Color.bgHover
+    private var background: Color {
+        switch variant {
+        case .localOnly, .paused: return .clear
+        case .sentToGemini:       return DS.Color.accentSoft
+        }
+    }
+
+    private var border: Color {
+        switch variant {
+        case .localOnly, .paused: return DS.Color.borderSubtle
+        case .sentToGemini:       return DS.Color.accentBorder
+        }
+    }
+
+    private var help: String {
+        switch variant {
+        case .localOnly:    return "Replacements never leave your Mac."
+        case .sentToGemini: return "Attached to every Gemini request, in the cache prefix."
+        case .paused:       return "Dictionary is off — words kept, not sent to Gemini."
+        }
+    }
+}
+
+// MARK: - Header breadcrumb pill
+
+private struct DictScopeCrumb: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, design: .monospaced))
+            .tracking(0.4)
+            .foregroundStyle(DS.Color.textTertiary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: DS.Radius.xs)
+                    .strokeBorder(DS.Color.borderSubtle, lineWidth: DS.Border.hairline)
+            )
+            .lineLimit(1)
     }
 }
 
 // MARK: - Replacement row
+
+private enum DictEntryStyle { case user, auto }
 
 private struct ReplacementRow: View {
     let replacement: DictionaryReplacement
@@ -351,64 +664,303 @@ private struct ReplacementRow: View {
     @State private var hovered = false
 
     var body: some View {
-        HStack(spacing: DS.Space.s3) {
+        HStack(spacing: DS.Space.s4) {
+            // `from` column: left-aligned monospace pill
             Text(replacement.from)
-                .font(DS.Font.body())
+                .font(.system(size: 12.5, design: .monospaced))
                 .foregroundStyle(DS.Color.textPrimary)
                 .lineLimit(1)
-                .truncationMode(.middle)
+                .truncationMode(.tail)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(DS.Color.bgInset)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5)
+                        .strokeBorder(DS.Color.borderSubtle, lineWidth: DS.Border.hairline)
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-            DSIcon(name: .arrowRight, size: 13, color: DS.Color.textTertiary)
+            DSIcon(name: .arrowRight, size: 13, color: DS.Color.textQuaternary)
+                .frame(width: 18, alignment: .center)
 
+            // `to` column
             Text(replacement.to)
-                .font(DS.Font.body())
-                .foregroundStyle(DS.Color.accentFg)
+                .font(.system(size: 13))
+                .foregroundStyle(DS.Color.textSecondary)
                 .lineLimit(1)
-                .truncationMode(.middle)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-            Spacer(minLength: DS.Space.s3)
-
-            DSIconButton(icon: .trash, isDestructive: true, action: onRemove)
-                .opacity(hovered ? 1 : 0.4)
+            // delete (visible on row hover) — right-aligned within the
+            // shared trailing gutter so its column matches the Add
+            // button below and the two arrows align horizontally.
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+                Button(action: onRemove) {
+                    DSIcon(name: .x, size: 11, color: hovered ? DS.Color.dangerFg : DS.Color.textQuaternary)
+                        .frame(width: 24, height: 24)
+                        .background(
+                            hovered ? DS.Color.dangerSoft : .clear,
+                            in: RoundedRectangle(cornerRadius: 5)
+                        )
+                }
+                .buttonStyle(.plain)
+                .opacity(hovered ? 1 : 0)
+                .accessibilityLabel("Remove \(replacement.from)")
+            }
+            .frame(width: DictionaryView.trailingGutter)
         }
-        .padding(.horizontal, DS.Space.s5 + 2)
-        .padding(.vertical, DS.Space.s3)
+        .padding(.leading, 18)
+        .padding(.trailing, 14)
+        .padding(.vertical, DS.Space.s3 + 2)
         .background(hovered ? DS.Color.bgHover : .clear)
+        .overlay(DS.Color.borderSubtle.frame(height: 1), alignment: .top)
         .onHover { hovered = $0 }
         .animation(DS.Motion.fast, value: hovered)
     }
 }
 
-// MARK: - Inline text field
+// MARK: - Add-pair inline text field
 
-/// Single-line text field that fits the DS surface: 30 pt tall pill,
-/// recessed `bgInset` fill, hairline border, DS typography. Optional
-/// length cap is enforced live (clamps the bound `text`).
-private struct DSInlineTextField: View {
+/// 28pt-tall input matching the design's repl-add field: `bg-base` fill,
+/// hairline border, optional monospace face for the `find` side. Focus
+/// state echoes the accent border + 3pt accent-soft outer halo from the
+/// spec.
+private struct DictAddTextField: View {
+    let placeholder: String
+    @Binding var text: String
+    var monospaced: Bool = false
+    var onCommit: () -> Void = {}
+
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField(placeholder, text: $text)
+            .textFieldStyle(.plain)
+            .font(.system(size: 12.5, design: monospaced ? .monospaced : .default))
+            .foregroundStyle(DS.Color.textPrimary)
+            .padding(.horizontal, 10)
+            .frame(height: 28)
+            .frame(maxWidth: .infinity)
+            .background(DS.Color.bgBase, in: RoundedRectangle(cornerRadius: DS.Radius.sm))
+            .overlay(
+                RoundedRectangle(cornerRadius: DS.Radius.sm)
+                    .strokeBorder(focused ? DS.Color.accent : DS.Color.borderSubtle, lineWidth: DS.Border.hairline)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: DS.Radius.sm)
+                    .strokeBorder(focused ? DS.Color.accentSoft : .clear, lineWidth: 3)
+                    .padding(-2)
+            )
+            .focused($focused)
+            .onSubmit(onCommit)
+            .animation(DS.Motion.fast, value: focused)
+    }
+}
+
+// MARK: - Dictionary add-entry field (with embedded counter)
+
+private struct DictAddEntryField: View {
     let placeholder: String
     @Binding var text: String
     var onCommit: () -> Void = {}
-    var maxLength: Int? = nil
+    let maxLength: Int
 
-    @State private var focused = false
+    @FocusState private var focused: Bool
+
+    private var counter: Int { text.count }
+    private var isNear: Bool { counter >= maxLength - 5 && counter < maxLength }
+    private var isOver: Bool { counter >= maxLength }
 
     var body: some View {
-        TextField(placeholder, text: $text, onCommit: onCommit)
-            .textFieldStyle(.plain)
-            .font(DS.Font.bodySM())
-            .foregroundStyle(DS.Color.textPrimary)
-            .padding(.horizontal, 10)
-            .frame(height: 30)
-            .background(DS.Color.bgInset, in: RoundedRectangle(cornerRadius: 7))
-            .overlay(
-                RoundedRectangle(cornerRadius: 7)
-                    .strokeBorder(focused ? DS.Color.accentBorder : DS.Color.borderSubtle, lineWidth: DS.Border.hairline)
-            )
-            .onChange(of: text) { _, newValue in
-                if let cap = maxLength, newValue.count > cap {
-                    text = String(newValue.prefix(cap))
+        HStack(spacing: 0) {
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .foregroundStyle(DS.Color.textPrimary)
+                .focused($focused)
+                .onSubmit(onCommit)
+                .onChange(of: text) { _, newValue in
+                    if newValue.count > maxLength {
+                        text = String(newValue.prefix(maxLength))
+                    }
                 }
+            Text("\(counter)/\(maxLength)")
+                .font(.system(size: 11, design: .monospaced))
+                .monospacedDigit()
+                .tracking(0.4)
+                .foregroundStyle(counterColor)
+                .allowsHitTesting(false)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 32)
+        .frame(maxWidth: .infinity)
+        .background(DS.Color.bgBase, in: RoundedRectangle(cornerRadius: 7))
+        .overlay(
+            RoundedRectangle(cornerRadius: 7)
+                .strokeBorder(focused ? DS.Color.accent : DS.Color.borderSubtle, lineWidth: DS.Border.hairline)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 7)
+                .strokeBorder(focused ? DS.Color.accentSoft : .clear, lineWidth: 3)
+                .padding(-2)
+        )
+        .animation(DS.Motion.fast, value: focused)
+    }
+
+    private var counterColor: Color {
+        if isOver { return DS.Color.dangerFg }
+        if isNear { return DS.Color.warningFg }
+        return DS.Color.textQuaternary
+    }
+}
+
+// MARK: - Dictionary chip
+//
+// Mirrors design `.dchip` — two variants share the same shape; only the
+// fill / border / text-color differ:
+//   - `.user`: filled accent-soft + accent-border, accent-fg text.
+//   - `.auto`: transparent fill, dashed neutral border, text-secondary.
+//
+// The legend above the chip cloud carries the legend; the dashed
+// border + softer text on `.auto` chips is enough on its own to
+// distinguish them at a glance.
+
+private struct DictChip: View {
+    let text: String
+    let style: DictEntryStyle
+    let onRemove: () -> Void
+
+    @State private var hovered = false
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Text(text)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(textColor)
+                .lineLimit(1)
+                .padding(.leading, 10)
+                .padding(.trailing, 4)
+
+            Button(action: onRemove) {
+                DSIcon(name: .x, size: 8, color: removeColor)
+                    .frame(width: 18, height: 18)
+                    .background(
+                        hovered ? removeBg : .clear,
+                        in: Circle()
+                    )
             }
+            .buttonStyle(.plain)
+            .padding(.trailing, 4)
+            .accessibilityLabel("Remove \(text)")
+        }
+        .frame(height: 26)
+        .background(background, in: RoundedRectangle(cornerRadius: 999))
+        .overlay(borderOverlay)
+        .onHover { hovered = $0 }
+        .animation(DS.Motion.fast, value: hovered)
+    }
+
+    private var textColor: Color {
+        switch style {
+        case .user: return DS.Color.accentFg
+        case .auto: return DS.Color.textSecondary
+        }
+    }
+
+    private var background: Color {
+        switch style {
+        case .user: return DS.Color.accentSoft
+        case .auto: return .clear
+        }
+    }
+
+    @ViewBuilder
+    private var borderOverlay: some View {
+        switch style {
+        case .user:
+            RoundedRectangle(cornerRadius: 999)
+                .strokeBorder(DS.Color.accentBorder, lineWidth: DS.Border.hairline)
+        case .auto:
+            RoundedRectangle(cornerRadius: 999)
+                .strokeBorder(
+                    DS.Color.borderDefault,
+                    style: StrokeStyle(lineWidth: DS.Border.hairline + 0.2, dash: [2, 2])
+                )
+        }
+    }
+
+    private var removeColor: Color {
+        switch style {
+        case .user: return DS.Color.accentFg.opacity(hovered ? 1.0 : 0.55)
+        case .auto: return DS.Color.textSecondary.opacity(hovered ? 1.0 : 0.55)
+        }
+    }
+
+    private var removeBg: Color {
+        switch style {
+        case .user: return DS.Color.accentFg.opacity(0.14)
+        case .auto: return DS.Color.textSecondary.opacity(0.14)
+        }
+    }
+}
+
+// MARK: - Two-stage clear-all button
+
+private struct ClearStagedButton: View {
+    let label: String
+    let destructive: Bool
+    let action: () -> Void
+
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                DSIcon(name: .refresh, size: 11, color: foreground)
+                Text(label)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(foreground)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 26)
+            .background(fill, in: RoundedRectangle(cornerRadius: DS.Radius.sm))
+            .overlay(
+                RoundedRectangle(cornerRadius: DS.Radius.sm)
+                    .strokeBorder(border, lineWidth: DS.Border.hairline)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .animation(DS.Motion.fast, value: hovered)
+        .animation(DS.Motion.fast, value: destructive)
+        .help(destructive
+              ? "Clear all your typed terms too."
+              : "Clear auto-extracted terms. Your typed ones stay.")
+        .accessibilityLabel(label)
+    }
+
+    private var foreground: Color {
+        if destructive { return DS.Color.dangerFg }
+        return hovered ? DS.Color.textPrimary : DS.Color.textSecondary
+    }
+
+    private var fill: Color {
+        if destructive {
+            // Hover shifts toward the more saturated danger-base, matching
+            // the design's `color-mix(in oklab, --danger-soft 60%,
+            // --danger-base)` recipe. Resting state stays at the soft tint.
+            return hovered ? DS.Color.dangerBase.opacity(0.25) : DS.Color.dangerSoft
+        }
+        return hovered ? DS.Color.bgHover : DS.Color.bgInset.opacity(0.6)
+    }
+
+    private var border: Color {
+        if destructive { return DS.Color.dangerBorder }
+        return DS.Color.borderSubtle
     }
 }
 
@@ -416,8 +968,7 @@ private struct DSInlineTextField: View {
 
 /// Minimal CSS-flexbox-style wrap layout. Lays subviews left-to-right
 /// in rows, wrapping to a new row when the next subview would overflow
-/// the parent's width. Used for the dictionary tag cloud; trivial enough
-/// not to need an external library.
+/// the parent's width. Used for the dictionary tag cloud.
 private struct FlowLayout: Layout {
     var spacing: CGFloat
     var runSpacing: CGFloat
