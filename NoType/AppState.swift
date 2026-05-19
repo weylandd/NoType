@@ -39,14 +39,22 @@ final class AppState {
 
     /// Bridge for SwiftUI's `@Environment(\.openWindow)` into AppState.
     /// AppState is not a SwiftUI View and can't read the environment
-    /// directly, so a long-lived SwiftUI surface — `MenuBarIcon`'s
-    /// `.task` (always alive once onboarding completes) and
-    /// `MainWindowView`'s `.task` (covers the onboarding window path)
-    /// — set this slot on appearance. Mirrors the post-init injection
-    /// patterns already used for `NoTypeAppDelegate.terminationHandler`
-    /// and `AppCategorizer.onAssignmentChanged`. May be `nil` in the
-    /// narrow window before any wired view has appeared; callers should
-    /// also try `NSApp.windows` for an already-created window.
+    /// directly, so `MenuBarIcon`'s `.task` (always alive once
+    /// onboarding completes — `NoTypeApp` suppresses the entire
+    /// `MenuBarExtra` during onboarding) injects the closure on first
+    /// appearance. Mirrors the post-init injection patterns already
+    /// used for `NoTypeAppDelegate.terminationHandler` and
+    /// `AppCategorizer.onAssignmentChanged`.
+    ///
+    /// Callers should prefer raising an already-created window via
+    /// `NSApp.windows` first and fall through to this closure for the
+    /// lazy-Window-scene case — see `NoTypeErrorKind.retryHandler` for
+    /// the canonical pattern.
+    ///
+    /// `nil` window: during onboarding `MenuBarExtra` is suppressed so
+    /// this slot is unset, but `handleHotkeyPress` also short-circuits
+    /// to `onboardingHotkeyPressObserver`, so error HUDs that would
+    /// invoke this closure cannot fire in that state.
     @ObservationIgnored
     var openMainWindowRequest: (() -> Void)?
 
@@ -1558,8 +1566,8 @@ final class AppState {
     /// shows it. Persistent — the HUD stays until dismissed or replaced.
     private func surfaceError(_ kind: NoTypeErrorKind) {
         let payload = kind.payload
-        let onRetry: (() -> Void)? = kind.retryHandler.map { handler in
-            { [weak self] in handler(self) }
+        let onRetry: (@MainActor () -> Void)? = kind.retryHandler.map { handler in
+            { @MainActor [weak self] in handler(self) }
         }
         hud.showErrorHUD(payload: payload, onRetry: onRetry)
     }
@@ -1638,41 +1646,53 @@ enum NoTypeErrorKind {
         }
     }
 
-    var retryHandler: ((AppState?) -> Void)? {
+    var retryHandler: (@MainActor (AppState?) -> Void)? {
         switch self {
         case .missingAPIKey:
-            // `NoTypeErrorKind` is a non-isolated catalog enum, but
-            // every concrete call site that invokes the handler (the
-            // `() -> Void` wrapper built in `AppState.surfaceError` and
-            // fired by `HUDController.showErrorHUD`'s onRetry → SwiftUI
-            // button action) is on MainActor. `MainActor.assumeIsolated`
-            // lets us touch MainActor state (`AppState` properties,
-            // `NSApp`, `NSWindow`) without changing the catalog's
-            // (non-isolated) closure type and rippling through every
-            // catalog kind. The runtime precondition catches any future
-            // off-main caller.
+            // The closure type is `@MainActor` — compile-time
+            // enforcement that every call site (the
+            // `@MainActor () -> Void` wrapper in `surfaceError`, fired
+            // from `HUDController.showErrorHUD`'s onRetry → SwiftUI
+            // button action) is on the main actor. Previously this
+            // body used `MainActor.assumeIsolated`, which is the
+            // rejected pattern per
+            // `docs/solutions/runtime-errors/onhover-mainactor-inheritance-crash-2026-05-19.md`
+            // (same `swift_task_isCurrentExecutor*` family that
+            // crashed `.onHover` on macOS 26.2).
             return { app in
-                MainActor.assumeIsolated {
-                    guard let app else { return }
-                    // Deep-link: Settings tab + API & Usage pane.
-                    app.pendingTabSelection = .settings
-                    app.pendingSettingsCategory = .apiUsage
-                    // Belt-and-braces window raise. If the NSWindow
-                    // already exists (user opened it earlier this
-                    // launch), focus it directly. Otherwise delegate to
-                    // the openWindow closure injected from a long-lived
-                    // SwiftUI view — `Window` scenes are lazily created
-                    // and aren't in NSApp.windows until SwiftUI's
-                    // openWindow triggers them.
-                    if let window = NSApp.windows.first(where: {
-                        $0.identifier?.rawValue == "main"
-                    }) {
-                        window.makeKeyAndOrderFront(nil)
-                    } else {
-                        app.openMainWindowRequest?()
-                    }
-                    NSApp.activate(ignoringOtherApps: true)
+                guard let app else { return }
+                app.pendingTabSelection = .settings
+                app.pendingSettingsCategory = .apiUsage
+                // Tracks whether we issued a real raise/open so the
+                // stale-flag-hijack guard below can run. If we leave
+                // the pending flags set without anything happening
+                // visibly, a later unrelated window-open trigger
+                // (popover gear) silently lands the user on API &
+                // Usage instead of General.
+                let didRaise: Bool
+                if let window = NSApp.windows.first(where: {
+                    $0.identifier?.rawValue == "main"
+                }) {
+                    window.makeKeyAndOrderFront(nil)
+                    didRaise = true
+                } else if let openMainWindow = app.openMainWindowRequest {
+                    // `Window` scenes are lazily created and aren't in
+                    // NSApp.windows until SwiftUI's openWindow triggers
+                    // them — fall through to the injected closure.
+                    openMainWindow()
+                    didRaise = true
+                } else {
+                    didRaise = false
                 }
+                if !didRaise {
+                    app.pendingTabSelection = nil
+                    app.pendingSettingsCategory = nil
+                    return
+                }
+                // Activate the app so the just-raised window lands in
+                // front of whatever the user was previously in (Slack /
+                // Notes / ...). Same pattern as `HistoryPopover.openSettings`.
+                NSApp.activate(ignoringOtherApps: true)
             }
         default:
             return nil

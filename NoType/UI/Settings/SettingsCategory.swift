@@ -42,19 +42,18 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Pure-function consumer for the cross-surface
-    /// `pendingSettingsCategory` flag (e.g. missing-API-key HUD →
-    /// API & Usage pane). Reads + clears atomically and returns the
-    /// new effective `selectedCategory`. Clear-first-apply-second is
-    /// load-bearing per plan §270 — guards against a stale flag
-    /// hijacking an unrelated Settings-tab open. Mirrors
-    /// `MainTab.consumePendingSelection`.
+    /// Cross-surface `pendingSettingsCategory` consumer (e.g.
+    /// missing-API-key HUD → API & Usage pane). Delegates to the
+    /// shared `consumePendingSelection(pending:current:)` generic
+    /// helper in `NoType/UI/MainWindow.swift` — see its doc-comment
+    /// for the clear-first-apply-second discipline. Kept as an
+    /// enum-scoped static for parity with
+    /// `MainTab.consumePendingSelection` and so the test surface
+    /// stays simple (`SettingsCategoryTests`).
     static func consumePendingSelection(
         pending: inout SettingsCategory?,
         current: SettingsCategory
     ) -> SettingsCategory {
-        let captured = pending
-        pending = nil
-        return captured ?? current
+        consumeAndClearPendingSelection(pending: &pending, current: current)
     }
 }

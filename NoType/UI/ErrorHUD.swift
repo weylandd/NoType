@@ -14,8 +14,15 @@ import SwiftUI
 struct ErrorHUD: View {
     let payload: ErrorPayload
     var onDismiss:   () -> Void = {}
-    var onRetry:     (() -> Void)? = nil
-    var onSecondary: (() -> Void)? = nil
+    // `@MainActor` on the callback types is load-bearing — the retry
+    // handlers wired from `AppState.surfaceError` touch MainActor state
+    // (`pendingTabSelection`, `NSApp`, `NSWindow`). Annotating the type
+    // makes the contract a compile-time invariant; previously the body
+    // wrapped each call in `MainActor.assumeIsolated`, which is the
+    // rejected concurrency-bridge per
+    // `docs/solutions/runtime-errors/onhover-mainactor-inheritance-crash-2026-05-19.md`.
+    var onRetry:     (@MainActor () -> Void)? = nil
+    var onSecondary: (@MainActor () -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {

@@ -14,6 +14,15 @@ import XCTest
 /// is verified manually before each release — covered by the smoke
 /// note in `NoType/UI/CLAUDE.md`. These tests pin the lower-level
 /// catalog contract that the integration depends on.
+///
+/// `@MainActor` is load-bearing: `NoTypeErrorKind.retryHandler` returns
+/// `(@MainActor (AppState?) -> Void)?`, so invoking the closure
+/// requires the calling context to be on the main actor. Without this
+/// annotation the tests would fail to compile (and previously, when
+/// the type was non-isolated and the body used
+/// `MainActor.assumeIsolated`, an XCTest runner that scheduled the
+/// test body off-main could have trapped at runtime).
+@MainActor
 final class MissingKeyHUDRetryTests: XCTestCase {
 
     // MARK: - Payload shape for .missingAPIKey
@@ -78,14 +87,27 @@ final class MissingKeyHUDRetryTests: XCTestCase {
         // exotic fixtures. Adds a guard for future catalog entries —
         // anyone wiring a label must also wire a handler or this
         // test fires.
+        //
+        // **Inventory of `NoTypeErrorKind` cases (keep in sync):**
+        //   1. `.missingAPIKey`          — in `kinds` below.
+        //   2. `.vadLoadFailed`          — in `kinds` below.
+        //   3. `.sessionStartFailed(_)`  — in `kinds` below (stub error).
+        //   4. `.sessionFailure(_)`      — in `kinds` below (stub error).
+        //   5. `.partialTranscription(_)` — SKIPPED. Constructing it
+        //      requires a real `RecordingSession.SessionSummary`
+        //      fixture; its payload deliberately has no `retryLabel`,
+        //      so the regression class this test protects against
+        //      cannot apply to it.
+        //
+        // If you add a sixth case, add it here and update the
+        // inventory comment. `NoTypeErrorKind` does not (and cannot
+        // easily) conform to `CaseIterable` because three cases carry
+        // associated values, so this manual list is the contract.
         let kinds: [NoTypeErrorKind] = [
             .missingAPIKey,
             .vadLoadFailed,
             .sessionStartFailed(StubError()),
             .sessionFailure(StubError()),
-            // .partialTranscription requires a SessionSummary
-            // fixture and never sets retryLabel — skipping is safe
-            // for the regression-class this test protects against.
         ]
         for kind in kinds {
             if kind.payload.retryLabel != nil {
