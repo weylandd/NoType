@@ -1760,10 +1760,13 @@ enum NoTypeErrorKind {
                     severity: .danger,
                     iconSymbol: "exclamationmark.shield.fill"
                 )
-            case .http(let s, _):
+            case .http(let s, let body):
+                let googleMsg = GeminiClient.GeminiError.sanitizedGoogleMessage(body: body)
+                let description = googleMsg.map { "HTTP \(s): \($0). Try again, or check Console for details." }
+                    ?? "Unexpected response (HTTP \(s)). Try again, or check Console for details."
                 return ErrorPayload(
                     title: "Gemini rejected the request",
-                    description: "Unexpected response (HTTP \(s)). Try again, or check Console for details.",
+                    description: description,
                     code: "ERR_GEMINI · \(s)",
                     severity: .danger,
                     iconSymbol: "exclamationmark.triangle.fill"

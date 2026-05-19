@@ -62,18 +62,36 @@ final class GeminiKeyRowTests: XCTestCase {
 
     // MARK: - Error translation (body-redaction contract)
 
-    func test_errorBody_doesNotLeakIntoUILabel() {
-        // Hard rule, plan §548 / §571: the body of
-        // `GeminiError.http(status:body:)` may carry partial key
-        // echo, project-id, or quota identifiers. The UI label
-        // must never surface that string verbatim. We assert by
-        // building a sentinel body, running it through the row's
-        // translator, and grepping the rendered message.
+    func test_errorBody_nonJSON_doesNotLeakIntoUILabel() {
+        // Revised contract: raw (non-JSON) bodies still must not
+        // appear in the UI label. Only the *sanitized* `error.message`
+        // extracted from a JSON envelope is surfaced — random body
+        // bytes (HTML 5xx pages, plaintext nginx errors, opaque
+        // tokens) fall back to the generic "Gemini error N." line.
         let sentinel = "secret-project-id-12345"
         let err = GeminiClient.GeminiError.http(status: 500, body: sentinel)
         let rendered = GeminiKeyRow.errorMessage(for: err)
         XCTAssertFalse(rendered.contains(sentinel),
-                       "Body field must NOT appear in the UI label.")
+                       "Non-JSON body must NOT appear in the UI label.")
+    }
+
+    func test_errorBody_apiKeyInJSONMessage_isRedacted() {
+        // Hard rule, revised: Google sometimes echoes a partial
+        // API key in `error.message` ("Invalid API key:
+        // AIzaSyXXXXXXX..."). The sanitizer must mask the AIzaSy
+        // pattern so a shoulder-surfer can't reconstruct the key
+        // from a UI screenshot. The test key matches the real
+        // pattern (AIzaSy + 33 chars) but is obviously fake.
+        let fakeKey = "AIza" + "Sy" + String(repeating: "X", count: 33)
+        let body = #"{"error":{"code":400,"message":"API key not valid: \#(fakeKey). Pass a valid key."}}"#
+        let err = GeminiClient.GeminiError.http(status: 400, body: body)
+        let rendered = GeminiKeyRow.errorMessage(for: err)
+        XCTAssertTrue(rendered.contains("API key not valid"),
+                      "Sanitized message text SHOULD reach the UI.")
+        XCTAssertTrue(rendered.contains("AIzaSy••••••••"),
+                      "Key pattern must be replaced with the redaction marker.")
+        XCTAssertFalse(rendered.contains(fakeKey),
+                       "The original API-key-shaped substring must NOT appear in the UI.")
     }
 
     func test_errorMessage_missingKey_isCaseMapped() {
@@ -165,16 +183,35 @@ final class GeminiKeyRowTests: XCTestCase {
         XCTAssertFalse(rendered.contains("\"error\""))
     }
 
-    func test_errorMessage_http400_unrelatedBody_fallsBackToGenericLine() {
-        // Regression: only the whitelisted phrase triggers the
-        // region-block copy. Other 400s keep the generic line so
-        // we don't accidentally claim "region block" for, say, a
-        // malformed-request bug.
+    func test_errorMessage_http400_unrelatedBody_surfacesSanitizedGoogleMessage() {
+        // Regression: only the region-block phrase triggers the
+        // VPN copy. Other 400s now surface Google's `error.message`
+        // (sanitized) so the user gets useful diagnosis instead of
+        // a bare "Gemini error 400."
         let body = #"{"error":{"code":400,"message":"Invalid argument","status":"INVALID_ARGUMENT"}}"#
         let err = GeminiClient.GeminiError.http(status: 400, body: body)
         let rendered = GeminiKeyRow.errorMessage(for: err)
+        XCTAssertEqual(rendered, "Gemini error 400: Invalid argument.")
+    }
+
+    func test_errorMessage_http400_malformedJSON_fallsBackToGenericLine() {
+        // Body not parseable as JSON → sanitizer returns nil →
+        // generic "Gemini error 400." line. Defends against random
+        // HTML / plaintext bodies (some proxy or 5xx pages serve
+        // that shape).
+        let err = GeminiClient.GeminiError.http(status: 400, body: "<html>500</html>")
+        let rendered = GeminiKeyRow.errorMessage(for: err)
         XCTAssertEqual(rendered, "Gemini error 400.")
-        XCTAssertFalse(rendered.contains("Invalid argument"))
+    }
+
+    func test_errorMessage_http400_emptyMessage_fallsBackToGenericLine() {
+        // JSON shape correct but `error.message` is empty / whitespace.
+        // Sanitizer rejects → generic fallback. No "Gemini error 400: ."
+        // ugliness with a trailing colon.
+        let body = #"{"error":{"code":400,"message":"   ","status":"INVALID_ARGUMENT"}}"#
+        let err = GeminiClient.GeminiError.http(status: 400, body: body)
+        let rendered = GeminiKeyRow.errorMessage(for: err)
+        XCTAssertEqual(rendered, "Gemini error 400.")
     }
 
     func test_errorMessage_http500_bodyContainingTriggerPhrase_doesNotMisroute() {
@@ -219,5 +256,96 @@ final class GeminiKeyRowTests: XCTestCase {
         XCTAssertFalse(GeminiClient.GeminiError.isRegionBlocked(
             body: "user supplied a key from an unsupported region"  // close but no match
         ))
+    }
+
+    // MARK: - Sanitized Google error message extraction
+
+    func test_sanitizedGoogleMessage_extractsRealGoogleShape() {
+        let body = #"{"error":{"code":403,"message":"Generative Language API has not been used in project 12345 before or it is disabled.","status":"PERMISSION_DENIED"}}"#
+        let extracted = GeminiClient.GeminiError.sanitizedGoogleMessage(body: body)
+        XCTAssertEqual(
+            extracted,
+            "Generative Language API has not been used in project 12345 before or it is disabled."
+        )
+    }
+
+    func test_sanitizedGoogleMessage_returnsNilForNonJSON() {
+        XCTAssertNil(GeminiClient.GeminiError.sanitizedGoogleMessage(body: ""))
+        XCTAssertNil(GeminiClient.GeminiError.sanitizedGoogleMessage(body: "<html>500</html>"))
+        XCTAssertNil(GeminiClient.GeminiError.sanitizedGoogleMessage(body: "not-json-at-all"))
+    }
+
+    func test_sanitizedGoogleMessage_returnsNilForMissingMessage() {
+        XCTAssertNil(GeminiClient.GeminiError.sanitizedGoogleMessage(body: "{}"))
+        XCTAssertNil(GeminiClient.GeminiError.sanitizedGoogleMessage(
+            body: #"{"error":{"code":400}}"#
+        ))
+        XCTAssertNil(GeminiClient.GeminiError.sanitizedGoogleMessage(
+            body: #"{"error":{"message":""}}"#
+        ))
+        XCTAssertNil(GeminiClient.GeminiError.sanitizedGoogleMessage(
+            body: #"{"error":{"message":"   \n\t  "}}"#
+        ))
+    }
+
+    func test_sanitizedGoogleMessage_masksAPIKeyPattern() {
+        // 39-char Google key shape (AIzaSy + 33 chars). Multiple
+        // occurrences in one message all get masked.
+        let fakeKey1 = "AIza" + "Sy" + String(repeating: "A", count: 33)
+        let fakeKey2 = "AIza" + "Sy" + String(repeating: "B", count: 33)
+        let body = #"{"error":{"message":"Bad keys: \#(fakeKey1) and \#(fakeKey2)"}}"#
+        let extracted = GeminiClient.GeminiError.sanitizedGoogleMessage(body: body)
+        XCTAssertNotNil(extracted)
+        XCTAssertFalse(extracted!.contains(fakeKey1))
+        XCTAssertFalse(extracted!.contains(fakeKey2))
+        let maskCount = extracted!.components(separatedBy: "AIzaSy••••••••").count - 1
+        XCTAssertEqual(maskCount, 2, "Both API-key occurrences should be masked.")
+    }
+
+    func test_sanitizedGoogleMessage_leavesAIzaSyPrefixAloneWhenShorterThanKey() {
+        // The pattern requires exactly 33 chars after `AIzaSy` —
+        // a 10-char "AIzaSyShort" mention in prose must NOT be
+        // mistakenly masked.
+        let body = #"{"error":{"message":"see AIzaSyShortRef for context"}}"#
+        let extracted = GeminiClient.GeminiError.sanitizedGoogleMessage(body: body)
+        XCTAssertEqual(extracted, "see AIzaSyShortRef for context")
+    }
+
+    // MARK: - descriptionForGenericHTTP composition
+
+    func test_descriptionForGenericHTTP_regionBlock_winsOverGoogleMessage() {
+        // Region-block body matches both `isRegionBlocked` AND has
+        // a parseable Google message. The region-block branch must
+        // take priority because our VPN hint is more actionable.
+        let body = #"{"error":{"code":400,"message":"User location is not supported for the API use.","status":"FAILED_PRECONDITION"}}"#
+        let rendered = GeminiClient.GeminiError.descriptionForGenericHTTP(status: 400, body: body)
+        XCTAssertEqual(rendered, "Gemini isn't available in your region. Try connecting through a VPN.")
+    }
+
+    func test_descriptionForGenericHTTP_trailingArgAppendsCorrectly() {
+        // Onboarding wants "Try again." after the line.
+        let body = #"{"error":{"message":"Invalid argument"}}"#
+        let rendered = GeminiClient.GeminiError.descriptionForGenericHTTP(
+            status: 400, body: body, trailing: "Try again."
+        )
+        XCTAssertEqual(rendered, "Gemini error 400: Invalid argument. Try again.")
+    }
+
+    func test_descriptionForGenericHTTP_trailingArgAppendsToGenericFallback() {
+        let rendered = GeminiClient.GeminiError.descriptionForGenericHTTP(
+            status: 400, body: "<html>nope</html>", trailing: "Try again."
+        )
+        XCTAssertEqual(rendered, "Gemini error 400. Try again.")
+    }
+
+    func test_descriptionForGenericHTTP_trailingArgAppendsToRegionBlock() {
+        let body = #"{"error":{"message":"User location is not supported"}}"#
+        let rendered = GeminiClient.GeminiError.descriptionForGenericHTTP(
+            status: 400, body: body, trailing: "Try again."
+        )
+        XCTAssertEqual(
+            rendered,
+            "Gemini isn't available in your region. Try connecting through a VPN. Try again."
+        )
     }
 }
