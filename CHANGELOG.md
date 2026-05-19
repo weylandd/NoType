@@ -12,6 +12,44 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
 
 ---
 
+## [0.1.9] — 2026-05-19
+
+Hotfix release. One bug fix.
+
+### Fixed
+- **SwiftUI `.onHover` no longer crashes the app on macOS 26.2** (#57).
+  Third instance of the macOS 26 Swift concurrency executor-check
+  family (after `TimelineView` in PR #41 and Core Audio HAL IOProc in
+  PR #53 / cd36c48). On macOS 26.2 the closure prologue's
+  `swift_task_isCurrentExecutorWithFlagsImpl` check faulted at
+  `swift_getObjectType(0x1)`, reading an invalid `SerialExecutorRef`
+  identity that SwiftUI's `HoverResponder.updatePhase` handed the
+  runtime via `.onHover` closures that inherited `@MainActor` from
+  their enclosing View body (per SE-0420). Symptom: instant
+  `EXC_BAD_ACCESS` on first cursor movement over almost any
+  hover-tracked surface in the main window.
+
+  Fix introduces a `dsOnHover` wrapper in `NoType/UI/DSComponents.swift`
+  that pairs `@Sendable` (strips the inherited `@MainActor` so the
+  broken closure-prologue check is omitted) with a
+  `Task { @MainActor in ... }` bridge (schedules the `@State` write
+  through the task scheduler — different code path from the broken
+  closure-prologue check; ~one-frame latency, imperceptible for hover
+  state). All 28 raw `.onHover` callsites converted to `.dsOnHover`.
+
+  A new `NoTypeTests/DSComponentsHoverTests` pins the convention via
+  a `FileManager` walk that fails any new raw `.onHover` outside the
+  wrapper definition — closes the lint gap that let this family
+  escape twice already.
+
+  Solutions doc: `docs/solutions/runtime-errors/onhover-mainactor-inheritance-crash-2026-05-19.md`.
+  Cross-references extended across the two prior family docs
+  (`timelineview-...`, `audio-ioproc-...`) and the swift-6 concurrency
+  convention. `NoType/UI/CLAUDE.md` hard rule added next to the
+  existing TimelineView rule.
+
+---
+
 ## [0.1.8] — 2026-05-19
 
 Surface-redesign release. Settings, Instructions, Home stats, and now
