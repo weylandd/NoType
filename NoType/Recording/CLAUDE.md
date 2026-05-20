@@ -11,6 +11,7 @@
 - `PauseDetector.swift` — turns Silero frame probabilities into chunk boundaries.
 - `ChunkBuilder.swift` — encodes PCM slices to AAC-in-M4A blobs.
 - `RecordingSession.swift` — orchestrates the above; owns session lifecycle; drives the batched sender.
+- `HallucinationLengthGate.swift` — pure post-response sanity check. Drops transcripts whose word AND char rate exceed plausible dictation speed for the audio duration (4 wps / 18 cps, AND-mode, floor 4w / 18c). Catches Gemini Lite's conversational-fallback hallucinations on short low-info audio (BT-HFP mic). Wired into `RecordingSession.processBatch` and `splitRetry` success arms. Lives here (not in `NoType/Gemini/`) because the gate is a post-response policy with no Gemini API coupling — its domain is "did the audio duration justify this transcript length?" against `AudioRecorder.outputSampleRate`.
 - `Resources/SileroVAD.mlmodelc` — compiled CoreML model (FluidInference/silero-vad-coreml repack).
 
 ## Invariants
@@ -62,6 +63,20 @@ A batched call (`transcribeBatch`) failing recoverably triggers `splitRetry` —
 
 `AppState.finalizeRecording` reads `session.summary` after `stop()` returns; when `hasFailures` is true it surfaces a neutral "Pasted with gaps" HUD telling the user how many chunks ended up as markers.
 
+## Post-response hallucination gate
+
+After a successful Gemini call returns, `processBatch` and `splitRetry` pass `result.text` through `HallucinationLengthGate.apply(...)` (sibling file in this module). When the gate fires it returns `""` and that `""` is stored as `text: ""` (not `nil`) in `ChunkResponse`. This is **a third state** alongside the partial-recovery contract above:
+
+| `text` value | Source | `hasFailures` impact | Stitch behaviour |
+|---|---|---|---|
+| `"<real text>"` | Gemini returned text that passed the gate | none | concatenated normally |
+| `nil` | Recoverable Gemini failure (`recordRecoverableFailure`) | `+1` | replaced with `failureMarker` (`[…]`) |
+| `""` | Gate fired on disproportionate length | none | stitched as empty (no marker) |
+
+The empty-string state is deliberate: a gate-drop is not a recovery failure (Gemini answered, we filtered it), so it doesn't count toward "Pasted with gaps". In a single-chunk session the stitched result becomes `""` → `stop()` throws `SessionError.noSpeech` → AppState surfaces the standard "no speech" Error HUD. In a multi-chunk session where one chunk gate-drops and others succeed, the user gets the surviving text with no marker for the dropped chunk — by design, since the empty string is the gate's "this is hallucination noise, not real speech" verdict.
+
+Gate behaviour and threshold rationale live in `HallucinationLengthGate.swift` doc-comment. Wire-in happens at the success arms of `processBatch` (uses sum of all encoded chunk samples as duration denominator) and `splitRetry` (uses per-chunk samples). For batched calls covering N chunks, the gate sees the joined transcript against summed duration — by construction less likely to fire than on lite-path single-chunk calls.
+
 ## Quick-release optimisation
 
 Mid-session batches `await contextTask.value` fully — the user is clearly speaking, richer context = better. **Final** batches consult `cachedContext` (the main-actor mirror) and ship with `ContextSnapshot.minimal(activeApp:)` if not ready, rather than blocking the user behind a slow OCR cap. The lite path layers on top — see invariant 11.
@@ -88,6 +103,7 @@ The class is `final` for the deinit safety net only — `IOPMAssertionRelease` r
 - `NoTypeTests/PauseDetectorTests.swift` — state-machine fixtures (synthetic VAD probability sequences, adaptive-threshold ladder mapping, long-monologue cuts, 180 s force-cut).
 - `NoTypeTests/ChunkBuilderTests.swift` — PCM → AAC round-trip (valid `ftyp` container, decodable, no tmp-file leaks).
 - `NoTypeTests/RecordingSessionShortPathTests.swift` — pins the lite-path discriminator.
+- `NoTypeTests/HallucinationLengthGateTests.swift` — pins the pure `HallucinationLengthGate` decision (word/char ceilings, AND-mode, floor, edges) against representative fixture transcripts.
 - `NoTypeTests/AudioDeviceManagerTests.swift` — pins the pure `pickEffectiveDevice` policy (pin-wins, BT-classic / BLE-Audio fallback, no-built-in graceful degrade, off-switch honoured), the `Device.isBluetooth` / `isBuiltIn` transport-type matrix, and the HAL stream-format helpers (`avAudioFormat(from:)` round-trip for built-in 44.1 kHz mono, USB 48 kHz mono, aggregate 48 kHz stereo shapes).
 - `NoTypeTests/AudioRecorderHALTests.swift` — `AudioRecorder.AudioError` `errorDescription` contract (no-input-device / stream-format-unavailable / converter-create / IOProc-create / IOProc-start surfaces consumed by `AppState.surfaceError`) plus the load-bearing constants `outputSampleRate = 16 000` and `frameSize = 4 096`. Live-mic behaviour is out of scope per the hard rule — see hardware-smoke protocol in plan 2026-05-18-001 §85–88.
 - `SileroVADTests` — planned (see `solutions/documentation-gaps/silero-vad-reference-test-2026-05-15.md`).
@@ -97,6 +113,7 @@ The class is `final` for the deinit safety net only — `IOPMAssertionRelease` r
 - Why Silero CoreML (not Apple SpeechDetector) → `solutions/tooling-decisions/silero-vad-coreml-2026-05-15.md`.
 - One Gemini request in flight (the sender contract) → `solutions/architecture-patterns/serial-gemini-actor-2026-05-15.md`.
 - Partial recovery via gap markers (what `processBatch`'s catch-block does, why every classifier branch is what it is) → `solutions/architecture-patterns/partial-recovery-with-markers-2026-05-16.md`.
+- Post-response hallucination gate (threshold rationale, AND-mode, out-of-scope sub-classes) → `solutions/architecture-patterns/hallucination-length-gate-2026-05-20.md`.
 - Cache-prefix shape (what the sender ships) → `NoType/Gemini/CLAUDE.md`.
 - Context snapshot lifecycle → `NoType/Context/CLAUDE.md`.
 - Bluetooth input avoidance (built-in mic fallback) → `solutions/architecture-patterns/bluetooth-input-avoidance-2026-05-16.md`.

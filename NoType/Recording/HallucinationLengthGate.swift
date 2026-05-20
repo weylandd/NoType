@@ -45,7 +45,7 @@ enum HallucinationLengthGate {
     /// Character-rate ceiling. 18 cps gives headroom for Russian
     /// (longer average word length than English) and Gemini's
     /// punctuation variability. `greeting_ru` ("Привет, как дела?",
-    /// 16 chars at 1.07 s ≈ 14.95 cps) passes comfortably.
+    /// 17 chars at 1.07 s ≈ 15.89 cps) passes comfortably.
     static let maxCharsPerSecond: Double = 18.0
 
     /// Hard floor — even on very short audio (<1 s) we always

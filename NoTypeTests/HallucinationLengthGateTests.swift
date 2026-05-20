@@ -35,7 +35,8 @@ final class HallucinationLengthGateTests: XCTestCase {
 
     func test_passes_greetingRu_at1s07() {
         // `NoTypeTests/Fixtures/Audio/greeting_ru.m4a` — 1.07 s,
-        // "Привет, как дела?" → 3 words / 16 chars.
+        // "Привет, как дела?" → 3 words / 17 chars (Swift's
+        // grapheme-cluster String.count, not bytes).
         // Word ceiling at 1.07 s: max(4, ceil(1.07 * 4)) = 5
         // Char ceiling: max(18, ceil(1.07 * 18)) = 20
         // 3 ≤ 5, AND-gate falls before char check ever matters.
@@ -58,10 +59,10 @@ final class HallucinationLengthGateTests: XCTestCase {
     }
 
     func test_passes_longMonologueEN_at30s() {
-        // 85+ words / ~550 chars at 30 s — 2.8 wps / ~18 cps,
-        // right at the char ceiling but under word ceiling.
-        // AND-gate requires both to fail; words pass → drop=false.
-        let transcript = String(repeating: "word ", count: 85) // 85 "word" + spaces ≈ 425 chars
+        // 85 words / 424 chars at 30 s after trim — ~2.83 wps /
+        // ~14.13 cps. Word ceiling=120, char ceiling=540 — both
+        // dimensions pass with wide margin.
+        let transcript = String(repeating: "word ", count: 85) // trimmed: 85*4 + 84 spaces = 424 chars
         let dropped = HallucinationLengthGate.shouldDropAsHallucination(
             transcript: transcript,
             durationSeconds: 30.0
@@ -100,8 +101,9 @@ final class HallucinationLengthGateTests: XCTestCase {
     }
 
     func test_andMode_passesWhenOnlyCharsExceed() {
-        // Three long made-up words on 1 s — char count (35) exceeds
-        // 18 but word count (3) is at floor. AND-mode → passes.
+        // Three long made-up words on 1 s — char count (39) exceeds
+        // 18 but word count (3) is below the 4-word floor. AND-mode
+        // → passes.
         let dropped = HallucinationLengthGate.shouldDropAsHallucination(
             transcript: "antidisestablishmentarianism word again",
             durationSeconds: 1.0
@@ -110,7 +112,7 @@ final class HallucinationLengthGateTests: XCTestCase {
     }
 
     func test_andMode_tripsWhenBothExceed() {
-        // 6 words / 26 chars on 1 s — both ceilings exceeded.
+        // 6 words / 28 chars on 1 s — both ceilings exceeded.
         let dropped = HallucinationLengthGate.shouldDropAsHallucination(
             transcript: "one two three four five six!",
             durationSeconds: 1.0

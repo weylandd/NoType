@@ -225,6 +225,21 @@ final class RecordingSession {
         let text: String?
     }
 
+    /// One Silero-cut chunk after PCM read, sub-150 ms drop, and AAC
+    /// encode have all succeeded — the unit `processBatch` ships to
+    /// Gemini and `splitRetry` re-issues on recoverable failure.
+    /// `samples` is the raw PCM sample count (not encoded byte size);
+    /// `HallucinationLengthGate` divides it by `AudioRecorder.outputSampleRate`
+    /// to get audio duration. Named struct (over a 4-tuple) so a future
+    /// field addition errors at the compile site rather than silently
+    /// mis-positioning at one of three call sites.
+    private struct EncodedChunk: Sendable {
+        let idx: Int
+        let isFinal: Bool
+        let audio: Data
+        let samples: Int
+    }
+
     /// Outputs of completed Gemini calls, in dispatch order (also
     /// chunk-index order: the sender drains serially and we never
     /// dispatch out-of-order). Stitched at `stop()` — each entry's
@@ -786,7 +801,7 @@ final class RecordingSession {
         // / lip clicks would otherwise produce empty Gemini calls).
         // `samples` carries the PCM sample count for the downstream
         // `HallucinationLengthGate` (audio duration = samples / 16 kHz).
-        var encoded: [(idx: Int, isFinal: Bool, audio: Data, samples: Int)] = []
+        var encoded: [EncodedChunk] = []
         for pc in batch {
             let pcm = recorder.samples(from: pc.pcmStart, to: pc.pcmEnd)
             if pcm.count < 2_400 {
@@ -795,7 +810,7 @@ final class RecordingSession {
             }
             do {
                 let aac = try ChunkBuilder.encodeAAC(pcm)
-                encoded.append((pc.index, pc.isFinal, aac, pcm.count))
+                encoded.append(EncodedChunk(idx: pc.index, isFinal: pc.isFinal, audio: aac, samples: pcm.count))
             } catch {
                 Self.log.error("encode chunk_\(pc.index) failed: \(error.localizedDescription, privacy: .public)")
                 markFailure(error)
@@ -915,7 +930,7 @@ final class RecordingSession {
     /// sub-call aborts the rest of the split — the session-level
     /// `markFailure` is already set; `stop()` will rethrow.
     private func splitRetry(
-        encoded: [(idx: Int, isFinal: Bool, audio: Data, samples: Int)],
+        encoded: [EncodedChunk],
         snap: ChunkSnapshot
     ) async {
         for (offset, chunk) in encoded.enumerated() {
@@ -1072,8 +1087,20 @@ final class RecordingSession {
     /// `failureMarker` placeholders only in the final pasted text,
     /// never in the Gemini-facing prior list. Sending markers as
     /// priors would teach the model to emit them.
+    ///
+    /// Also filters empty-string entries — those come from the
+    /// `HallucinationLengthGate` filtering out a hallucinated
+    /// response. An empty string isn't a real prior chunk; treating
+    /// it as one would (a) feed Gemini a `""` as "previous chunk
+    /// transcribed to nothing", which the model misreads as a stop
+    /// signal, and (b) bump the lite-path discriminator's
+    /// `priorTranscriptCount` above zero, disqualifying the next
+    /// short chunk from the lite path despite no real prior content.
     private func currentPriors() -> [String] {
-        responses.compactMap { $0.text }
+        responses.compactMap { resp in
+            guard let text = resp.text, !text.isEmpty else { return nil }
+            return text
+        }
     }
 
     /// Synchronously assemble a small `ContextSnapshot` for short
