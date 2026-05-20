@@ -784,7 +784,9 @@ final class RecordingSession {
 
         // Encode + drop sub-150 ms chunks (Silero false starts on breath
         // / lip clicks would otherwise produce empty Gemini calls).
-        var encoded: [(idx: Int, isFinal: Bool, audio: Data)] = []
+        // `samples` carries the PCM sample count for the downstream
+        // `HallucinationLengthGate` (audio duration = samples / 16 kHz).
+        var encoded: [(idx: Int, isFinal: Bool, audio: Data, samples: Int)] = []
         for pc in batch {
             let pcm = recorder.samples(from: pc.pcmStart, to: pc.pcmEnd)
             if pcm.count < 2_400 {
@@ -793,7 +795,7 @@ final class RecordingSession {
             }
             do {
                 let aac = try ChunkBuilder.encodeAAC(pcm)
-                encoded.append((pc.index, pc.isFinal, aac))
+                encoded.append((pc.index, pc.isFinal, aac, pcm.count))
             } catch {
                 Self.log.error("encode chunk_\(pc.index) failed: \(error.localizedDescription, privacy: .public)")
                 markFailure(error)
@@ -844,9 +846,25 @@ final class RecordingSession {
                 )
             }
             sessionTokens = sessionTokens + result.tokens
+            // Post-response length-proportional gate. Drops Gemini
+            // conversational-fallback hallucinations on short low-info
+            // audio (e.g. 1 s of degraded BT-HFP mic → "Can you help me
+            // with this?"). See `HallucinationLengthGate` doc-comment
+            // for rationale. AND-mode keeps borderline legitimate
+            // dense utterances (Russian "Привет, как дела?" at 1 s)
+            // alive. Sample rate is the recorder's fixed 16 kHz output.
+            let batchSamples = encoded.reduce(0) { $0 + $1.samples }
+            let durationSec = Double(batchSamples) / AudioRecorder.outputSampleRate
+            let filteredText = HallucinationLengthGate.apply(
+                to: result.text,
+                durationSeconds: durationSec
+            )
+            if filteredText != result.text {
+                Self.log.warning("\(label) hallucination gate fired — dropped \(result.text.count, privacy: .public) chars over \(durationSec, privacy: .public) s")
+            }
             responses.append(ChunkResponse(
                 chunkIndices: encoded.map { $0.idx },
-                text: result.text
+                text: filteredText
             ))
         } catch {
             if Self.isTerminal(error) {
@@ -897,7 +915,7 @@ final class RecordingSession {
     /// sub-call aborts the rest of the split — the session-level
     /// `markFailure` is already set; `stop()` will rethrow.
     private func splitRetry(
-        encoded: [(idx: Int, isFinal: Bool, audio: Data)],
+        encoded: [(idx: Int, isFinal: Bool, audio: Data, samples: Int)],
         snap: ChunkSnapshot
     ) async {
         for (offset, chunk) in encoded.enumerated() {
@@ -916,9 +934,19 @@ final class RecordingSession {
                     apiKey: snap.apiKey
                 )
                 sessionTokens = sessionTokens + result.tokens
+                // Same gate as the primary path — per-chunk duration
+                // here since each split sub-call carries one chunk.
+                let durationSec = Double(chunk.samples) / AudioRecorder.outputSampleRate
+                let filteredText = HallucinationLengthGate.apply(
+                    to: result.text,
+                    durationSeconds: durationSec
+                )
+                if filteredText != result.text {
+                    Self.log.warning("chunk_\(chunk.idx) split-retry: hallucination gate fired — dropped \(result.text.count, privacy: .public) chars over \(durationSec, privacy: .public) s")
+                }
                 responses.append(ChunkResponse(
                     chunkIndices: [chunk.idx],
-                    text: result.text
+                    text: filteredText
                 ))
             } catch {
                 if Self.isTerminal(error) {
