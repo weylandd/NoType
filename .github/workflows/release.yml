@@ -56,7 +56,7 @@ jobs:
           /tmp/sparkle/bin/sign_update --help || true
 
       - name: Import Developer ID Application certificate
-        uses: apple-actions/import-codesign-certs@v3
+        uses: apple-actions/import-codesign-certs@v7
         with:
           p12-file-base64: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
           p12-password:    ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
