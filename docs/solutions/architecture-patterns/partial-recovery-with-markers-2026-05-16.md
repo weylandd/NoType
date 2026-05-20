@@ -25,6 +25,8 @@ Wispr Flow / Monologue / other dictation apps don't expose how they handle this;
 
 Track per-call outcomes (`ChunkResponse { chunkIndices, text: String? }` — `nil` text means the call failed) and stitch at `stop()` with `text ?? failureMarker` per response. The constant marker is `"[…]"` (single horizontal-ellipsis character in square brackets), declared as `RecordingSession.failureMarker`.
 
+`ChunkResponse.text` has gained a third state since this doc was written: `""` (empty string), used by [`HallucinationLengthGate`](hallucination-length-gate-2026-05-20.md) to drop a Gemini response whose word/char rate exceeded plausible dictation speed for the audio duration. An empty-string entry is deliberately not a recovery failure — Gemini answered, the client filtered the output as noise — so `summary.hasFailures` does NOT count it, no `[…]` marker is stitched, and `currentPriors()` filters `""` alongside `nil`. The two-state-vs-three-state distinction matters: `nil` is "the API didn't return for us", `""` is "the API returned but we decided to discard it".
+
 Classify errors via the pure static `RecordingSession.isTerminal(_:)`:
 
 | Error | Class | Behaviour |
@@ -116,6 +118,7 @@ A neutral `"Pasted with gaps"` HUD says "N of M chunks didn't transcribe — `[�
 - [local-chunk-concatenation-2026-05-15.md](../design-patterns/local-chunk-concatenation-2026-05-15.md) — the "client owns assembly" rule that the marker stitching rides on.
 - [adaptive-pause-threshold-2026-05-16.md](../design-patterns/adaptive-pause-threshold-2026-05-16.md) — the finer-chunking change that made all-or-nothing more painful and motivated this work.
 - [sender-respawn-race-2026-05-16.md](../runtime-errors/sender-respawn-race-2026-05-16.md) — sister learning from the previous reliability pass.
+- [hallucination-length-gate-2026-05-20.md](hallucination-length-gate-2026-05-20.md) — the third `text` state (`""` for gate-drops) and how it interacts with this contract.
 - PR #38 — adaptive pause threshold + 180 s force-cut.
 - PR #39 — partial recovery (this entry).
 - `NoType/Recording/CLAUDE.md` — invariant 12 ("Partial recovery") and the per-class classifier matrix.
