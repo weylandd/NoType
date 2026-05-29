@@ -239,12 +239,14 @@ final class AppState {
     /// IOKit handle from two copies would log a warning at best.
     @ObservationIgnored private var activeSleepAssertion: SleepAssertion?
 
-    /// Music-interruption mode from Settings → Audio. Default `.none`.
+    /// Music-interruption mode from Settings → Recording. Default `.none`.
     /// `.mute` toggles `kAudioDevicePropertyMute` on the system
-    /// default output for the recording-session duration; `.pause`
-    /// posts an `NX_KEYTYPE_PLAY` media-key event on start AND on
-    /// stop (toggle semantics). Persisted as the `Mode.rawValue`
-    /// string under `notype.musicInterruption`.
+    /// default output for the recording-session duration and restores
+    /// the prior state on stop. (An older `.pause` toggle mode was
+    /// removed — it started stopped/paused media; see
+    /// `MusicInterruption`.) Persisted as the `Mode.rawValue` string
+    /// under `notype.musicInterruption`; an unknown stored value
+    /// (e.g. a legacy `"pause"`) decodes to `.none` in `init`.
     var musicInterruptionMode: MusicInterruption.Mode {
         didSet {
             UserDefaults.standard.set(
@@ -879,6 +881,16 @@ final class AppState {
         guard case .recording = recordingState, let session = currentSession else { return }
 
         recordingState = .sending
+        // Recording has ended (hotkey released) — the mic is no longer
+        // capturing, so lift any music-output mute *now* rather than
+        // holding it through the Gemini transcription window. Without
+        // this the user's music stays silenced while the transcribing
+        // HUD spins, which is dead time (nothing is being recorded).
+        // The sleep assertion deliberately is NOT released here — it
+        // stays until the terminal arms below so the Mac can't sleep
+        // mid-call. `releaseMusicInterruption()` is idempotent, so the
+        // arms below no longer re-call it.
+        releaseMusicInterruption()
         let target = session.sourceAppName ?? "the focused app"
         // Dismiss-only: the X button hides the HUD without cancelling the
         // in-flight Gemini call. Transcription continues and the paste
@@ -908,7 +920,6 @@ final class AppState {
                 self.recordingState = .idle
                 self.lockedRecording = false
                 self.releaseSleepAssertion()
-                self.releaseMusicInterruption()
                 self.uninstallSpacebarLockTap()
                 self.hud.hideTranscribingHUD()
                 if sessionSummary.hasFailures {
@@ -956,7 +967,6 @@ final class AppState {
                 self.recordingState = .idle
                 self.lockedRecording = false
                 self.releaseSleepAssertion()
-                self.releaseMusicInterruption()
                 self.uninstallSpacebarLockTap()
                 self.hud.hideTranscribingHUD()
                 self.surfaceError(.sessionFailure(error))
