@@ -61,6 +61,56 @@ final class TokenStatsPanelTests: XCTestCase {
         XCTAssertEqual(GeminiPricing.cachedPerMillion, 0.025, accuracy: 1e-9)
     }
 
+    func test_pricingConstants_areCurrentGeminiFlashRates() {
+        // Gemini 3.5 Flash rates. Source: GeminiPricing.swift doc-comment
+        // ($1.50 in / $9.00 out; cached = 10% of input = $0.15).
+        XCTAssertEqual(GeminiPricing.flashInputPerMillion,  1.50, accuracy: 1e-9)
+        XCTAssertEqual(GeminiPricing.flashOutputPerMillion, 9.00, accuracy: 1e-9)
+        XCTAssertEqual(GeminiPricing.flashCachedPerMillion, 0.15, accuracy: 1e-9)
+    }
+
+    func test_rates_perModel() {
+        XCTAssertEqual(GeminiPricing.rates(for: .flashLite).input,  0.25, accuracy: 1e-9)
+        XCTAssertEqual(GeminiPricing.rates(for: .flashLite).output, 1.50, accuracy: 1e-9)
+        XCTAssertEqual(GeminiPricing.rates(for: .flash).input,      1.50, accuracy: 1e-9)
+        XCTAssertEqual(GeminiPricing.rates(for: .flash).output,     9.00, accuracy: 1e-9)
+    }
+
+    func test_cost_defaultsToFlashLiteRates() {
+        // The default `model` argument must be `.flashLite` so existing
+        // call sites and the Flash-Lite math stay unchanged.
+        XCTAssertEqual(GeminiPricing.cost(input: 1_000_000, output: 1_000_000),
+                       1.75, accuracy: 1e-9)
+    }
+
+    func test_cost_flashModel_usesFlashRates() {
+        // 1M input @ $1.50 + 1M output @ $9.00 = $10.50 exactly.
+        let cost = GeminiPricing.cost(input: 1_000_000, output: 1_000_000, cached: 0, model: .flash)
+        XCTAssertEqual(cost, 10.50, accuracy: 1e-9)
+    }
+
+    func test_costPerModel_sumsEachModelAtItsRate() {
+        // Flash-Lite slice: 1M in/out = $1.75; Flash slice: 1M in/out = $10.50.
+        let totals: [String: ModelTokens] = [
+            GeminiModel.flashLite.rawValue: ModelTokens(input: 1_000_000, output: 1_000_000),
+            GeminiModel.flash.rawValue:     ModelTokens(input: 1_000_000, output: 1_000_000),
+        ]
+        XCTAssertEqual(GeminiPricing.cost(perModel: totals), 1.75 + 10.50, accuracy: 1e-9)
+    }
+
+    func test_costPerModel_empty_isZero() {
+        XCTAssertEqual(GeminiPricing.cost(perModel: [:]), 0.0, accuracy: 1e-9)
+    }
+
+    func test_costPerModel_unknownKey_fallsBackToFlashLite() {
+        // A model id we no longer recognise prices at Flash-Lite rather
+        // than vanishing from the total.
+        let totals: [String: ModelTokens] = [
+            "gemini-9.9-imaginary": ModelTokens(input: 1_000_000, output: 1_000_000)
+        ]
+        XCTAssertEqual(GeminiPricing.cost(perModel: totals), 1.75, accuracy: 1e-9)
+    }
+
     // MARK: - Cost calculation
 
     func test_cost_allZero_isZero() {
@@ -185,13 +235,16 @@ final class TokenStatsPanelTests: XCTestCase {
         let oldKey   = StatsSnapshot.dayKey(for: threeDaysAgo, calendar: cal)
 
         var snap = StatsSnapshot.empty
+        let lite = GeminiModel.flashLite.rawValue
         snap.dayBuckets[todayKey] = DayBucket(
             words: 0, sessions: 1,
-            tokenInput: 100, tokenOutput: 50, tokenCached: 20
+            tokenInput: 100, tokenOutput: 50, tokenCached: 20,
+            tokensByModel: [lite: ModelTokens(input: 100, output: 50, cached: 20)]
         )
         snap.dayBuckets[oldKey] = DayBucket(
             words: 0, sessions: 1,
-            tokenInput: 999, tokenOutput: 999, tokenCached: 999
+            tokenInput: 999, tokenOutput: 999, tokenCached: 999,
+            tokensByModel: [lite: ModelTokens(input: 999, output: 999, cached: 999)]
         )
 
         let totals = snap.tokenTotals(overLastDays: TokenStatsRange.today.days,
@@ -201,12 +254,15 @@ final class TokenStatsPanelTests: XCTestCase {
         XCTAssertEqual(totals.output, 50)
         XCTAssertEqual(totals.cached, 20)
 
-        // And the panel's cost would be derived from those totals.
-        let cost = GeminiPricing.cost(input: totals.input,
-                                      output: totals.output,
-                                      cached: totals.cached)
-        // billable = 80 @ $0.25/M = $0.00002; cached = 20 @ $0.025/M = $0.0000005;
-        // output = 50 @ $1.50/M = $0.000075; total ≈ $0.0000955 → formats "<$0.01"
+        // Mirror the PRODUCTION cost path: TokenStatsPanel derives Cost
+        // from cost(perModel: tokenTotalsByModel(...)), not the flat
+        // overload. All-Flash-Lite here, so the figure is the same
+        // "<$0.01" — the mixed-model divergence is covered separately
+        // (test_panelCost_mixedModels_pricesEachAtItsRate).
+        let byModel = snap.tokenTotalsByModel(overLastDays: TokenStatsRange.today.days,
+                                              today: today,
+                                              calendar: cal)
+        let cost = GeminiPricing.cost(perModel: byModel)
         XCTAssertEqual(GeminiPricing.formatCost(cost), "<$0.01")
     }
 
@@ -232,5 +288,33 @@ final class TokenStatsPanelTests: XCTestCase {
         XCTAssertEqual(totals.input,  7)
         XCTAssertEqual(totals.output, 3)
         XCTAssertEqual(totals.cached, 1)
+    }
+
+    func test_panelCost_mixedModels_pricesEachAtItsRate() {
+        // The production cost path sums per-model: a window mixing
+        // Flash-Lite and Flash must bill each slice at its own rate.
+        // The flat overload (Flash-Lite rates for everything) would
+        // under-price the Flash slice — this test pins the divergence
+        // so a regression back to the flat path is caught.
+        let today = Date()
+        let cal = Calendar.autoupdatingCurrent
+        let key = StatsSnapshot.dayKey(for: today, calendar: cal)
+        var snap = StatsSnapshot.empty
+        snap.dayBuckets[key] = DayBucket(
+            words: 0, sessions: 2,
+            tokenInput: 2_000_000, tokenOutput: 2_000_000, tokenCached: 0,
+            tokensByModel: [
+                GeminiModel.flashLite.rawValue: ModelTokens(input: 1_000_000, output: 1_000_000, cached: 0),
+                GeminiModel.flash.rawValue:     ModelTokens(input: 1_000_000, output: 1_000_000, cached: 0),
+            ]
+        )
+        let byModel = snap.tokenTotalsByModel(overLastDays: TokenStatsRange.today.days,
+                                              today: today, calendar: cal)
+        // Flash-Lite slice $1.75 + Flash slice $10.50 = $12.25 (production path).
+        XCTAssertEqual(GeminiPricing.cost(perModel: byModel), 1.75 + 10.50, accuracy: 1e-9)
+        // The old flat path mis-prices everything at Flash-Lite = $3.50,
+        // demonstrating why the panel must use the per-model path.
+        XCTAssertEqual(GeminiPricing.cost(input: 2_000_000, output: 2_000_000, cached: 0),
+                       3.50, accuracy: 1e-9)
     }
 }

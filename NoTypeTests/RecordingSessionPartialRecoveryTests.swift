@@ -130,7 +130,8 @@ final class RecordingSessionPartialRecoveryTests: XCTestCase {
         let s = RecordingSession.SessionSummary(
             failedChunkCount: 0,
             dispatchedChunkCount: 3,
-            tokens: .zero
+            tokens: .zero,
+            model: .flashLite
         )
         XCTAssertFalse(s.hasFailures)
     }
@@ -139,7 +140,8 @@ final class RecordingSessionPartialRecoveryTests: XCTestCase {
         let s = RecordingSession.SessionSummary(
             failedChunkCount: 1,
             dispatchedChunkCount: 5,
-            tokens: .zero
+            tokens: .zero,
+            model: .flashLite
         )
         XCTAssertTrue(s.hasFailures)
     }
@@ -155,8 +157,23 @@ final class RecordingSessionPartialRecoveryTests: XCTestCase {
         let s = RecordingSession.SessionSummary(
             failedChunkCount: 0,
             dispatchedChunkCount: 1,
-            tokens: t
+            tokens: t,
+            model: .flashLite
         )
         XCTAssertEqual(s.tokens, t)
+    }
+
+    func test_sessionSummary_carriesFlashModel() {
+        // The model field must carry a non-default value verbatim —
+        // AppState.finalizeRecording forwards summary.model into
+        // StatsStore.record so token costs price at the right per-model
+        // rate. Only .flashLite is exercised elsewhere in this file.
+        let s = RecordingSession.SessionSummary(
+            failedChunkCount: 0,
+            dispatchedChunkCount: 1,
+            tokens: .zero,
+            model: .flash
+        )
+        XCTAssertEqual(s.model, .flash)
     }
 }

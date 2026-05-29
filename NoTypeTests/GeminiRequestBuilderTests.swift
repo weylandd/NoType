@@ -947,4 +947,17 @@ final class GeminiRequestBuilderTests: XCTestCase {
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertNil(json["tools"], "lite transcription requests must not declare tools")
     }
+
+    func test_generateContentURL_perModel_mapsToModelID() {
+        // The transcription model lives in the URL path, not the request
+        // body — so the cache-prefix part order is unaffected. Pin that
+        // each GeminiModel resolves to its own generateContent endpoint.
+        // The classifier always passes .flashLite (model-agnostic by
+        // design); transcription passes the session's frozen model.
+        let lite  = GeminiClient.generateContentURL(for: .flashLite).absoluteString
+        let flash = GeminiClient.generateContentURL(for: .flash).absoluteString
+        XCTAssertTrue(lite.contains("gemini-3.1-flash-lite:generateContent"), "got: \(lite)")
+        XCTAssertTrue(flash.contains("gemini-3.5-flash:generateContent"), "got: \(flash)")
+        XCTAssertNotEqual(lite, flash)
+    }
 }

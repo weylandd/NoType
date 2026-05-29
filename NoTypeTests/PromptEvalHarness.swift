@@ -236,14 +236,16 @@ enum PromptEvalHarness {
                 priorTranscripts: [],
                 chunkIndex: 1,
                 isFinal: true,
-                apiKey: key
+                apiKey: key,
+                model: .flashLite
             )
         case .lite:
             transcript = try await client.transcribeShort(
                 audio: audioData,
                 mimeType: "audio/mp4",
                 context: context,
-                apiKey: key
+                apiKey: key,
+                model: .flashLite
             )
         }
         let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)

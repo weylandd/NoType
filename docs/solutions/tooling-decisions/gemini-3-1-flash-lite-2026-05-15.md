@@ -26,7 +26,7 @@ NoType needs a transcription engine that:
 
 ## Guidance
 
-**Use `gemini-3.1-flash-lite` (post-GA)** as the single transcription model id. Configure with:
+**Use `gemini-3.1-flash-lite` (post-GA)** as the default transcription model id (a user-selectable `gemini-3.5-flash` opt-in was added later — see the addendum). Configure with:
 
 - `thinkingLevel: "minimal"` — transcription isn't a reasoning task.
 - `top_p: 0.2` — tight nucleus, no determinism artefacts of `temperature=0`.
@@ -49,13 +49,25 @@ The same model is also used for the one-shot app classifier (with web-search too
 
 ## Examples
 
-**The pin in code:** `NoType/Gemini/GeminiClient.swift:15` — single constant.
+**The pin in code:** `NoType/Gemini/GeminiModel.swift` (the `GeminiModel` enum, default `.flashLite`) + `GeminiClient.generateContentURL(for:)` (per-model endpoint). Was a single `modelID` constant until the model toggle landed — see the addendum below.
 
-**Alternatives that were rejected:**
+**Alternatives that were rejected at decision time:**
 
 - **Whisper (local).** Rejected — pure ASR, can't do AX-context-aware reformatting that the LLM provides. NoType explicitly accepts the internet dependency (see project non-goals).
-- **Gemini 3 Flash.** Rejected — overkill for dictation; cost would be ~3× higher with no quality win we can detect.
+- **Gemini 3.5 Flash as the *default*.** Rejected as the default — ~3–6× pricier ($1.50/$9.00 vs $0.25/$1.50) with no quality win we could detect for everyday dictation. **Now shipped as an opt-in** — see the addendum.
 - **OpenAI Realtime API.** Viable alternative; revisit if Gemini quality disappoints. Higher cost.
+
+## Addendum (2026-05-29): Flash-Lite default + 3.5 Flash opt-in
+
+Flash-Lite remains the **default and recommended** model for everyday dictation — the original decision stands. What changed: a user-selectable **Transcription model** toggle (Settings → API & Usage) now lets a user switch transcription to `gemini-3.5-flash` to A/B quality on tricky / accented / noisy audio, accepting the higher cost. This does **not** relitigate the default; it adds a power-user escape hatch for the exact "quality too low for accents / jargon" case this doc's "When to Apply" already named as the reconsideration trigger.
+
+Mechanics that keep the original cost story intact:
+
+- The model is frozen into each `RecordingSession` at start and rides into the request **URL** via `generateContentURL(for:)` — **not** the request body, so the implicit-cache part ordering (the load-bearing prefix) is unaffected.
+- The **app classifier stays on Flash-Lite** regardless of the toggle — so the user's transcription choice never changes classifier cost. The "one pricing surface" simplicity is preserved for the classifier; transcription is the only switchable surface.
+- Pricing is now per-model (`GeminiPricing`: Flash-Lite $0.25/$1.50, 3.5 Flash $1.50/$9.00). `StatsStore` schema v5 tracks tokens per model so the API & Usage cost figure is exact even across a mixed-model window. See [`solutions/conventions/no-telemetry-with-statsstore-carveout-2026-05-15.md`](../conventions/no-telemetry-with-statsstore-carveout-2026-05-15.md).
+
+Shipped in PR #65.
 
 ## Related
 

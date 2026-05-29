@@ -113,6 +113,10 @@ final class RecordingSession {
         /// `AppState.finalizeRecording` and folded into
         /// `StatsStore.record(_:tokens:)` for per-day token totals.
         let tokens: TokenUsage
+        /// Transcription model this session ran on (frozen at start).
+        /// Folded into `StatsStore` so token costs are priced at the
+        /// right per-model rate.
+        let model: GeminiModel
 
         var hasFailures: Bool { failedChunkCount > 0 }
     }
@@ -177,6 +181,12 @@ final class RecordingSession {
     /// cache-prefix section. Frozen for the session's lifetime so the
     /// Gemini cache prefix stays byte-stable across chunks.
     private var userLanguagesFrozen: [String] = []
+    /// Transcription model frozen at session start (Settings → API &
+    /// Usage). Threaded into every Gemini call for this session so a
+    /// mid-session settings change can't split one session across two
+    /// models / implicit-cache namespaces. Defaults to `.flashLite`
+    /// until `start` overwrites it.
+    private var modelFrozen: GeminiModel = .flashLite
     private var contextTask: Task<ContextSnapshot, Never>?
     /// Mirror of `contextTask`'s eventual value, populated on the main
     /// actor the moment the snapshot is ready. Used by the **final-chunk**
@@ -301,13 +311,15 @@ final class RecordingSession {
         apiKey: String,
         instructions: InstructionsContext,
         dictionary: DictionaryContext,
-        userLanguages: [String]
+        userLanguages: [String],
+        model: GeminiModel
     ) throws {
         self.apiKey = apiKey
         self.replacementsFrozen = dictionary.replacements
         self.instructionsFrozen = instructions
         self.dictionaryFrozen = dictionary
         self.userLanguagesFrozen = userLanguages
+        self.modelFrozen = model
         let frontmost = NSWorkspace.shared.frontmostApplication
         sourceApp = frontmost
         startedAt = Date()
@@ -477,8 +489,22 @@ final class RecordingSession {
         return SessionSummary(
             failedChunkCount: failed,
             dispatchedChunkCount: total,
-            tokens: sessionTokens
+            tokens: sessionTokens,
+            model: modelFrozen
         )
+    }
+
+    /// Stop audio capture immediately, without draining or sending.
+    /// Called by `AppState.finalizeRecording` at hotkey-release so a
+    /// `.mute` music-interruption can be lifted the instant the mic
+    /// goes quiet — rather than a few ms later when `stop()`'s
+    /// `recorder.stop()` would otherwise run, a window in which
+    /// newly-unmuted speaker audio could bleed into the final chunk's
+    /// tail. `AudioRecorder.stop()` is idempotent, so the `recorder.stop()`
+    /// inside `stop()` below is a harmless no-op afterwards; the PCM ring
+    /// is untouched, so `emitFinalChunkIfAny` still harvests the full tail.
+    func stopCapture() {
+        recorder.stop()
     }
 
     /// Stops capture, awaits the sender draining the pending queue,
@@ -836,7 +862,8 @@ final class RecordingSession {
                     audio: one.audio,
                     mimeType: "audio/mp4",
                     context: snap.context,
-                    apiKey: snap.apiKey
+                    apiKey: snap.apiKey,
+                    model: snap.model
                 )
             } else if encoded.count == 1 {
                 let one = encoded[0]
@@ -847,7 +874,8 @@ final class RecordingSession {
                     priorTranscripts: snap.priors,
                     chunkIndex: one.idx,
                     isFinal: one.isFinal,
-                    apiKey: snap.apiKey
+                    apiKey: snap.apiKey,
+                    model: snap.model
                 )
             } else {
                 Self.log.info("batching \(encoded.count) chunks (\(encoded.first?.idx ?? -1)..\(encoded.last?.idx ?? -1)) final=\(containsFinal)")
@@ -857,7 +885,8 @@ final class RecordingSession {
                     priorTranscripts: snap.priors,
                     chunkIndices: encoded.map { $0.idx },
                     isFinal: containsFinal,
-                    apiKey: snap.apiKey
+                    apiKey: snap.apiKey,
+                    model: snap.model
                 )
             }
             sessionTokens = sessionTokens + result.tokens
@@ -946,7 +975,8 @@ final class RecordingSession {
                     priorTranscripts: priors,
                     chunkIndex: chunk.idx,
                     isFinal: chunk.isFinal,
-                    apiKey: snap.apiKey
+                    apiKey: snap.apiKey,
+                    model: snap.model
                 )
                 sessionTokens = sessionTokens + result.tokens
                 // Same gate as the primary path — per-chunk duration
@@ -1024,6 +1054,9 @@ final class RecordingSession {
         /// uses `systemPromptLite` and omits the On-screen context +
         /// Prior chunks prompt parts).
         let isLite: Bool
+        /// Transcription model frozen at session start — threaded into
+        /// every Gemini call so the whole session stays on one model.
+        let model: GeminiModel
     }
 
     /// Resolve the `ContextSnapshot` to attach to the next Gemini call.
@@ -1077,7 +1110,7 @@ final class RecordingSession {
             )
             isLite = false
         }
-        return ChunkSnapshot(context: context, priors: currentPriors(), apiKey: apiKey, isLite: isLite)
+        return ChunkSnapshot(context: context, priors: currentPriors(), apiKey: apiKey, isLite: isLite, model: modelFrozen)
     }
 
     /// Successful transcript texts from completed Gemini calls, in

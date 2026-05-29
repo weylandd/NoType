@@ -29,6 +29,8 @@ But the Home tab does need usage stats (total words, time saved, per-day buckets
 
 **Token-usage extension (v4 schema, added by plan 2026-05-18-001 / U5):** the same `DayBucket` shape now also carries `tokenInput / tokenOutput / tokenCached` — Gemini's per-response token billing folded per local-calendar day. Same carve-out rules apply unchanged: token aggregates are local-only, never sent to Gemini, never persisted anywhere outside `stats.json`, and **never decremented on `deleteHistoryEntry`** (matches the long-standing rule for word counts — per-row history deletion is a transcript-preview redaction, not an analytics rewrite; a user who clears history doesn't accidentally zero out yesterday's billing summary). The Settings → API & Usage pane reads these via `StatsSnapshot.tokenTotals(overLastDays:)` for the Today / 7d / 30d / All windows; that read stays inside the process boundary. Period-over-period deltas and cache-hit % are intentionally not rendered in v1 — see `docs/solutions/documentation-gaps/token-usage-deltas-and-cache-hits-2026-05-18.md`.
 
+**Per-model token split (v5 schema, added by PR #65):** the transcription-model toggle (Flash-Lite / 3.5 Flash — see `solutions/tooling-decisions/gemini-3-1-flash-lite-2026-05-15.md`) means token costs must be priced per model. `DayBucket` gains `tokensByModel: [String: ModelTokens]` (per-model split, keyed by `GeminiModel.rawValue`) alongside the flat `tokenInput/Output/Cached` aggregate. **Same carve-out, unchanged:** the per-model counts are derived billing aggregates — local-only, never sent anywhere (not even to Gemini), never decremented on `deleteHistoryEntry`. The v4→v5 migration (`healIfPreV5`) attributes pre-toggle tokens to Flash-Lite on read. The Settings → API & Usage cost cell sums per-model via `GeminiPricing.cost(perModel: tokenTotalsByModel(...))` — that read stays inside the process boundary like every other StatsStore access.
+
 **Symmetric wipe path (added by plan 2026-05-18-003 / Settings redesign):** the carve-out gives the user explicit control over both stores independently. `AppState.deleteAllHistory()` (Settings → Language & Paste → "Delete all transcripts") wipes only the last-10 transcripts; `AppState.deleteAllStats()` (Settings → Language & Paste → "Delete all analytics") wipes only the lifetime aggregates. The two-button UX is the contract — combining them would let a user accidentally redact stats while clearing transcripts (or vice versa). Both wipes are local-only by construction: no network call is made, no telemetry "X was wiped" beacon is emitted. The `StatsStore.deleteAll()` actor method resets the cache and writes an empty `StatsSnapshot` atomically; `AppState.deleteAllStats()` then assigns the actor-confirmed empty snapshot to its `@Observable` mirror so a concurrent `record(_:tokens:)` continuation cannot re-publish pre-wipe data to the UI.
 
 ## Why This Matters
@@ -47,16 +49,16 @@ But the Home tab does need usage stats (total words, time saved, per-day buckets
 
 **The carve-out in code:** `StatsStore` doesn't import `URLSession`, doesn't import `Network`, has no networking surface. It's pure file I/O + in-memory aggregation. The only writers are `AppState.finalizeRecording` (post-session) and the read path is the Home tab's `appState.statsSummary` mirror.
 
-**StatsSnapshot schema** (no transcripts, derived counts only — `NoType/History/StatsStore.swift`, v4):
+**StatsSnapshot schema** (no transcripts, derived counts only — `NoType/History/StatsStore.swift`, v5):
 
 ```swift
 struct StatsSnapshot: Codable, Sendable, Equatable {
-    var version: Int            // current 4 — v3 → v4 migration is purely additive
+    var version: Int            // current 5 — v3→v4 and v4→v5 migrations are additive
     var totalWords: Int
     var totalSessions: Int
     var totalDurationSeconds: Double
     var totalDurationWords: Int
-    var dayBuckets:    [String: DayBucket]   // DayBucket carries tokenInput/Output/Cached in v4
+    var dayBuckets:    [String: DayBucket]   // DayBucket carries flat tokenInput/Output/Cached + tokensByModel (v5)
     var appBuckets:    [String: AppBucket]
     var dayAppBuckets: [String: [String: DayBucket]]
 }

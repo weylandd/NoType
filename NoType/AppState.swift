@@ -256,6 +256,21 @@ final class AppState {
         }
     }
 
+    /// Transcription model from Settings → API & Usage. Default
+    /// `.flashLite`. Frozen into each `RecordingSession` at start and
+    /// threaded into every Gemini transcription call (the classifier
+    /// stays on Flash-Lite regardless). Persisted as the `rawValue`
+    /// string under `notype.geminiModel`; an unknown stored value
+    /// decodes to `.flashLite` in `init`.
+    var geminiModel: GeminiModel {
+        didSet {
+            UserDefaults.standard.set(
+                geminiModel.rawValue,
+                forKey: GeminiModel.userDefaultsKey
+            )
+        }
+    }
+
     /// `@MainActor`-isolated owner of the currently-held music-
     /// interruption assertion. Single-ownership / RAII shape mirrors
     /// `activeSleepAssertion`. Created in `acquireMusicInterruptionIfNeeded`,
@@ -300,6 +315,12 @@ final class AppState {
         let storedMode = UserDefaults.standard.string(forKey: MusicInterruption.Mode.userDefaultsKey)
             .flatMap(MusicInterruption.Mode.init(rawValue:))
         self.musicInterruptionMode = storedMode ?? .none
+        // Transcription model: persisted choice, else the Flash-Lite
+        // default. Unknown stored values (renamed/removed cases) fall
+        // back to `.flashLite` via `GeminiModel.fallback`.
+        let storedModel = UserDefaults.standard.string(forKey: GeminiModel.userDefaultsKey)
+            .flatMap(GeminiModel.init(rawValue:))
+        self.geminiModel = storedModel ?? GeminiModel.fallback
         self.loginItemController = LoginItemController()
 
         Task { @MainActor [weak self] in
@@ -777,7 +798,8 @@ final class AppState {
                 apiKey: apiKey,
                 instructions: instructionsContext,
                 dictionary: dictionaryContext,
-                userLanguages: userLanguagesFrozen
+                userLanguages: userLanguagesFrozen,
+                model: geminiModel
             )
         } catch {
             Self.log.error("session start failed: \(error.localizedDescription, privacy: .public)")
@@ -881,15 +903,20 @@ final class AppState {
         guard case .recording = recordingState, let session = currentSession else { return }
 
         recordingState = .sending
-        // Recording has ended (hotkey released) — the mic is no longer
-        // capturing, so lift any music-output mute *now* rather than
-        // holding it through the Gemini transcription window. Without
-        // this the user's music stays silenced while the transcribing
-        // HUD spins, which is dead time (nothing is being recorded).
-        // The sleep assertion deliberately is NOT released here — it
-        // stays until the terminal arms below so the Mac can't sleep
-        // mid-call. `releaseMusicInterruption()` is idempotent, so the
-        // arms below no longer re-call it.
+        // Hotkey released → stop capturing *now* so the mic is truly
+        // quiet before we lift the mute. Otherwise a few ms of
+        // newly-unmuted speaker audio could bleed into the final chunk's
+        // tail (the recorder keeps running until `recorder.stop()` inside
+        // the async `session.stop()` below). `stopCapture()` is
+        // idempotent with that later stop and leaves the PCM ring intact,
+        // so the final-chunk tail is still harvested.
+        session.stopCapture()
+        // With the mic now quiet, lift any music-output mute immediately
+        // rather than holding it through the Gemini transcription window
+        // (dead time — nothing is being recorded). The sleep assertion is
+        // NOT released here: it stays until the terminal arms below so the
+        // Mac can't sleep mid-call. `releaseMusicInterruption()` is
+        // idempotent, so the arms below no longer re-call it.
         releaseMusicInterruption()
         let target = session.sourceAppName ?? "the focused app"
         // Dismiss-only: the X button hides the HUD without cancelling the
@@ -936,8 +963,9 @@ final class AppState {
                 // already a per-session sum of successful Gemini
                 // calls; failed (recoverable) chunks contribute zero.
                 let tokens = sessionSummary.tokens
+                let model = sessionSummary.model
                 Task { [statsStore = self.statsStore] in
-                    let snap = await statsStore.record(entry, tokens: tokens)
+                    let snap = await statsStore.record(entry, tokens: tokens, model: model)
                     await MainActor.run { [weak self] in
                         self?.statsSummary = snap
                     }

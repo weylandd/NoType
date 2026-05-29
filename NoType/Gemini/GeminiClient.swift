@@ -12,13 +12,24 @@ import OSLog
 /// the prefix tokens.
 actor GeminiClient {
     private static let log = Logger(subsystem: "app.notype", category: "gemini")
-    private static let modelID = "gemini-3.1-flash-lite"
     private static let endpoint = "https://generativelanguage.googleapis.com/v1beta/models"
 
     /// File-scope `URL` for the models-listing endpoint. Used by
     /// `validateKey(_:)`. Force-unwrap is a documented exception — the
     /// base URL is a compile-time literal, malformed → programming error.
     private static let modelsListURL = URL(string: endpoint)!
+
+    /// `generateContent` endpoint for a specific model. The model is
+    /// chosen per-request now: Settings → API & Usage lets the user
+    /// switch *transcription* between Flash-Lite (default) and Flash to
+    /// A/B quality, frozen into each `RecordingSession` at start. The
+    /// app-categorizer (`classifyApp`) always passes `.flashLite`.
+    /// Force-unwrap is the same documented compile-time-literal
+    /// exception as `modelsListURL` — `model.rawValue` is a fixed model
+    /// id, never user input.
+    static func generateContentURL(for model: GeminiModel) -> URL {
+        URL(string: "\(endpoint)/\(model.rawValue):generateContent")!
+    }
 
     enum GeminiError: Error, LocalizedError {
         case missingKey
@@ -210,7 +221,11 @@ actor GeminiClient {
             tools: [GeminiAPI.Tool(googleSearch: GeminiAPI.GoogleSearchTool())]
         )
 
-        var req = URLRequest(url: Self.generateContentURL)
+        // Classifier always runs on Flash-Lite — it's a cheap background
+        // categorization call where the larger model wouldn't move the
+        // needle, and keeping it fixed means the user's transcription
+        // model choice doesn't change classifier cost.
+        var req = URLRequest(url: Self.generateContentURL(for: .flashLite))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(trimmedKey, forHTTPHeaderField: "x-goog-api-key")
@@ -348,7 +363,8 @@ actor GeminiClient {
         priorTranscripts: [String],
         chunkIndex: Int,
         isFinal: Bool,
-        apiKey: String
+        apiKey: String,
+        model: GeminiModel
     ) async throws -> String {
         try await transcribeWithUsage(
             audio: audio,
@@ -357,7 +373,8 @@ actor GeminiClient {
             priorTranscripts: priorTranscripts,
             chunkIndex: chunkIndex,
             isFinal: isFinal,
-            apiKey: apiKey
+            apiKey: apiKey,
+            model: model
         ).text
     }
 
@@ -377,7 +394,8 @@ actor GeminiClient {
         priorTranscripts: [String],
         chunkIndex: Int,
         isFinal: Bool,
-        apiKey: String
+        apiKey: String,
+        model: GeminiModel
     ) async throws -> (text: String, tokens: TokenUsage) {
         let instruction = isFinal
             ? Self.finalChunkInstruction(chunkIndex: chunkIndex)
@@ -389,7 +407,8 @@ actor GeminiClient {
             instruction: instruction,
             logID: "chunk_\(chunkIndex)",
             mayBeEmpty: isFinal,
-            apiKey: apiKey
+            apiKey: apiKey,
+            model: model
         )
     }
 
@@ -414,13 +433,15 @@ actor GeminiClient {
         audio: Data,
         mimeType: String,
         context: ContextSnapshot,
-        apiKey: String
+        apiKey: String,
+        model: GeminiModel
     ) async throws -> String {
         try await transcribeShortWithUsage(
             audio: audio,
             mimeType: mimeType,
             context: context,
-            apiKey: apiKey
+            apiKey: apiKey,
+            model: model
         ).text
     }
 
@@ -430,7 +451,8 @@ actor GeminiClient {
         audio: Data,
         mimeType: String,
         context: ContextSnapshot,
-        apiKey: String
+        apiKey: String,
+        model: GeminiModel
     ) async throws -> (text: String, tokens: TokenUsage) {
         let instruction = Self.liteChunkInstruction()
         return try await sendRequest(
@@ -441,6 +463,7 @@ actor GeminiClient {
             logID: "short_single",
             mayBeEmpty: true,
             apiKey: apiKey,
+            model: model,
             useLitePrompt: true
         )
     }
@@ -464,7 +487,8 @@ actor GeminiClient {
         priorTranscripts: [String],
         chunkIndices: [Int],
         isFinal: Bool,
-        apiKey: String
+        apiKey: String,
+        model: GeminiModel
     ) async throws -> String {
         try await transcribeBatchWithUsage(
             audios: audios,
@@ -472,7 +496,8 @@ actor GeminiClient {
             priorTranscripts: priorTranscripts,
             chunkIndices: chunkIndices,
             isFinal: isFinal,
-            apiKey: apiKey
+            apiKey: apiKey,
+            model: model
         ).text
     }
 
@@ -490,7 +515,8 @@ actor GeminiClient {
         priorTranscripts: [String],
         chunkIndices: [Int],
         isFinal: Bool,
-        apiKey: String
+        apiKey: String,
+        model: GeminiModel
     ) async throws -> (text: String, tokens: TokenUsage) {
         precondition(audios.count == chunkIndices.count, "audios / indices mismatch")
         precondition(audios.count > 1, "use transcribe(audio:...) for single chunks")
@@ -506,7 +532,8 @@ actor GeminiClient {
             instruction: instruction,
             logID: logID,
             mayBeEmpty: isFinal,
-            apiKey: apiKey
+            apiKey: apiKey,
+            model: model
         )
     }
 
@@ -660,6 +687,7 @@ actor GeminiClient {
         logID: String,
         mayBeEmpty: Bool,
         apiKey: String,
+        model: GeminiModel,
         useLitePrompt: Bool = false
     ) async throws -> (text: String, tokens: TokenUsage) {
         let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -686,7 +714,7 @@ actor GeminiClient {
             )
         }
 
-        var req = URLRequest(url: Self.generateContentURL)
+        var req = URLRequest(url: Self.generateContentURL(for: model))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(trimmedKey, forHTTPHeaderField: "x-goog-api-key")
@@ -853,13 +881,11 @@ actor GeminiClient {
         }
     }
 
-    /// Endpoint URL for `generateContent`. The API key is **not** in the
-    /// URL — we pass it via the `x-goog-api-key` header instead so it
-    /// never appears in URL captures (proxy traces, stack-trace
-    /// `failingURL`, OS-level URLSession logs).
-    private static let generateContentURL = URL(
-        string: "\(endpoint)/\(modelID):generateContent"
-    )!
+    // The `generateContent` endpoint URL is built per-model via
+    // `generateContentURL(for:)` (declared near the top). The API key is
+    // **not** in the URL — it rides the `x-goog-api-key` header instead so
+    // it never appears in URL captures (proxy traces, stack-trace
+    // `failingURL`, OS-level URLSession logs).
 
     /// Renders the `Insertion target:` section. Always 3 lines, even when
     /// both sides are empty — drop-and-include changes the prefix shape

@@ -44,11 +44,11 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
 
 Storage: `~/Library/Application Support/NoType/history.json`, top-level array of `HistoryEntry`.
 
-**`StatsSnapshot` (v4):**
+**`StatsSnapshot` (v5):**
 
 ```swift
 struct StatsSnapshot: Codable, Sendable, Equatable {
-    var version: Int                                    // current 4
+    var version: Int                                    // current 5
     var totalWords: Int
     var totalSessions: Int
     var totalDurationSeconds: Double                    // measured sessions
@@ -59,11 +59,13 @@ struct StatsSnapshot: Codable, Sendable, Equatable {
 }
 ```
 
-`DayBucket { words, sessions, durationSeconds, durationWords, tokenInput, tokenOutput, tokenCached }`. `AppBucket { name, words, sessions }`. Storage: `~/Library/Application Support/NoType/stats.json`. One row per calendar day + one row per distinct app; ~50 B/day + ~80 B/app — ten years ≈ 40 KB total.
+`DayBucket { words, sessions, durationSeconds, durationWords, tokenInput, tokenOutput, tokenCached, tokensByModel }`. The flat `tokenInput/Output/Cached` are the **cross-model aggregate** (drive the Input/Output count cells + v4-reader downgrade safety); `tokensByModel: [String: ModelTokens]` (keyed by `GeminiModel.rawValue`, `ModelTokens { input, output, cached }`) is the **per-model split** the cost cell prices each slice with. The sum across `tokensByModel` equals the flat fields (pinned by `test_record_dualWrite_flatEqualsSumOfPerModel`). `AppBucket { name, words, sessions }`. Storage: `~/Library/Application Support/NoType/stats.json`.
 
-**Migration:** v3→v4 via `healIfPreV4` (called from `StatsSnapshot.init(from:)`, mirrors the existing `healIfPreV3`). Purely additive — only bumps the version stamp. New token fields default to 0 via `decodeIfPresent ?? 0` in the tolerant decoder; no existing v3 field is touched. A v3 reader of a v4 file silently drops the token fields via the same `decodeIfPresent` pattern, so the downgrade path is safe.
+**Migration:**
+- v3→v4 via `healIfPreV4` — purely additive (flat token fields default to 0 via tolerant decode).
+- v4→v5 via `healIfPreV5` — adds `tokensByModel`; for buckets carrying flat tokens but no per-model split it **attributes them to Flash-Lite** (the only model that existed pre-v5), on both `dayBuckets` and `dayAppBuckets`, so historical cost still prices correctly. Idempotent (`guard version < 5` + per-bucket `tokensByModel.isEmpty` short-circuit; pinned by `test_migration_v5File_isIdempotent`). Flat fields preserved verbatim — a v4 reader of a v5 file drops `tokensByModel` via `decodeIfPresent ?? [:]`, so downgrade stays safe.
 
-**Wiring:** the single write point for stats is `AppState.finalizeRecording()`'s success arm, calling `await statsStore.record(entry, tokens: session.summary.tokens)`. The older `record(entry:)` shim still exists for the test surface; it forwards `tokens: .zero`. See `NoType/Gemini/CLAUDE.md` for how `TokenUsage` flows out of `GeminiClient.transcribeWithUsage*` overloads.
+**Wiring:** the single write point for stats is `AppState.finalizeRecording()`'s success arm, calling `await statsStore.record(entry, tokens: session.summary.tokens, model: session.summary.model)`. `record` increments both the flat aggregate and `tokensByModel[model]`. The `model:` parameter defaults to `.flashLite` for the legacy `record(entry:)` / `record(entry, tokens:)` shims used by the test surface. The API & Usage cost cell sums per-model via `GeminiPricing.cost(perModel: tokenTotalsByModel(...))`. See `NoType/Gemini/CLAUDE.md` for how `TokenUsage` flows out of `GeminiClient.transcribeWithUsage*` overloads.
 
 ## Failure modes (both stores)
 

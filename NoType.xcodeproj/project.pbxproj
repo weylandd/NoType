@@ -13,6 +13,7 @@
 		039501AAFF86A78DF3625E3E /* AppIconCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACD3E7A6A4853D35D6422A1C /* AppIconCache.swift */; };
 		045BC5B13DA34BD810E8501C /* PromptEvalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 270FD34992E0CFF69C8391F9 /* PromptEvalTests.swift */; };
 		045DDBB15062EB0214F650DF /* AudioDeviceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4931935034B10B8DE95A5B7 /* AudioDeviceManager.swift */; };
+		0674EDE7730E4B87EB85AE51 /* GeminiModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3C9B1B365D431CCB1BC8D76 /* GeminiModel.swift */; };
 		0838ECDBD08A0B868EF041FC /* SileroVAD.mlmodelc in Resources */ = {isa = PBXBuildFile; fileRef = 7BA57B72661CDABE72FED092 /* SileroVAD.mlmodelc */; };
 		087A0F9F82BA4507A8F1BFCB /* MicInputPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDE9F8818EBC3728E41B239F /* MicInputPicker.swift */; };
 		0923A4A76F4AE0A405404677 /* SupportedLanguages.json in Resources */ = {isa = PBXBuildFile; fileRef = 88AA5DD2C6A52B98ABF9C2F9 /* SupportedLanguages.json */; };
@@ -347,6 +348,7 @@
 		DCA5FB3C3828964C7E9459BB /* AppCategorizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppCategorizerTests.swift; sourceTree = "<group>"; };
 		DFA2FBFEEB1784A36F09930A /* please_summarize_en.m4a */ = {isa = PBXFileReference; path = please_summarize_en.m4a; sourceTree = "<group>"; };
 		E2673EDC234D191C5EC6D5C3 /* LoginItemController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginItemController.swift; sourceTree = "<group>"; };
+		E3C9B1B365D431CCB1BC8D76 /* GeminiModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeminiModel.swift; sourceTree = "<group>"; };
 		E448F328437581126FA7536C /* PauseDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PauseDetector.swift; sourceTree = "<group>"; };
 		E4673F89249010485BAF4990 /* CategoryResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CategoryResolver.swift; sourceTree = "<group>"; };
 		E48435A8CE473E71011FF02D /* HallucinationLengthGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HallucinationLengthGate.swift; sourceTree = "<group>"; };
@@ -455,6 +457,7 @@
 			isa = PBXGroup;
 			children = (
 				E7C9AEDB2C6A5F32D6870A5A /* GeminiClient.swift */,
+				E3C9B1B365D431CCB1BC8D76 /* GeminiModel.swift */,
 				0117ACB10D14A99B25F38D02 /* GeminiPricing.swift */,
 				C5C54217DA985000100F2E9D /* Models.swift */,
 				4A4E0E4612EC01595645A34B /* TokenUsage.swift */,
@@ -945,6 +948,7 @@
 				18C16507776B81CDFF6C9429 /* ErrorHUD.swift in Sources */,
 				17B80FF819A0E9FDF2E1134A /* GeminiClient.swift in Sources */,
 				6B89F85A9987A6DC71E40E58 /* GeminiKeyRow.swift in Sources */,
+				0674EDE7730E4B87EB85AE51 /* GeminiModel.swift in Sources */,
 				279D22F5262C799008DB5B7E /* GeminiPricing.swift in Sources */,
 				D8FD434C782E4494B1188052 /* GeneralPane.swift in Sources */,
 				59EFFFBC52DDB601EF7527C4 /* GitHubRow.swift in Sources */,
