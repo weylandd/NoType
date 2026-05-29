@@ -112,6 +112,21 @@
       "usageTokensCeiling": null,
       "_assertion_note": "mustContain enforces verbatim spelled-out numbers; mustNotContain catches digit-normalised variants observed in the baseline run. Substrings are made specific enough to avoid false positives (e.g. '12 pixels on top' vs the legitimate '12 pixels' substring inside another word boundary). EXPECTED TO FAIL on current prompts — Gemini normalises 'sixteen pixel' → '16-pixel'. This is a real finding, not a fixture bug.",
       "notes": "Long-monologue verbatim length floor + verbatim spelled-out-number contract. Current prompts violate the latter — see the audit doc (U2). Three sprints / accessibility stayed spelled out, so partial preservation is happening."
+    },
+    {
+      "id": "unintelligible_ru_short",
+      "file": "Audio/unintelligible_ru_short.m4a",
+      "language": "ru",
+      "expectedTranscript": "",
+      "mustContain": [],
+      "mustNotContain": ["Can you help", "help me with", "What did you say", "I'm sorry", "Hello, how are"],
+      "wordCountFloor": 0,
+      "wordCountCeiling": 0,
+      "usageTokensCeiling": null,
+      "_duration_s": 1.0,
+      "_natural_path": "lite",
+      "_assertion_note": "wordCountCeiling: 0 is the strict-empty contract — model should output '' on unintelligible 1 s audio. The HallucinationLengthGate in RecordingSession would drop a 6-word/26-char fallback like 'Can you help me with this?'. PromptEvalHarness calls GeminiClient directly (bypassing the gate), so this fixture EXPECTS TO FAIL on the raw model — keeping the regression visible at the prompt layer while production is protected by the length gate.",
+      "notes": "Captured incident 2026-05-20: user said 'проверка' through BT-HFP headphone mic on ~1 s audio; Gemini returned 'Can you help me with this?'. Same hallucination archetype as silence_only's 'Hello, how are you?' — model fallback to conversational meta-reply when audio is below intelligibility threshold. Mitigation lives in NoType/Gemini/HallucinationLengthGate.swift (4 wps / 18 cps AND-gate)."
     }
   ]
 }

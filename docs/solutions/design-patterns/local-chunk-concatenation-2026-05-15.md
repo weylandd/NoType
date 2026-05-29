@@ -49,10 +49,10 @@ The seam-handling rules then live in two layers downstream:
 **The pattern in code** (`NoType/Recording/RecordingSession.swift::stop`):
 
 ```swift
-// `responses` is the per-call outcome list — each entry is either a
-// successful transcript or `text: nil` (recoverable failure). Failed
-// entries are substituted with `failureMarker` ("[…]") at stitch time
-// so the user sees a visible gap where Gemini dropped a chunk.
+// `responses` is the per-call outcome list — each entry is one of:
+//   text: "<real>"  — Gemini returned, length-gate passed
+//   text: nil       — recoverable failure; substituted with failureMarker ("[…]")
+//   text: ""        — gate-emptied by HallucinationLengthGate; stitches as empty (no marker, by design)
 let pieces   = responses.map { $0.text ?? Self.failureMarker }
 let stitched = TextInjector.stitchChunks(pieces)
 let final    = TextInjector.finalizeForInsertion(
@@ -62,11 +62,14 @@ let final    = TextInjector.finalizeForInsertion(
 )
 ```
 
+The three-state `text` contract is important: `nil` is "Gemini didn't respond for us — leave a visible gap"; `""` is "Gemini responded but we filtered the output as noise — leave nothing". The empty-string path is deliberately invisible (no marker), since the gate's job is to suppress the very content a marker would draw attention to.
+
 ## Related
 
 - `NoType/Injection/CLAUDE.md` — `stitchChunks` + `finalizeForInsertion` shapes.
 - `NoType/Gemini/CLAUDE.md` "What you must NEVER do".
 - `solutions/architecture-patterns/partial-recovery-with-markers-2026-05-16.md` — partial-recovery layer that rides on this assembly contract (markers stitched in place of failed chunks, never sent as priors).
+- `solutions/architecture-patterns/hallucination-length-gate-2026-05-20.md` — post-response gate that emits the third stitch state (`""`, no marker).
 - `docs/decisions.md` ADR-008 — legacy index entry, redirects here.
 - `solutions/architecture-patterns/serial-gemini-actor-2026-05-15.md` — the serial dispatch that makes "prior chunks are deterministic" true.
 - `architecture.md` invariant I2 — the "local concatenation, never re-emit" rule.

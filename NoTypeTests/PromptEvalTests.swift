@@ -137,6 +137,40 @@ final class PromptEvalTests: XCTestCase {
         PromptEvalHarness.assertContract(res, against: fx)
     }
 
+    /// Captured 2026-05-20: user spoke "проверка" through BT-HFP
+    /// headphones; Gemini Lite returned "Can you help me with this?"
+    /// on ~1 s of low-info audio. Production guards against this via
+    /// `HallucinationLengthGate` in `RecordingSession`, but this test
+    /// drives `GeminiClient` directly (bypassing the gate) — the
+    /// regression stays visible at the prompt layer.
+    ///
+    /// Skips cleanly if the audio file hasn't been added yet — see
+    /// `NoTypeTests/Fixtures/README.md` for the recording workflow.
+    func test_unintelligibleRuShort_lite() async throws {
+        try PromptEvalHarness.skipIfMissingKey()
+        let fx = try PromptEvalHarness.fixture("unintelligible_ru_short", in: fixtures)
+        guard PromptEvalHarness.audioFileExists(for: fx) else {
+            throw XCTSkip("""
+            Audio fixture not yet recorded: \(fx.file). Download \
+            the m4a from the linked AI Studio session and drop it \
+            in NoTypeTests/Fixtures/Audio/. Conversion recipe lives \
+            in NoTypeTests/Fixtures/README.md.
+            """)
+        }
+        let res = try await PromptEvalHarness.transcribe(
+            fixture: fx,
+            context: PromptEvalHarness.messagingContext(
+                appName: "Claude",
+                bundle: "com.anthropic.claudefordesktop",
+                userLanguages: ["ru", "en"]
+            ),
+            path: .lite,
+            client: client
+        )
+        logResult(res)
+        PromptEvalHarness.assertContract(res, against: fx)
+    }
+
     func test_longMonologueEN_full() async throws {
         try PromptEvalHarness.skipIfMissingKey()
         let fx = try PromptEvalHarness.fixture("long_monologue_en", in: fixtures)
