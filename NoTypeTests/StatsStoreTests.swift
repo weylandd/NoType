@@ -365,7 +365,7 @@ final class StatsStoreTests: XCTestCase {
         let store = makeStore()
         let snap = await store.summary()
 
-        XCTAssertEqual(snap.version, 4, "post-heal file should claim current schema (v4)")
+        XCTAssertEqual(snap.version, StatsSnapshot.currentVersion, "post-heal file should claim the current schema version")
         // Text totals survive — the user keeps their session count
         // and Top apps history.
         XCTAssertEqual(snap.totalWords, 100)
@@ -427,7 +427,7 @@ final class StatsStoreTests: XCTestCase {
         let store = makeStore()
         let snap = await store.summary()
 
-        XCTAssertEqual(snap.version, 4, "post-heal file should claim v4")
+        XCTAssertEqual(snap.version, StatsSnapshot.currentVersion, "post-heal file should claim the current schema version")
 
         // EVERY v3 aggregate preserved verbatim.
         XCTAssertEqual(snap.totalWords, 50)
@@ -590,6 +590,109 @@ final class StatsStoreTests: XCTestCase {
         XCTAssertEqual(snap.dayBuckets[key]?.tokenInput,  1_500)
         XCTAssertEqual(snap.dayBuckets[key]?.tokenOutput,   600)
         XCTAssertEqual(snap.dayBuckets[key]?.tokenCached,   900)
+    }
+
+    // MARK: - Per-model token tracking (v5)
+
+    func test_record_withModel_splitsTokensByModel() async {
+        let store = makeStore()
+        let day = makeDate(y: 2026, m: 5, d: 11, h: 14)
+        _ = await store.record(
+            entry(text: "lite one", date: day),
+            tokens: TokenUsage(input: 100, output: 50, cached: 30),
+            model: .flashLite
+        )
+        let snap = await store.record(
+            entry(text: "flash two", date: day),
+            tokens: TokenUsage(input: 200, output: 80, cached: 0),
+            model: .flash
+        )
+
+        let key = StatsSnapshot.dayKey(for: day)
+        let byModel = snap.dayBuckets[key]?.tokensByModel
+        XCTAssertEqual(byModel?[GeminiModel.flashLite.rawValue],
+                       ModelTokens(input: 100, output: 50, cached: 30))
+        XCTAssertEqual(byModel?[GeminiModel.flash.rawValue],
+                       ModelTokens(input: 200, output: 80, cached: 0))
+        // Flat aggregate stays the cross-model sum.
+        XCTAssertEqual(snap.dayBuckets[key]?.tokenInput,  300)
+        XCTAssertEqual(snap.dayBuckets[key]?.tokenOutput, 130)
+        XCTAssertEqual(snap.dayBuckets[key]?.tokenCached,  30)
+    }
+
+    func test_record_modelDefaultsToFlashLite() async {
+        // The token-aware record without an explicit model attributes
+        // to Flash-Lite, keeping pre-toggle callers correct.
+        let store = makeStore()
+        let day = makeDate(y: 2026, m: 5, d: 11, h: 14)
+        let snap = await store.record(
+            entry(text: "default model", date: day),
+            tokens: TokenUsage(input: 10, output: 5, cached: 0)
+        )
+        let key = StatsSnapshot.dayKey(for: day)
+        XCTAssertEqual(snap.dayBuckets[key]?.tokensByModel[GeminiModel.flashLite.rawValue],
+                       ModelTokens(input: 10, output: 5, cached: 0))
+    }
+
+    func test_record_zeroTokens_seedsNoModelEntry() async {
+        // `.zero` (the `record(_:)` shim) must not create an empty
+        // per-model row.
+        let store = makeStore()
+        let day = makeDate(y: 2026, m: 5, d: 11, h: 14)
+        let snap = await store.record(entry(text: "nothing", date: day))
+        let key = StatsSnapshot.dayKey(for: day)
+        XCTAssertTrue(snap.dayBuckets[key]?.tokensByModel.isEmpty ?? true)
+    }
+
+    func test_tokenTotalsByModel_sumsPerModelAcrossWindow() async {
+        let store = makeStore()
+        let today = makeDate(y: 2026, m: 5, d: 11, h: 12)
+        let cal = Calendar.autoupdatingCurrent
+        _ = await store.record(entry(text: "a", date: today),
+                               tokens: TokenUsage(input: 100, output: 50, cached: 0), model: .flash)
+        let yesterday = cal.date(byAdding: .day, value: -1, to: today) ?? today
+        let snap = await store.record(entry(text: "b", date: yesterday),
+                                      tokens: TokenUsage(input: 200, output: 60, cached: 0), model: .flash)
+
+        let byModel = snap.tokenTotalsByModel(overLastDays: 7, today: today, calendar: cal)
+        XCTAssertEqual(byModel[GeminiModel.flash.rawValue],
+                       ModelTokens(input: 300, output: 110, cached: 0))
+        XCTAssertNil(byModel[GeminiModel.flashLite.rawValue])
+    }
+
+    func test_migration_v4FlatTokens_attributedToFlashLite() throws {
+        // A v4 stats.json: flat day-bucket tokens, no `tokensByModel`.
+        let json = """
+        {
+          "version": 4,
+          "totalWords": 3, "totalSessions": 1,
+          "totalDurationSeconds": 0, "totalDurationWords": 0,
+          "appBuckets": {}, "dayAppBuckets": {},
+          "dayBuckets": {
+            "2026-05-11": {
+              "words": 3, "sessions": 1,
+              "durationSeconds": 0, "durationWords": 0,
+              "tokenInput": 1000, "tokenOutput": 400, "tokenCached": 200
+            }
+          }
+        }
+        """
+        let snap = try JSONDecoder().decode(StatsSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(snap.version, 5, "v4 file heals to v5")
+        let b = snap.dayBuckets["2026-05-11"]
+        // Flat fields preserved verbatim.
+        XCTAssertEqual(b?.tokenInput, 1000)
+        XCTAssertEqual(b?.tokenOutput, 400)
+        XCTAssertEqual(b?.tokenCached, 200)
+        // Historical tokens attributed to Flash-Lite.
+        XCTAssertEqual(b?.tokensByModel[GeminiModel.flashLite.rawValue],
+                       ModelTokens(input: 1000, output: 400, cached: 200))
+        // And they price at Flash-Lite rates via the per-model cost path.
+        let cost = GeminiPricing.cost(perModel: snap.tokenTotalsByModel(overLastDays: nil))
+        let expected = 800.0 * 0.25 / 1_000_000   // billable input (1000-200)
+                     + 200.0 * 0.025 / 1_000_000  // cached
+                     + 400.0 * 1.50 / 1_000_000   // output
+        XCTAssertEqual(cost, expected, accuracy: 1e-12)
     }
 
     // MARK: - tokenTotals(overLastDays:) windowing

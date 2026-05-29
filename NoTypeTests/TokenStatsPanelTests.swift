@@ -61,6 +61,56 @@ final class TokenStatsPanelTests: XCTestCase {
         XCTAssertEqual(GeminiPricing.cachedPerMillion, 0.025, accuracy: 1e-9)
     }
 
+    func test_pricingConstants_areCurrentGeminiFlashRates() {
+        // Gemini 3.5 Flash rates. Source: GeminiPricing.swift doc-comment
+        // ($1.50 in / $9.00 out; cached = 10% of input = $0.15).
+        XCTAssertEqual(GeminiPricing.flashInputPerMillion,  1.50, accuracy: 1e-9)
+        XCTAssertEqual(GeminiPricing.flashOutputPerMillion, 9.00, accuracy: 1e-9)
+        XCTAssertEqual(GeminiPricing.flashCachedPerMillion, 0.15, accuracy: 1e-9)
+    }
+
+    func test_rates_perModel() {
+        XCTAssertEqual(GeminiPricing.rates(for: .flashLite).input,  0.25, accuracy: 1e-9)
+        XCTAssertEqual(GeminiPricing.rates(for: .flashLite).output, 1.50, accuracy: 1e-9)
+        XCTAssertEqual(GeminiPricing.rates(for: .flash).input,      1.50, accuracy: 1e-9)
+        XCTAssertEqual(GeminiPricing.rates(for: .flash).output,     9.00, accuracy: 1e-9)
+    }
+
+    func test_cost_defaultsToFlashLiteRates() {
+        // The default `model` argument must be `.flashLite` so existing
+        // call sites and the Flash-Lite math stay unchanged.
+        XCTAssertEqual(GeminiPricing.cost(input: 1_000_000, output: 1_000_000),
+                       1.75, accuracy: 1e-9)
+    }
+
+    func test_cost_flashModel_usesFlashRates() {
+        // 1M input @ $1.50 + 1M output @ $9.00 = $10.50 exactly.
+        let cost = GeminiPricing.cost(input: 1_000_000, output: 1_000_000, cached: 0, model: .flash)
+        XCTAssertEqual(cost, 10.50, accuracy: 1e-9)
+    }
+
+    func test_costPerModel_sumsEachModelAtItsRate() {
+        // Flash-Lite slice: 1M in/out = $1.75; Flash slice: 1M in/out = $10.50.
+        let totals: [String: ModelTokens] = [
+            GeminiModel.flashLite.rawValue: ModelTokens(input: 1_000_000, output: 1_000_000),
+            GeminiModel.flash.rawValue:     ModelTokens(input: 1_000_000, output: 1_000_000),
+        ]
+        XCTAssertEqual(GeminiPricing.cost(perModel: totals), 1.75 + 10.50, accuracy: 1e-9)
+    }
+
+    func test_costPerModel_empty_isZero() {
+        XCTAssertEqual(GeminiPricing.cost(perModel: [:]), 0.0, accuracy: 1e-9)
+    }
+
+    func test_costPerModel_unknownKey_fallsBackToFlashLite() {
+        // A model id we no longer recognise prices at Flash-Lite rather
+        // than vanishing from the total.
+        let totals: [String: ModelTokens] = [
+            "gemini-9.9-imaginary": ModelTokens(input: 1_000_000, output: 1_000_000)
+        ]
+        XCTAssertEqual(GeminiPricing.cost(perModel: totals), 1.75, accuracy: 1e-9)
+    }
+
     // MARK: - Cost calculation
 
     func test_cost_allZero_isZero() {

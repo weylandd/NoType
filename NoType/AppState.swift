@@ -256,6 +256,21 @@ final class AppState {
         }
     }
 
+    /// Transcription model from Settings → API & Usage. Default
+    /// `.flashLite`. Frozen into each `RecordingSession` at start and
+    /// threaded into every Gemini transcription call (the classifier
+    /// stays on Flash-Lite regardless). Persisted as the `rawValue`
+    /// string under `notype.geminiModel`; an unknown stored value
+    /// decodes to `.flashLite` in `init`.
+    var geminiModel: GeminiModel {
+        didSet {
+            UserDefaults.standard.set(
+                geminiModel.rawValue,
+                forKey: GeminiModel.userDefaultsKey
+            )
+        }
+    }
+
     /// `@MainActor`-isolated owner of the currently-held music-
     /// interruption assertion. Single-ownership / RAII shape mirrors
     /// `activeSleepAssertion`. Created in `acquireMusicInterruptionIfNeeded`,
@@ -300,6 +315,12 @@ final class AppState {
         let storedMode = UserDefaults.standard.string(forKey: MusicInterruption.Mode.userDefaultsKey)
             .flatMap(MusicInterruption.Mode.init(rawValue:))
         self.musicInterruptionMode = storedMode ?? .none
+        // Transcription model: persisted choice, else the Flash-Lite
+        // default. Unknown stored values (renamed/removed cases) fall
+        // back to `.flashLite` via `GeminiModel.fallback`.
+        let storedModel = UserDefaults.standard.string(forKey: GeminiModel.userDefaultsKey)
+            .flatMap(GeminiModel.init(rawValue:))
+        self.geminiModel = storedModel ?? GeminiModel.fallback
         self.loginItemController = LoginItemController()
 
         Task { @MainActor [weak self] in
@@ -777,7 +798,8 @@ final class AppState {
                 apiKey: apiKey,
                 instructions: instructionsContext,
                 dictionary: dictionaryContext,
-                userLanguages: userLanguagesFrozen
+                userLanguages: userLanguagesFrozen,
+                model: geminiModel
             )
         } catch {
             Self.log.error("session start failed: \(error.localizedDescription, privacy: .public)")
@@ -936,8 +958,9 @@ final class AppState {
                 // already a per-session sum of successful Gemini
                 // calls; failed (recoverable) chunks contribute zero.
                 let tokens = sessionSummary.tokens
+                let model = sessionSummary.model
                 Task { [statsStore = self.statsStore] in
-                    let snap = await statsStore.record(entry, tokens: tokens)
+                    let snap = await statsStore.record(entry, tokens: tokens, model: model)
                     await MainActor.run { [weak self] in
                         self?.statsSummary = snap
                     }

@@ -22,11 +22,13 @@ struct TokenStatsPanel: View {
     @State private var range: TokenStatsRange = .last7
 
     var body: some View {
+        // Input/Output count cells: model-agnostic aggregate.
         let totals = appState.statsSummary.tokenTotals(overLastDays: range.days)
+        // Cost: summed per-model so a window mixing Flash-Lite and Flash
+        // bills each slice at its own rate (StatsStore v5 tracks tokens
+        // per model — `DayBucket.tokensByModel`).
         let cost = GeminiPricing.cost(
-            input: totals.input,
-            output: totals.output,
-            cached: totals.cached
+            perModel: appState.statsSummary.tokenTotalsByModel(overLastDays: range.days)
         )
         VStack(alignment: .leading, spacing: DS.Space.s4) {
             HStack(alignment: .center) {

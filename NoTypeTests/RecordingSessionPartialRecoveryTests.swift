@@ -130,7 +130,8 @@ final class RecordingSessionPartialRecoveryTests: XCTestCase {
         let s = RecordingSession.SessionSummary(
             failedChunkCount: 0,
             dispatchedChunkCount: 3,
-            tokens: .zero
+            tokens: .zero,
+            model: .flashLite
         )
         XCTAssertFalse(s.hasFailures)
     }
@@ -139,7 +140,8 @@ final class RecordingSessionPartialRecoveryTests: XCTestCase {
         let s = RecordingSession.SessionSummary(
             failedChunkCount: 1,
             dispatchedChunkCount: 5,
-            tokens: .zero
+            tokens: .zero,
+            model: .flashLite
         )
         XCTAssertTrue(s.hasFailures)
     }
@@ -155,7 +157,8 @@ final class RecordingSessionPartialRecoveryTests: XCTestCase {
         let s = RecordingSession.SessionSummary(
             failedChunkCount: 0,
             dispatchedChunkCount: 1,
-            tokens: t
+            tokens: t,
+            model: .flashLite
         )
         XCTAssertEqual(s.tokens, t)
     }

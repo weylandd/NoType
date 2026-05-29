@@ -1,6 +1,32 @@
 import Foundation
 import OSLog
 
+/// Per-model token tally stored inside `DayBucket.tokensByModel`, keyed
+/// by `GeminiModel.rawValue`. Split out from the flat
+/// `tokenInput/Output/Cached` aggregate (which stays as the cross-model
+/// sum — it drives the count cells and keeps a v4 reader's totals intact
+/// on downgrade) so `GeminiPricing` can price each model's tokens at its
+/// own rate. Tolerant decode → all-zero default. Local-only, never sent
+/// anywhere (no-telemetry carve-out).
+struct ModelTokens: Codable, Sendable, Equatable {
+    var input: Int
+    var output: Int
+    var cached: Int
+
+    init(input: Int = 0, output: Int = 0, cached: Int = 0) {
+        self.input = input
+        self.output = output
+        self.cached = cached
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.input  = try c.decodeIfPresent(Int.self, forKey: .input)  ?? 0
+        self.output = try c.decodeIfPresent(Int.self, forKey: .output) ?? 0
+        self.cached = try c.decodeIfPresent(Int.self, forKey: .cached) ?? 0
+    }
+}
+
 /// Per-day usage bucket. One row per local-calendar day; keyed by
 /// "yyyy-MM-dd" string in `StatsSnapshot.dayBuckets`. The same shape
 /// is reused inside `dayAppBuckets[dayKey][bundleID]` for the
@@ -30,6 +56,14 @@ struct DayBucket: Codable, Sendable, Equatable {
     /// Subset of `tokenInput` that hit Gemini's implicit cache and
     /// were billed at the discounted rate (`cached <= input` always).
     var tokenCached: Int
+    /// Per-model token split (v5+), keyed by `GeminiModel.rawValue`.
+    /// The sum across models equals the flat `tokenInput/Output/Cached`
+    /// fields above — the flat fields stay as the model-agnostic
+    /// aggregate (count cells + v4-reader downgrade), this map exists so
+    /// `GeminiPricing` can price each model's slice at its own rate.
+    /// Empty for v4 files until `healIfPreV5` attributes their flat
+    /// tokens to Flash-Lite (the only model that existed pre-v5).
+    var tokensByModel: [String: ModelTokens]
 
     init(
         words: Int,
@@ -38,7 +72,8 @@ struct DayBucket: Codable, Sendable, Equatable {
         durationWords: Int = 0,
         tokenInput: Int = 0,
         tokenOutput: Int = 0,
-        tokenCached: Int = 0
+        tokenCached: Int = 0,
+        tokensByModel: [String: ModelTokens] = [:]
     ) {
         self.words = words
         self.sessions = sessions
@@ -47,6 +82,7 @@ struct DayBucket: Codable, Sendable, Equatable {
         self.tokenInput = tokenInput
         self.tokenOutput = tokenOutput
         self.tokenCached = tokenCached
+        self.tokensByModel = tokensByModel
     }
 
     init(from decoder: Decoder) throws {
@@ -58,6 +94,7 @@ struct DayBucket: Codable, Sendable, Equatable {
         self.tokenInput      = try c.decodeIfPresent(Int.self,    forKey: .tokenInput)      ?? 0
         self.tokenOutput     = try c.decodeIfPresent(Int.self,    forKey: .tokenOutput)     ?? 0
         self.tokenCached     = try c.decodeIfPresent(Int.self,    forKey: .tokenCached)     ?? 0
+        self.tokensByModel   = try c.decodeIfPresent([String: ModelTokens].self, forKey: .tokensByModel) ?? [:]
     }
 }
 
@@ -113,7 +150,13 @@ struct StatsSnapshot: Codable, Sendable, Equatable {
     ///     the migration); existing v3 aggregates (words, sessions,
     ///     duration, app buckets) are preserved verbatim. Plan
     ///     2026-05-18-001 §491.
-    static let currentVersion = 4
+    ///   - v4 → v5 (`healIfPreV5`): adds `DayBucket.tokensByModel`
+    ///     (per-model token split for exact per-model pricing).
+    ///     Existing flat token aggregates are **attributed to
+    ///     Flash-Lite** — the only transcription model that existed
+    ///     before the model toggle shipped — so historical cost still
+    ///     prices correctly. Flat fields are preserved verbatim.
+    static let currentVersion = 5
 
     static let empty = StatsSnapshot(
         version: currentVersion,
@@ -155,6 +198,7 @@ struct StatsSnapshot: Codable, Sendable, Equatable {
         self.dayAppBuckets        = try c.decodeIfPresent([String: [String: DayBucket]].self, forKey: .dayAppBuckets) ?? [:]
         healIfPreV3()
         healIfPreV4()
+        healIfPreV5()
     }
 
     /// Pre-v3 files may have `totalDurationSeconds` accumulated from a
@@ -201,6 +245,43 @@ struct StatsSnapshot: Codable, Sendable, Equatable {
     private mutating func healIfPreV4() {
         guard version < 4 else { return }
         version = 4
+    }
+
+    /// v4 → v5: per-model token split joined `DayBucket`. Files written
+    /// before the model toggle recorded all tokens under one model
+    /// (Flash-Lite — the only one that existed), so attribute each
+    /// bucket's flat `tokenInput/Output/Cached` to the Flash-Lite key.
+    /// That way `tokenTotalsByModel` / cost prices historical usage
+    /// correctly instead of dropping it. Buckets that already carry a
+    /// `tokensByModel` map are left alone; flat fields are untouched
+    /// (they remain the cross-model aggregate). Runs on both
+    /// `dayBuckets` and `dayAppBuckets`.
+    private mutating func healIfPreV5() {
+        guard version < 5 else { return }
+        let liteKey = GeminiModel.flashLite.rawValue
+        func attribute(_ bucket: DayBucket) -> DayBucket {
+            guard bucket.tokensByModel.isEmpty else { return bucket }
+            guard bucket.tokenInput != 0 || bucket.tokenOutput != 0 || bucket.tokenCached != 0
+            else { return bucket }
+            var b = bucket
+            b.tokensByModel[liteKey] = ModelTokens(
+                input: bucket.tokenInput,
+                output: bucket.tokenOutput,
+                cached: bucket.tokenCached
+            )
+            return b
+        }
+        for (key, bucket) in dayBuckets {
+            dayBuckets[key] = attribute(bucket)
+        }
+        for (outerKey, innerMap) in dayAppBuckets {
+            var fixed = innerMap
+            for (innerKey, bucket) in innerMap {
+                fixed[innerKey] = attribute(bucket)
+            }
+            dayAppBuckets[outerKey] = fixed
+        }
+        version = 5
     }
 
     // Memberwise init is normally synthesized but custom `init(from:)`
@@ -307,6 +388,40 @@ extension StatsSnapshot {
         return (input, output, cached)
     }
 
+    /// Per-model token totals over the window, keyed by
+    /// `GeminiModel.rawValue`. Same window semantics as `tokenTotals`
+    /// but split by model so the cost cell can price each model's
+    /// slice at its own rate (`GeminiPricing.cost(perModel:)`). v4
+    /// files carry their tokens under the Flash-Lite key after
+    /// `healIfPreV5`. Models not seen in the window are simply absent
+    /// from the result.
+    func tokenTotalsByModel(
+        overLastDays days: Int?,
+        today: Date = Date(),
+        calendar: Calendar = .autoupdatingCurrent
+    ) -> [String: ModelTokens] {
+        var out: [String: ModelTokens] = [:]
+        func fold(_ bucket: DayBucket) {
+            for (model, tokens) in bucket.tokensByModel {
+                var acc = out[model] ?? ModelTokens()
+                acc.input  += tokens.input
+                acc.output += tokens.output
+                acc.cached += tokens.cached
+                out[model] = acc
+            }
+        }
+        if let days, days > 0 {
+            for offset in 0..<days {
+                guard let d = calendar.date(byAdding: .day, value: -offset, to: today) else { continue }
+                let key = StatsSnapshot.dayKey(for: d, calendar: calendar)
+                if let bucket = dayBuckets[key] { fold(bucket) }
+            }
+        } else {
+            for bucket in dayBuckets.values { fold(bucket) }
+        }
+        return out
+    }
+
     /// Per-app totals over the last `days` local days. `days == nil` →
     /// lifetime via `appBuckets`. Display names are pulled from
     /// `appBuckets` (last-seen wins); bundles seen only in the window
@@ -403,7 +518,7 @@ actor StatsStore {
     /// word counts — see
     /// `solutions/conventions/no-telemetry-with-statsstore-carveout-2026-05-15.md`).
     @discardableResult
-    func record(_ entry: HistoryEntry, tokens: TokenUsage) -> StatsSnapshot {
+    func record(_ entry: HistoryEntry, tokens: TokenUsage, model: GeminiModel = .flashLite) -> StatsSnapshot {
         var snap = summary()
         let words = Self.wordCount(entry.text)
         let duration = max(0, entry.durationSeconds)
@@ -430,6 +545,7 @@ actor StatsStore {
         day.tokenInput  += tokens.input
         day.tokenOutput += tokens.output
         day.tokenCached += tokens.cached
+        Self.addModelTokens(&day.tokensByModel, model: model, tokens: tokens)
         snap.dayBuckets[dayKey] = day
 
         // Empty bundle IDs would all collapse into one bucket and the
@@ -454,6 +570,7 @@ actor StatsStore {
             dayAppBucket.tokenInput  += tokens.input
             dayAppBucket.tokenOutput += tokens.output
             dayAppBucket.tokenCached += tokens.cached
+            Self.addModelTokens(&dayAppBucket.tokensByModel, model: model, tokens: tokens)
             perApp[entry.sourceBundleID] = dayAppBucket
             snap.dayAppBuckets[dayKey] = perApp
         }
@@ -501,5 +618,25 @@ actor StatsStore {
     /// stats.
     static func wordCount(_ s: String) -> Int {
         s.split { $0.isWhitespace || $0.isNewline }.count
+    }
+
+    // MARK: - Per-model token folding
+
+    /// Fold one session's `TokenUsage` into a per-model token map,
+    /// keyed by `GeminiModel.rawValue`. No-op for an all-zero usage
+    /// (the `record(_:)` / `.zero` shim path) so we never seed an
+    /// empty model entry — keeps `tokensByModel` honest and the JSON
+    /// minimal.
+    private static func addModelTokens(
+        _ map: inout [String: ModelTokens],
+        model: GeminiModel,
+        tokens: TokenUsage
+    ) {
+        guard tokens.input != 0 || tokens.output != 0 || tokens.cached != 0 else { return }
+        var mt = map[model.rawValue] ?? ModelTokens()
+        mt.input  += tokens.input
+        mt.output += tokens.output
+        mt.cached += tokens.cached
+        map[model.rawValue] = mt
     }
 }
