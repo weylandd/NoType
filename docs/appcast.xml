@@ -22,6 +22,42 @@
     <description>NoType release feed for Sparkle 2 auto-updates.</description>
     <language>en</language>
     <item>
+      <title>Version 0.1.10</title>
+      <pubDate>Fri, 29 May 2026 21:03:10 +0000</pubDate>
+      <sparkle:version>12</sparkle:version>
+      <sparkle:shortVersionString>0.1.10</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+### Added
+- **Switchable transcription model** (#65). Settings → API & Usage now
+  lets you choose between Gemini 3.1 Flash-Lite (default) and 3.5 Flash
+  for transcription; usage cost is tracked per-model so historical
+  spend stays priced correctly. The classifier stays on Flash-Lite
+  regardless of the transcription choice.
+- **Length-disproportionate hallucination gate** (#63). Drops Gemini
+  transcripts whose word and char rate both exceed plausible dictation
+  speed for the audio duration — catches Flash-Lite's conversational
+  fallback hallucinations on short, low-information audio (e.g. a
+  Bluetooth-HFP mic).
+
+### Fixed
+- **Music no longer stays muted after recording ends** (#64). Removed
+  the `.pause` toggle; the mute is lifted at recording-end.
+- **Region-block errors explain themselves** (#60). A Gemini regional
+  block now surfaces a readable explanation instead of a bare
+  "Gemini error 400".
+- **"Open Settings" button on the missing-API-key HUD now works** (#59).
+  It was previously wired to nothing.
+
+### Changed
+- Bumped `softprops/action-gh-release` 2 → 3 (#62) and
+  `apple-actions/import-codesign-certs` 3 → 7 (#61) in CI.
+      ]]></description>
+      <enclosure url="https://github.com/weylandd/NoType/releases/download/v0.1.10/NoType-0.1.10.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="0EmzoY/qn85+lwi8hc+ebN2cu7u3IKoiqm65WuDAXEPYf/hWS+dGG2ZFGlXPXYwWT5tdhcK7LjAk7tp9gF4DBA==" length="5969960" />
+    </item>
+    <item>
       <title>Version 0.1.9</title>
       <pubDate>Tue, 19 May 2026 09:03:29 +0000</pubDate>
       <sparkle:version>11</sparkle:version>
