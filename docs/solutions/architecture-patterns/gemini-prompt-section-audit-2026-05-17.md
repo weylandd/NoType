@@ -122,6 +122,8 @@ The number-normalisation fix goes through `prompt-master` in U3.
 
 **Silence handling is *not* in Tier 4.** Per NoType's VAD + min-chunk-size pipeline (see `NoType/Recording/CLAUDE.md`), silence-only chunks never reach Gemini in production — they're filtered before the chunk builder. The `silence_only` fixture stays in the eval as a robustness probe (defence-in-depth for hypothetical VAD failure modes), but designing new prompt scaffolding for silence handling would optimise for a case that doesn't ship.
 
+> **Additional production-side defence (2026-05-20):** `HallucinationLengthGate` runs *after* a Gemini response returns and drops the output when its word/char rate is disproportionate to the audio duration — catching short-audio conversational fallbacks like "Can you help me with this?" on degraded BT-HFP mic. The gate complements VAD: VAD blocks unrecognizable audio from reaching Gemini, the gate blocks unrecognizable *responses* from reaching the paste buffer. The `silence_only` and `unintelligible_ru_short` fixtures drive `GeminiClient` directly so they bypass the gate and keep the prompt-layer regression visible in eval. See [hallucination-length-gate-2026-05-20.md](hallucination-length-gate-2026-05-20.md).
+
 ## Why This Matters
 
 Three concrete answers to the user's question:

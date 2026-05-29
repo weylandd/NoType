@@ -266,6 +266,41 @@ ffmpeg -f lavfi -i anullsrc=channel_layout=mono:sample_rate=16000 \
 - **Voice tip:** steady moderate pace; no dramatic pauses.
 - **Expected duration:** ~30 s.
 
+### 9. `unintelligible_ru_short.m4a` — captured incident, NOT ElevenLabs
+
+This one is recorded from the user's actual environment (BT-HFP
+headphone mic — the failure mode requires the degraded acoustic
+profile that ElevenLabs cannot synthesise). The intended pronunciation
+is the Russian word "проверка" but the audio is mediocre — what
+matters is that the model can't intelligibly parse it.
+
+- **Source:** download the m4a from the AI Studio session that
+  reproduced the issue, OR record fresh from QuickTime / `ffmpeg`
+  on Bluetooth headphones speaking "проверка" softly. Then convert:
+
+```bash
+ffmpeg -i input.m4a \
+  -ac 1 -ar 16000 \
+  -c:a aac -b:a 64k \
+  -movflags +faststart \
+  Audio/unintelligible_ru_short.m4a
+```
+
+- **Why:** the prompt mandates an empty-string output when the audio
+  is unintelligible. Gemini 3.1 Flash-Lite has been observed to
+  ignore that contract on ~1 s of low-information audio and emit
+  conversational meta-replies like "Can you help me with this?".
+  Same archetype as `silence_only` ("Hello, how are you?") — different
+  trigger (degraded speech vs. silence) but the same fallback class.
+- **Mitigation in production:** `NoType/Gemini/HallucinationLengthGate.swift`
+  drops the response in `RecordingSession` (4 wps / 18 cps AND-gate
+  with a floor of 4 words / 18 chars). The eval suite drives
+  `GeminiClient` directly and bypasses the gate, so the bug stays
+  visible at the prompt layer — `test_unintelligibleRuShort_lite`
+  EXPECTS TO FAIL on the raw model until prompt-level mitigation
+  catches up.
+- **Expected duration:** ~1.0 s.
+
 ## After recording
 
 1. Drop the m4a files into `Audio/`.
