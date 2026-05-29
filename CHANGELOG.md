@@ -12,6 +12,35 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
 
 ---
 
+## [0.1.10] — 2026-05-29
+
+### Added
+- **Switchable transcription model** (#65). Settings → API & Usage now
+  lets you choose between Gemini 3.1 Flash-Lite (default) and 3.5 Flash
+  for transcription; usage cost is tracked per-model so historical
+  spend stays priced correctly. The classifier stays on Flash-Lite
+  regardless of the transcription choice.
+- **Length-disproportionate hallucination gate** (#63). Drops Gemini
+  transcripts whose word and char rate both exceed plausible dictation
+  speed for the audio duration — catches Flash-Lite's conversational
+  fallback hallucinations on short, low-information audio (e.g. a
+  Bluetooth-HFP mic).
+
+### Fixed
+- **Music no longer stays muted after recording ends** (#64). Removed
+  the `.pause` toggle; the mute is lifted at recording-end.
+- **Region-block errors explain themselves** (#60). A Gemini regional
+  block now surfaces a readable explanation instead of a bare
+  "Gemini error 400".
+- **"Open Settings" button on the missing-API-key HUD now works** (#59).
+  It was previously wired to nothing.
+
+### Changed
+- Bumped `softprops/action-gh-release` 2 → 3 (#62) and
+  `apple-actions/import-codesign-certs` 3 → 7 (#61) in CI.
+
+---
+
 ## [0.1.9] — 2026-05-19
 
 Hotfix release. One bug fix.
