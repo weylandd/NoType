@@ -479,6 +479,19 @@ final class RecordingSession {
         )
     }
 
+    /// Stop audio capture immediately, without draining or sending.
+    /// Called by `AppState.finalizeRecording` at hotkey-release so a
+    /// `.mute` music-interruption can be lifted the instant the mic
+    /// goes quiet — rather than a few ms later when `stop()`'s
+    /// `recorder.stop()` would otherwise run, a window in which
+    /// newly-unmuted speaker audio could bleed into the final chunk's
+    /// tail. `AudioRecorder.stop()` is idempotent, so the `recorder.stop()`
+    /// inside `stop()` below is a harmless no-op afterwards; the PCM ring
+    /// is untouched, so `emitFinalChunkIfAny` still harvests the full tail.
+    func stopCapture() {
+        recorder.stop()
+    }
+
     /// Stops capture, awaits the sender draining the pending queue,
     /// pastes the concatenated transcript, and writes a history entry.
     func stop() async throws -> HistoryEntry {

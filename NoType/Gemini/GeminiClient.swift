@@ -364,7 +364,7 @@ actor GeminiClient {
         chunkIndex: Int,
         isFinal: Bool,
         apiKey: String,
-        model: GeminiModel = .flashLite
+        model: GeminiModel
     ) async throws -> String {
         try await transcribeWithUsage(
             audio: audio,
@@ -395,7 +395,7 @@ actor GeminiClient {
         chunkIndex: Int,
         isFinal: Bool,
         apiKey: String,
-        model: GeminiModel = .flashLite
+        model: GeminiModel
     ) async throws -> (text: String, tokens: TokenUsage) {
         let instruction = isFinal
             ? Self.finalChunkInstruction(chunkIndex: chunkIndex)
@@ -434,7 +434,7 @@ actor GeminiClient {
         mimeType: String,
         context: ContextSnapshot,
         apiKey: String,
-        model: GeminiModel = .flashLite
+        model: GeminiModel
     ) async throws -> String {
         try await transcribeShortWithUsage(
             audio: audio,
@@ -452,7 +452,7 @@ actor GeminiClient {
         mimeType: String,
         context: ContextSnapshot,
         apiKey: String,
-        model: GeminiModel = .flashLite
+        model: GeminiModel
     ) async throws -> (text: String, tokens: TokenUsage) {
         let instruction = Self.liteChunkInstruction()
         return try await sendRequest(
@@ -488,7 +488,7 @@ actor GeminiClient {
         chunkIndices: [Int],
         isFinal: Bool,
         apiKey: String,
-        model: GeminiModel = .flashLite
+        model: GeminiModel
     ) async throws -> String {
         try await transcribeBatchWithUsage(
             audios: audios,
@@ -516,7 +516,7 @@ actor GeminiClient {
         chunkIndices: [Int],
         isFinal: Bool,
         apiKey: String,
-        model: GeminiModel = .flashLite
+        model: GeminiModel
     ) async throws -> (text: String, tokens: TokenUsage) {
         precondition(audios.count == chunkIndices.count, "audios / indices mismatch")
         precondition(audios.count > 1, "use transcribe(audio:...) for single chunks")

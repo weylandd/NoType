@@ -64,10 +64,10 @@ Each attempt logs `attempt=N`. These retries are the HTTP-level safety net insid
 
 ## Endpoint URLs
 
-Both file-scope constants (force-unwrap is the documented exception for compile-time-known literals):
+(force-unwrap is the documented exception for compile-time-known literals):
 
-- `modelsListURL` — `…/v1beta/models` (used by `validateKey`).
-- `generateContentURL` — `…/models/<modelID>:generateContent` (used by transcription + classification).
+- `modelsListURL` — file-scope constant, `…/v1beta/models` (used by `validateKey`).
+- `generateContentURL(for:)` — static **function** building `…/models/<modelID>:generateContent` from a `GeminiModel`. Transcription passes the session's frozen model (Flash-Lite or 3.5 Flash — Settings → API & Usage); `classifyApp` always passes `.flashLite` (the classifier is model-agnostic so the user's transcription choice doesn't change classifier cost). The model lives in the URL path, not the request body, so the cache-prefix part order is untouched — pinned by `GeminiRequestBuilderTests.test_generateContentURL_perModel_mapsToModelID`.
 
 ## Testing
 

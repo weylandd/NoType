@@ -695,6 +695,87 @@ final class StatsStoreTests: XCTestCase {
         XCTAssertEqual(cost, expected, accuracy: 1e-12)
     }
 
+    func test_migration_v4FlatTokens_attributedToFlashLite_inDayAppBuckets() throws {
+        // v4 file with a NON-empty dayAppBuckets entry — exercises the
+        // nested attribution loop in healIfPreV5 (the top-level dayBuckets
+        // migration test alone leaves it uncovered).
+        let json = """
+        {
+          "version": 4,
+          "totalWords": 3, "totalSessions": 1,
+          "totalDurationSeconds": 0, "totalDurationWords": 0,
+          "appBuckets": {}, "dayBuckets": {},
+          "dayAppBuckets": {
+            "2026-05-11": {
+              "com.tinyspeck.slackmacgap": {
+                "words": 3, "sessions": 1,
+                "durationSeconds": 0, "durationWords": 0,
+                "tokenInput": 500, "tokenOutput": 200, "tokenCached": 100
+              }
+            }
+          }
+        }
+        """
+        let snap = try JSONDecoder().decode(StatsSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(snap.version, 5)
+        let inner = snap.dayAppBuckets["2026-05-11"]?["com.tinyspeck.slackmacgap"]
+        XCTAssertEqual(inner?.tokenInput, 500, "flat fields preserved")
+        XCTAssertEqual(inner?.tokensByModel[GeminiModel.flashLite.rawValue],
+                       ModelTokens(input: 500, output: 200, cached: 100))
+    }
+
+    func test_migration_v5File_isIdempotent() throws {
+        // A v5 file with tokensByModel already populated must NOT be
+        // re-attributed — `guard version < 5` + the `tokensByModel.isEmpty`
+        // short-circuit protect it. The flat fields must not leak a third
+        // Flash-Lite entry on top of the existing per-model split.
+        let json = """
+        {
+          "version": 5,
+          "totalWords": 3, "totalSessions": 1,
+          "totalDurationSeconds": 0, "totalDurationWords": 0,
+          "appBuckets": {}, "dayAppBuckets": {},
+          "dayBuckets": {
+            "2026-05-11": {
+              "words": 3, "sessions": 1,
+              "durationSeconds": 0, "durationWords": 0,
+              "tokenInput": 300, "tokenOutput": 90, "tokenCached": 0,
+              "tokensByModel": {
+                "gemini-3.1-flash-lite": { "input": 100, "output": 30, "cached": 0 },
+                "gemini-3.5-flash":      { "input": 200, "output": 60, "cached": 0 }
+              }
+            }
+          }
+        }
+        """
+        let snap = try JSONDecoder().decode(StatsSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(snap.version, 5)
+        let b = snap.dayBuckets["2026-05-11"]
+        XCTAssertEqual(b?.tokensByModel.count, 2, "no extra Flash-Lite re-attribution")
+        XCTAssertEqual(b?.tokensByModel[GeminiModel.flashLite.rawValue],
+                       ModelTokens(input: 100, output: 30, cached: 0))
+        XCTAssertEqual(b?.tokensByModel[GeminiModel.flash.rawValue],
+                       ModelTokens(input: 200, output: 60, cached: 0))
+    }
+
+    func test_record_dualWrite_flatEqualsSumOfPerModel() async {
+        // Pin the dual-write invariant the cost cell (per-model) and the
+        // count cells (flat aggregate) both rely on: after a mixed-model
+        // day, sum(tokensByModel) must equal the flat fields.
+        let store = makeStore()
+        let day = makeDate(y: 2026, m: 5, d: 11, h: 14)
+        _ = await store.record(entry(text: "lite", date: day),
+                               tokens: TokenUsage(input: 100, output: 50, cached: 30), model: .flashLite)
+        let snap = await store.record(entry(text: "flash", date: day),
+                                      tokens: TokenUsage(input: 200, output: 80, cached: 10), model: .flash)
+        guard let b = snap.dayBuckets[StatsSnapshot.dayKey(for: day)] else {
+            return XCTFail("missing day bucket")
+        }
+        XCTAssertEqual(b.tokensByModel.values.reduce(0) { $0 + $1.input },  b.tokenInput)
+        XCTAssertEqual(b.tokensByModel.values.reduce(0) { $0 + $1.output }, b.tokenOutput)
+        XCTAssertEqual(b.tokensByModel.values.reduce(0) { $0 + $1.cached }, b.tokenCached)
+    }
+
     // MARK: - tokenTotals(overLastDays:) windowing
 
     func test_tokenTotals_overLastDays_sumsRecentBuckets() async {

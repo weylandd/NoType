@@ -903,15 +903,20 @@ final class AppState {
         guard case .recording = recordingState, let session = currentSession else { return }
 
         recordingState = .sending
-        // Recording has ended (hotkey released) — the mic is no longer
-        // capturing, so lift any music-output mute *now* rather than
-        // holding it through the Gemini transcription window. Without
-        // this the user's music stays silenced while the transcribing
-        // HUD spins, which is dead time (nothing is being recorded).
-        // The sleep assertion deliberately is NOT released here — it
-        // stays until the terminal arms below so the Mac can't sleep
-        // mid-call. `releaseMusicInterruption()` is idempotent, so the
-        // arms below no longer re-call it.
+        // Hotkey released → stop capturing *now* so the mic is truly
+        // quiet before we lift the mute. Otherwise a few ms of
+        // newly-unmuted speaker audio could bleed into the final chunk's
+        // tail (the recorder keeps running until `recorder.stop()` inside
+        // the async `session.stop()` below). `stopCapture()` is
+        // idempotent with that later stop and leaves the PCM ring intact,
+        // so the final-chunk tail is still harvested.
+        session.stopCapture()
+        // With the mic now quiet, lift any music-output mute immediately
+        // rather than holding it through the Gemini transcription window
+        // (dead time — nothing is being recorded). The sleep assertion is
+        // NOT released here: it stays until the terminal arms below so the
+        // Mac can't sleep mid-call. `releaseMusicInterruption()` is
+        // idempotent, so the arms below no longer re-call it.
         releaseMusicInterruption()
         let target = session.sourceAppName ?? "the focused app"
         // Dismiss-only: the X button hides the HUD without cancelling the

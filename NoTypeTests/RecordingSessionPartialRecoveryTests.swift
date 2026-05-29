@@ -162,4 +162,18 @@ final class RecordingSessionPartialRecoveryTests: XCTestCase {
         )
         XCTAssertEqual(s.tokens, t)
     }
+
+    func test_sessionSummary_carriesFlashModel() {
+        // The model field must carry a non-default value verbatim —
+        // AppState.finalizeRecording forwards summary.model into
+        // StatsStore.record so token costs price at the right per-model
+        // rate. Only .flashLite is exercised elsewhere in this file.
+        let s = RecordingSession.SessionSummary(
+            failedChunkCount: 0,
+            dispatchedChunkCount: 1,
+            tokens: .zero,
+            model: .flash
+        )
+        XCTAssertEqual(s.model, .flash)
+    }
 }
