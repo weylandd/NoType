@@ -1,34 +1,51 @@
 import AppKit
 import CoreAudio
-import IOKit
 import OSLog
 
-/// Pauses or mutes outside audio for the duration of a recording
-/// session so background music doesn't bleed into the mic when the
-/// user is recording without headphones.
+/// Mutes outside audio for the duration of a recording session so
+/// background music doesn't bleed into the mic when the user is
+/// recording without headphones.
 ///
-/// **Three modes:**
+/// **Two modes:**
 ///  - `.none` — no-op. Music continues; mic picks up the speakers.
 ///  - `.mute` — toggles `kAudioDevicePropertyMute` on the system
 ///    default *output* device. macOS silences every running app's
 ///    output (the volume slider stays where it was). On stop we
 ///    restore the prior mute state, so a user who was already on
 ///    mute before recording stays on mute after.
-///  - `.pause` — synthesises a `NX_KEYTYPE_PLAY` system-defined
-///    media-key event (down + up) on start, and again on stop.
-///    Toggle semantics: every media app that responds to system
-///    play/pause (Apple Music, Spotify, Safari/YouTube tab, Chrome,
-///    QuickTime, VLC, IINA, …) flips its playback state. Public API,
-///    no entitlements / private-framework risk.
+///
+/// **Removed: `.pause`.** An earlier build (the U4 Core-Audio-HAL
+/// commit) shipped a `.pause` mode that synthesised an
+/// `NX_KEYTYPE_PLAY` system-defined media key on start and again on
+/// stop. `NX_KEYTYPE_PLAY` is a *toggle*, not a directional "pause":
+/// it carries no playback state, so when the user's media app was
+/// paused or stopped, the start toggle *started* playback — Apple
+/// Music kicking on during/after a recording the user never wanted.
+/// There is no public API that pauses-only without starting stopped
+/// media (reading the system playback state needs the private
+/// `MediaRemote` framework, which Apple has progressively locked down),
+/// so the mode was removed rather than shipped doing the opposite of
+/// its label. `.mute` covers the same "don't let music bleed into the
+/// mic" goal without ever changing *what* is playing. A stored
+/// `"pause"` rawValue from an older build now fails `Mode(rawValue:)`
+/// and falls back to `.none` in `AppState.init` — pinned by
+/// `MusicInterruptionModeTests`.
 ///
 /// **Shape parallels `SleepAssertion`'s RAII intent** — `@MainActor`
 /// `final class`, owned by `AppState`, RAII-deinit safety net for the
 /// mute-restore path so a missed `release()` doesn't strand the user's
 /// system on mute forever. Acquired in `AppState.handleHotkeyPress`
-/// after `session.start()` succeeds; released in the three terminal
-/// session-end paths (`finalizeRecording` success arm,
-/// `finalizeRecording` error catch, `cancelRecording`). Same
-/// "recoverable failures do NOT release" rule as `SleepAssertion`.
+/// after `session.start()` succeeds.
+///
+/// **Released the moment recording ends, NOT at session end.** Unlike
+/// `SleepAssertion` (which is held through the Gemini transcription
+/// window so the Mac can't sleep mid-call), the mute is lifted as soon
+/// as the mic stops capturing — at the top of `AppState.finalizeRecording`
+/// (before the `await session.stop()`) and in `cancelRecording`. The
+/// mute only exists to keep speaker audio out of the *mic*; once the
+/// user releases the hotkey there's nothing left to record, so holding
+/// the mute through transcription would just silence the user's music
+/// for no reason while the transcribing HUD spins.
 ///
 /// Construction and activation are intentionally split (vs.
 /// `SleepAssertion`'s `init(reason:) throws` shape) because
@@ -61,31 +78,27 @@ final class MusicInterruption {
     enum Mode: String, CaseIterable, Sendable, Codable {
         case none
         case mute
-        case pause
 
         /// UserDefaults storage key.
         static let userDefaultsKey: String = "notype.musicInterruption"
 
-        /// Picker label rendered in Settings → Audio.
+        /// Picker label rendered in Settings → Recording.
         var label: String {
             switch self {
-            case .none:  return "None"
-            case .mute:  return "Mute"
-            case .pause: return "Pause"
+            case .none: return "None"
+            case .mute: return "Mute"
             }
         }
 
         /// Settings row subtitle reflects what the current selection
-        /// will do to the user's audio. Pure / static so SettingsTabView
-        /// stays declarative.
+        /// will do to the user's audio. Pure / static so the Settings
+        /// pane stays declarative.
         static func subtitle(for mode: Mode) -> String {
             switch mode {
             case .none:
                 return "Keep other audio playing without interruption."
             case .mute:
                 return "Mute system output while recording, then restore the previous mute state."
-            case .pause:
-                return "Send a play/pause key to Apple Music, Spotify, Safari, and other media apps when recording starts; press it again when recording ends."
             }
         }
     }
@@ -147,8 +160,6 @@ final class MusicInterruption {
             }
             savedOutputDeviceID = outputID
             savedMuteState = previous
-        case .pause:
-            Self.postMediaKey(NX_KEYTYPE_PLAY)
         }
     }
 
@@ -170,14 +181,6 @@ final class MusicInterruption {
             if let deviceID = savedOutputDeviceID {
                 _ = Self.applyMute(savedMuteState ?? false, on: deviceID)
             }
-        case .pause:
-            // Symmetric toggle: pressing play/pause again on each app
-            // that toggled with the first event returns it to the
-            // playing state it was in before we touched it. Apps that
-            // weren't playing before our first press get started by
-            // the second press, which is the documented edge case —
-            // see the `.pause` doc-comment.
-            Self.postMediaKey(NX_KEYTYPE_PLAY)
         }
     }
 
@@ -186,19 +189,10 @@ final class MusicInterruption {
         // explicitly. Catches programmer mistakes so the user's system
         // isn't trapped on mute after a thrown error somewhere in the
         // session-end pipeline.
-        //
-        // `.pause` symmetric-toggle recovery is dispatched async to
-        // main to keep the NSEvent / CGEvent post off this nonisolated
-        // deinit (CGEvent posting from arbitrary threads is unsafe).
-        // The trade-off: a crash inside the async window still leaves
-        // music paused, but the explicit `release()` is the normal
-        // path — deinit only catches missed-release programmer error.
         if activeMode == .mute,
            let prev = savedMuteState,
            let deviceID = savedOutputDeviceID {
             _ = Self.applyMute(prev, on: deviceID)
-        } else if activeMode == .pause {
-            DispatchQueue.main.async { Self.postMediaKey(NX_KEYTYPE_PLAY) }
         }
     }
 
@@ -265,51 +259,4 @@ final class MusicInterruption {
         guard status == noErr, deviceID != 0 else { return nil }
         return deviceID
     }
-
-    // MARK: - Media key event
-
-    /// Synthesise a system-defined NX media key down + up event for
-    /// the given keycode (we use `NX_KEYTYPE_PLAY` = 16, the
-    /// universal play/pause toggle). Posted at `.cghidEventTap` so
-    /// every app sees it — the same surface the F8 / Touch Bar
-    /// play/pause button uses.
-    ///
-    /// The NX system-defined event encoding: `data1` packs the
-    /// keycode in the upper 16 bits, the state flag (0xA = down,
-    /// 0xB = up) in bits 8–15, and a repeat counter (0) in the
-    /// lower 8 bits. `subtype = 8` is `NX_SUBTYPE_AUX_CONTROL_BUTTONS`
-    /// — the bus that handles play/pause / next / previous on the
-    /// system bus.
-    nonisolated private static func postMediaKey(_ keycode: Int32) {
-        postSystemDefined(keycode: keycode, state: 0xA)
-        postSystemDefined(keycode: keycode, state: 0xB)
-    }
-
-    nonisolated private static func postSystemDefined(keycode: Int32, state: Int32) {
-        let data1 = (Int(keycode) << 16) | (Int(state) << 8)
-        let event = NSEvent.otherEvent(
-            with: .systemDefined,
-            location: .zero,
-            modifierFlags: [],
-            timestamp: 0,
-            windowNumber: 0,
-            context: nil,
-            subtype: 8,  // NX_SUBTYPE_AUX_CONTROL_BUTTONS
-            data1: data1,
-            data2: -1
-        )
-        guard let cgEvent = event?.cgEvent else {
-            Self.log.warning("music: postSystemDefined — failed to build CGEvent")
-            return
-        }
-        cgEvent.post(tap: .cghidEventTap)
-    }
 }
-
-/// `NX_KEYTYPE_PLAY` is declared in `IOKit/hidsystem/ev_keymap.h`
-/// (C header) as `#define NX_KEYTYPE_PLAY 16`. Swift doesn't import
-/// the `#define`-only header reliably so we redeclare it here. The
-/// constant has been stable across macOS releases since 10.7 — if
-/// Apple ever renumbers it, the media-key bus would break system-
-/// wide, not just for us.
-private let NX_KEYTYPE_PLAY: Int32 = 16
