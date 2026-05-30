@@ -30,22 +30,24 @@ Add the deltas and cache-hits in a follow-up PR. Two surface-level
 gaps to close first:
 
 1. **StatsStore — prior-period rollup.** `tokenTotals(overLastDays:)`
-   currently returns one snapshot. Add a companion
+   currently returns one snapshot (and `tokenTotalsByModel(overLastDays:)`,
+   added in #65, returns the per-model split). Add a companion
    `tokenTotalsWithPriorPeriod(overLastDays:)` that returns the
    `(current, prior)` pair so the panel can render the delta without
-   a second pass.
+   a second pass. Cost is now per-model (schema v5), so make the rollup
+   per-model-aware if the delta is ever shown on the Cost cell.
 2. **Per-call cache-hit count.** Gemini's response carries cache-read
-   token counts in `UsageMetadata`; `StatsStore.record(_:tokens:)`
-   already accepts a `TokenUsage` value but doesn't yet store the
-   cached fraction separately as a hit count. Surface
-   `dayBuckets[d].tokenCached / dayBuckets[d].tokenInput` ratio in
-   the same call site, then expose a `cacheHitRate(overLastDays:)`
-   accessor.
+   token counts in `UsageMetadata`. The cached count is *already stored*
+   — `DayBucket.tokenCached` (and per-model `ModelTokens.cached`), written
+   by `StatsStore.record(_:tokens:model:)` — so the data exists; what's
+   missing is a rate. Expose a `cacheHitRate(overLastDays:)` accessor over
+   `dayBuckets[d].tokenCached / dayBuckets[d].tokenInput` (the call site
+   already persists both halves).
 
-UI-side, the `TokenStatsPanel` already exposes
-`currentRangeScope` — wire the range scope into the parent card's
-meta and add a small inline pill rendering the cache-hit percentage
-to the right of the range picker.
+UI-side, `TokenStatsPanel` drives its window off a `range: TokenStatsRange`
+`@State` (Today / 7d / 30d / All via `TokenStatsRangePicker`) — wire that
+range into the parent card's meta and add a small inline pill rendering the
+cache-hit percentage to the right of the range picker.
 
 ## Why This Matters
 
@@ -84,6 +86,8 @@ Reference design (from the design handoff bundle):
 ## Related
 
 - `NoType/UI/Settings/TokenStatsPanel.swift`
-- `NoType/History/StatsStore.swift` (`tokenTotals(overLastDays:)`)
+- `NoType/UI/Settings/Panes/APIUsagePane.swift` (the `// deferred to TECHDEBT` doc-comment marking this exact gap)
+- `NoType/History/StatsStore.swift` (`tokenTotals(overLastDays:)`, `tokenTotalsByModel(overLastDays:)`, schema v5 per-model `ModelTokens`)
 - `NoType/Gemini/GeminiClient.swift` (`UsageMetadata` parsing)
+- `solutions/tooling-decisions/gemini-3-1-flash-lite-2026-05-15.md` (the #65 model-toggle + per-model pricing that reworked this area)
 - Source plan: `docs/plans/2026-05-18-003-feat-settings-redesign-plan.md`
