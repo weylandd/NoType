@@ -689,9 +689,13 @@ final class StatsStoreTests: XCTestCase {
                        ModelTokens(input: 1000, output: 400, cached: 200))
         // And they price at Flash-Lite rates via the per-model cost path.
         let cost = GeminiPricing.cost(perModel: snap.tokenTotalsByModel(overLastDays: nil))
-        let expected = 800.0 * 0.25 / 1_000_000   // billable input (1000-200)
-                     + 200.0 * 0.025 / 1_000_000  // cached
-                     + 400.0 * 1.50 / 1_000_000   // output
+        // Broken into named sub-expressions on purpose: the inline 3-term
+        // chain of untyped Double literals tripped Swift's type-checker
+        // timeout ("unable to type-check in reasonable time") on CI runners.
+        let billableInputCost = 800.0 * 0.25 / 1_000_000.0   // billable input (1000-200)
+        let cachedCost = 200.0 * 0.025 / 1_000_000.0
+        let outputCost = 400.0 * 1.50 / 1_000_000.0
+        let expected = billableInputCost + cachedCost + outputCost
         XCTAssertEqual(cost, expected, accuracy: 1e-12)
     }
 
