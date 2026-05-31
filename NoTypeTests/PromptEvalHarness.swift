@@ -127,9 +127,17 @@ enum PromptEvalHarness {
         // any access error (ACL mismatch, daemon flake) into the
         // same "missing" outcome — the test will skip rather than
         // throw an unhelpful trace.
+        //
+        // Read from the **legacy file keychain** (`store: .legacyFile`):
+        // the eval key is dropped by the maintainer via `security … -A`
+        // (broad ACL), which lands in the legacy keychain, not the
+        // data-protection store the production path now defaults to. See
+        // NoTypeTests/Fixtures/README.md "Setting the API key for the eval
+        // suite".
         if let keychainKey = (try? KeychainStore.load(
             service: testKeychainService,
-            account: testKeychainAccount
+            account: testKeychainAccount,
+            store: .legacyFile
         ))?.trimmingCharacters(in: .whitespacesAndNewlines),
            !keychainKey.isEmpty {
             return (keychainKey, .keychain)

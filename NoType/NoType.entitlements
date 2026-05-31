@@ -6,5 +6,16 @@
 	<false/>
 	<key>com.apple.security.device.audio-input</key>
 	<true/>
+	<!-- Data-protection keychain access group for the Gemini API key.
+	     Hardcodes the Team ID prefix (49T6U8DQXZ — matches project.yml
+	     DEVELOPMENT_TEAM and signing/NoType.xcrequirements) instead of
+	     $(AppIdentifierPrefix) so the group resolves identically on the
+	     Developer ID release build, which has no provisioning profile to
+	     expand that variable. KeychainStore.accessGroup must match this
+	     literal verbatim. See docs/solutions/documentation-gaps/keychain-data-protection-migration-2026-05-30.md. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>49T6U8DQXZ.app.notype</string>
+	</array>
 </dict>
 </plist>
