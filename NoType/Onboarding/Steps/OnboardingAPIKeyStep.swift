@@ -39,6 +39,7 @@ struct OnboardingAPIKeyStep: View {
             Color.clear.frame(height: 8)
         }
         .onAppear {
+            appState.refreshAPIKeyState()
             savedKey = appState.currentAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines)
             if let saved = savedKey, !saved.isEmpty {
                 isEditing = false
@@ -86,6 +87,9 @@ struct OnboardingAPIKeyStep: View {
 
     private var editorCard: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if appState.apiKeyNeedsReentry {
+                ReenterKeyNote()
+            }
             keyField
 
             HStack(alignment: .top, spacing: 12) {

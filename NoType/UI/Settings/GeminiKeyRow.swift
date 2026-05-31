@@ -25,21 +25,29 @@ struct GeminiKeyRow: View {
 
     var body: some View {
         let key = appState.currentAPIKey ?? ""
-        DSCardRow(
-            title: "API key",
-            subtitle: Self.subtitle,
-            hideTopBorder: true
-        ) {
-            HStack(spacing: DS.Space.s3) {
-                MaskedKeyPill(value: Self.maskedDisplay(for: key))
-                DSSecondaryButton(
-                    label: "Edit",
-                    leadingSystemSymbol: "pencil"
-                ) {
-                    showingEditSheet = true
+        VStack(alignment: .leading, spacing: DS.Space.s2) {
+            if appState.apiKeyNeedsReentry {
+                ReenterKeyNote()
+            }
+            DSCardRow(
+                title: "API key",
+                subtitle: Self.subtitle,
+                hideTopBorder: true
+            ) {
+                HStack(spacing: DS.Space.s3) {
+                    MaskedKeyPill(value: Self.maskedDisplay(for: key))
+                    DSSecondaryButton(
+                        label: "Edit",
+                        leadingSystemSymbol: "pencil"
+                    ) {
+                        showingEditSheet = true
+                    }
                 }
             }
         }
+        // Resolve the tri-state post-render (never during a body read) so the
+        // observable write can't land mid-update. See AppState.refreshAPIKeyState.
+        .task { appState.refreshAPIKeyState() }
         .sheet(isPresented: $showingEditSheet) {
             EditAPIKeySheet(isPresented: $showingEditSheet)
                 .environment(appState)
@@ -91,6 +99,33 @@ private struct MaskedKeyPill: View {
             RoundedRectangle(cornerRadius: DS.Radius.sm)
                 .strokeBorder(DS.Color.borderSubtle, lineWidth: DS.Border.hairline)
         )
+    }
+}
+
+/// Calm explanatory note shown when the stored key can't be read after a
+/// signing change (`AppState.apiKeyNeedsReentry` →
+/// `SecretStore.KeyResolution.needsReentry`). Reused in Settings and
+/// onboarding. Deliberately neutral (info glyph, not a red error) — this is
+/// expected one-time maintenance, not a failure.
+struct ReenterKeyNote: View {
+    var body: some View {
+        HStack(alignment: .top, spacing: DS.Space.s2) {
+            Image(systemName: "key.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(DS.Color.textTertiary)
+            Text("Your saved key couldn't be read after an app or macOS update. Paste it once below to re-save it securely — this won't happen again.")
+                .font(DS.Font.bodySM())
+                .foregroundStyle(DS.Color.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(DS.Space.s3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(DS.Color.bgInset, in: RoundedRectangle(cornerRadius: DS.Radius.sm))
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.Radius.sm)
+                .strokeBorder(DS.Color.borderSubtle, lineWidth: DS.Border.hairline)
+        )
+        .accessibilityElement(children: .combine)
     }
 }
 
