@@ -8,6 +8,23 @@ category: documentation-gaps
 
 # Move the Gemini key to the data-protection keychain (survive re-sign, never prompt)
 
+> **Implementation status (2026-05-31):** U1–U5 implemented on branch
+> `fix/keychain-data-protection-migration` — `keychain-access-groups`
+> entitlement, `KeychainStore` data-protection migration (`Store` param),
+> `SecretStore.migrateAndResolve` chained migration + `KeyResolution`
+> tri-state, the calm "re-enter your key" UX (`ReenterKeyNote` +
+> `AppState.apiKeyNeedsReentry`), and the doc updates. 18 unit tests green
+> (`KeychainStoreTests` / `SecretStoreTests` / `AppStateKeyStateTests`).
+> Spike **step 1** (the access-group data-protection keychain works under our
+> signing) is **proven** locally. **Remaining before this entry closes:** the
+> maintainer's notarized Developer ID verification (spike step 3 / **S3**) and
+> PR merge — keep this entry indexed in `docs/TECHDEBT.md` until both land.
+> A surprising finding surfaced during implementation: legacy↔data-protection
+> keychain isolation is **asymmetric** (an unscoped legacy query surfaces
+> data-protection items), which is why the migration never deletes the legacy
+> keychain item — pinned by `KeychainStoreTests` and documented in
+> `NoType/Keychain/CLAUDE.md`.
+
 ## Context
 
 The Gemini API key lives in the **legacy file-based** macOS keychain via

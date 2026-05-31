@@ -28,6 +28,7 @@ NoType is OSS and free. Transcription costs money (paid to Google per Gemini cal
 
 The Keychain entry uses:
 
+- The **data-protection keychain** (`kSecUseDataProtectionKeychain`) scoped by the access group `49T6U8DQXZ.app.notype` (`keychain-access-groups` entitlement) — entitlement-gated access that survives signing-cert rotation, see the migration doc below.
 - `kSecAttrService = "app.notype.gemini"`
 - `kSecAttrAccount = "default"` (single-account model — multi-account is out of scope)
 - `kSecAttrAccessible = kSecAttrAccessibleAfterFirstUnlock`
@@ -37,7 +38,8 @@ The Keychain entry uses:
 - **No billing relationship.** Operating a hosted-key model means handling user accounts, API quota, abuse mitigation, and the legal apparatus of a paid SaaS — none of which the v1 product asks for.
 - **OSS positioning.** A user can read the source, build the binary, and confirm the key never leaves their device. Hosted keys would force them to trust a server they can't audit.
 - **Future-proof.** The paid SaaS tier (when it lands) can add a hosted option as a Pro feature; the OSS app continues to work standalone with BYOK.
-- **Keychain over a 0600 JSON file.** Earlier builds used `~/Library/Application Support/NoType/settings.json` — `SecretStore.loadGeminiKey()` migrates the file's contents into Keychain on first launch of a Keychain-backed build, removes the legacy file on successful save, and falls through to the legacy path *both* on Keychain miss *and* on Keychain read throw (so a transient ACL mismatch on a re-signed dev build doesn't strand the user through onboarding again — see `NoType/Keychain/CLAUDE.md` "Legacy settings.json migration"). Keychain wins on: ACL-aware access, `AfterFirstUnlock` semantics, and surviving rebuilds quietly when the codesign designated requirement is stable (we ship a fixed DR via `signing/NoType.xcrequirements`).
+- **Keychain over a 0600 JSON file.** Earlier builds used `~/Library/Application Support/NoType/settings.json`; `SecretStore.migrateAndResolve()` (via `loadFromEnvOrFile()` / `currentKeyResolution()`) migrates the file's contents — and any pre-existing legacy-keychain item — into the data-protection keychain on first launch, removing the legacy file on a successful write. Keychain wins on: ACL-aware access, `AfterFirstUnlock` semantics, and **surviving signing-identity rotation silently** once on the data-protection keychain.
+  - **Correction (2026-05-30):** an earlier version of this note claimed the legacy file-keychain "survives rebuilds quietly when the codesign designated requirement is stable (fixed DR via `signing/NoType.xcrequirements`)". That held only for cdhash changes under the stable **Developer ID** release cert — **not** for **Apple Development** dev-cert rotation, which broke the legacy ACL and made the key vanish (`errSecAuthFailed`) or pop the login-password prompt. The data-protection keychain access group fixes this at the architecture level. See `docs/solutions/documentation-gaps/keychain-data-protection-migration-2026-05-30.md` and `NoType/Keychain/CLAUDE.md` "Why this works silently".
 
 ## When to Apply
 
@@ -52,8 +54,9 @@ The Keychain entry uses:
 enum SecretStore {
     static func saveGeminiKey(_ key: String) throws
     static func deleteGeminiKey() throws
-    static func loadFromEnvOrFile() -> String?           // env var, then loadGeminiKey()
-    // private static func loadGeminiKey() -> String?    // Keychain → legacy file → nil
+    static func currentKeyResolution() -> KeyResolution  // env, then migrateAndResolve()
+    static func loadFromEnvOrFile() -> String?           // value-only; needsReentry/absent → nil
+    // migrateAndResolve(): data-protection → legacy keychain → settings.json → tri-state
 }
 ```
 
