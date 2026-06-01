@@ -104,6 +104,20 @@ final class AppState {
     /// continue to ship to Gemini).
     @ObservationIgnored fileprivate static let dictionaryEnabledKey = "notype.dictionaryEnabled"
 
+    /// User intent for the screenshot + OCR context fallback (ADR-014).
+    /// Independent off-switch layered on top of the Screen Recording TCC
+    /// permission: when `false`, OCR never runs even if the permission is
+    /// granted. Frozen into each `RecordingSession.start(...)` and consumed
+    /// by `RecordingSession.shouldRunOCR`. The *displayed* Settings switch
+    /// position is the effective state (`permission granted && this`); see
+    /// `RecordingPane` + `AppState.screenCaptureToggleAction`.
+    var screenCaptureFallbackEnabled: Bool = UserDefaults.standard.object(forKey: AppState.screenCaptureFallbackKey) as? Bool ?? true
+
+    /// UserDefaults key for the screen-capture toggle. Read with
+    /// `object(forKey:) as? Bool` so the absent-key path defaults to `true`
+    /// — existing installs that rely on the OCR fallback keep it on.
+    @ObservationIgnored fileprivate static let screenCaptureFallbackKey = "notype.screenCaptureFallbackEnabled"
+
     /// BCP-47 language codes the user wants Gemini to bias transcription
     /// towards. Persisted under `notype.outputLanguages` as a plist
     /// `[String]`. Mirrored into `ContextSnapshot.userLanguages` at the
@@ -834,7 +848,8 @@ final class AppState {
                 instructions: instructionsContext,
                 dictionary: dictionaryContext,
                 userLanguages: userLanguagesFrozen,
-                model: geminiModel
+                model: geminiModel,
+                screenCaptureFallbackEnabled: screenCaptureFallbackEnabled
             )
         } catch {
             Self.log.error("session start failed: \(error.localizedDescription, privacy: .public)")
@@ -1525,6 +1540,15 @@ final class AppState {
         requestedOn: Bool
     ) -> ScreenCaptureToggleAction {
         permissionGranted ? .setIntent(requestedOn) : .openSettings
+    }
+
+    /// Set the screen-capture intent flag. Persists immediately to
+    /// UserDefaults so a crash mid-session doesn't reset the user's choice.
+    /// Mirrors `setDictionaryEnabled`.
+    func setScreenCaptureFallbackEnabled(_ enabled: Bool) {
+        guard screenCaptureFallbackEnabled != enabled else { return }
+        screenCaptureFallbackEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.screenCaptureFallbackKey)
     }
 
     /// Two-stage bulk delete. First call wipes every `.auto` entry; once
