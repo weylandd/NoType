@@ -385,6 +385,10 @@ final class RecordingSession {
         // value, not `self` (we're @MainActor and the task is detached
         // / non-isolated).
         let userLanguagesLocal = userLanguages
+        // Same value as the frozen field `screenCaptureFallbackFrozen`
+        // (assigned from this parameter above); aliased to a local so the
+        // detached log-tag branch captures the value, not `self`.
+        let screenCaptureFallbackLocal = screenCaptureFallbackEnabled
         // Capture `activeBundleID` once on @MainActor (already done above
         // as `frontmost?.bundleIdentifier`) and pass it into the detached
         // AX task. Guardrail against re-introducing an
@@ -440,7 +444,7 @@ final class RecordingSession {
             if !ocrEnabled {
                 if !screenRecordingGranted {
                     ocrTag = "ocr=off (no-permission)"
-                } else if !screenCaptureFallbackEnabled {
+                } else if !screenCaptureFallbackLocal {
                     ocrTag = "ocr=off (disabled-by-setting)"
                 } else {
                     ocrTag = "ocr=off (no-frontmost-app)"
