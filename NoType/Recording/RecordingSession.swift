@@ -70,6 +70,26 @@ final class RecordingSession {
             && totalBatchSamples < shortSessionMaxSamples
     }
 
+    /// Pure-function gate for the screenshot + OCR context fallback.
+    /// Extracted so `RecordingSessionOCRGateTests` can pin the contract
+    /// without standing up a full `RecordingSession`.
+    ///
+    /// OCR runs iff ALL hold:
+    ///   1. `fallbackEnabled` — the user's in-app "Use screen capture for
+    ///      context" toggle (frozen at session start). Default on.
+    ///   2. `permissionGranted` — Screen Recording TCC permission is granted.
+    ///   3. `pid > 0` — there is a frontmost app to screenshot.
+    ///
+    /// The toggle is an independent off-switch layered on top of the TCC
+    /// permission: a user can keep the permission granted but disable OCR.
+    nonisolated static func shouldRunOCR(
+        fallbackEnabled: Bool,
+        permissionGranted: Bool,
+        pid: pid_t
+    ) -> Bool {
+        fallbackEnabled && permissionGranted && pid > 0
+    }
+
     enum SessionError: Error, LocalizedError {
         case notStarted
         case noSpeech
@@ -187,6 +207,12 @@ final class RecordingSession {
     /// models / implicit-cache namespaces. Defaults to `.flashLite`
     /// until `start` overwrites it.
     private var modelFrozen: GeminiModel = .flashLite
+    /// User's "Use screen capture for context" toggle, frozen at session
+    /// start. Layered on top of the Screen Recording TCC permission inside
+    /// `shouldRunOCR` — a mid-session flip must not affect the in-flight
+    /// session (the context-frozen-at-start invariant). Defaults to `true`
+    /// until `start` overwrites it.
+    private var screenCaptureFallbackFrozen: Bool = true
     private var contextTask: Task<ContextSnapshot, Never>?
     /// Mirror of `contextTask`'s eventual value, populated on the main
     /// actor the moment the snapshot is ready. Used by the **final-chunk**
@@ -312,7 +338,8 @@ final class RecordingSession {
         instructions: InstructionsContext,
         dictionary: DictionaryContext,
         userLanguages: [String],
-        model: GeminiModel
+        model: GeminiModel,
+        screenCaptureFallbackEnabled: Bool
     ) throws {
         self.apiKey = apiKey
         self.replacementsFrozen = dictionary.replacements
@@ -320,6 +347,7 @@ final class RecordingSession {
         self.dictionaryFrozen = dictionary
         self.userLanguagesFrozen = userLanguages
         self.modelFrozen = model
+        self.screenCaptureFallbackFrozen = screenCaptureFallbackEnabled
         let frontmost = NSWorkspace.shared.frontmostApplication
         sourceApp = frontmost
         startedAt = Date()
@@ -330,11 +358,17 @@ final class RecordingSession {
         )
         let pid: pid_t = frontmost?.processIdentifier ?? 0
 
-        // OCR fallback is opt-in via Screen Recording permission. When
-        // granted, run it in parallel with the AX walk; the snapshot is
-        // built once all three subtasks settle. When not granted, the
-        // OCR limb is not spawned (returns nil immediately).
-        let ocrEnabled = (ScreenRecordingPermission.current() == .granted) && pid > 0
+        // OCR fallback is opt-in via Screen Recording permission AND the
+        // user's in-app "Use screen capture for context" toggle (frozen
+        // above). When both hold, run it in parallel with the AX walk; the
+        // snapshot is built once all three subtasks settle. When either is
+        // off, the OCR limb is not spawned (returns nil immediately).
+        let screenRecordingGranted = ScreenRecordingPermission.current() == .granted
+        let ocrEnabled = Self.shouldRunOCR(
+            fallbackEnabled: screenCaptureFallbackFrozen,
+            permissionGranted: screenRecordingGranted,
+            pid: pid
+        )
 
         // AX, insertion target, and OCR run as three independent siblings
         // under per-subtask wall-clock caps (no joint deadline). Rationale:
@@ -351,6 +385,10 @@ final class RecordingSession {
         // value, not `self` (we're @MainActor and the task is detached
         // / non-isolated).
         let userLanguagesLocal = userLanguages
+        // Same value as the frozen field `screenCaptureFallbackFrozen`
+        // (assigned from this parameter above); aliased to a local so the
+        // detached log-tag branch captures the value, not `self`.
+        let screenCaptureFallbackLocal = screenCaptureFallbackEnabled
         // Capture `activeBundleID` once on @MainActor (already done above
         // as `frontmost?.bundleIdentifier`) and pass it into the detached
         // AX task. Guardrail against re-introducing an
@@ -404,7 +442,13 @@ final class RecordingSession {
             let ms = Int(Date().timeIntervalSince(t0) * 1000)
             let ocrTag: String
             if !ocrEnabled {
-                ocrTag = "ocr=off (no-permission)"
+                if !screenRecordingGranted {
+                    ocrTag = "ocr=off (no-permission)"
+                } else if !screenCaptureFallbackLocal {
+                    ocrTag = "ocr=off (disabled-by-setting)"
+                } else {
+                    ocrTag = "ocr=off (no-frontmost-app)"
+                }
             } else if ocr == nil {
                 ocrTag = "ocr=off (capture-failed-or-timeout)"
             } else if shouldAttachOCR {

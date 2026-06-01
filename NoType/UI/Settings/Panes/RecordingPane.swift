@@ -1,15 +1,22 @@
 import AppKit
 import SwiftUI
 
-/// Recording pane of the redesigned Settings screen. Three cards:
+/// Recording pane of the redesigned Settings screen. Four cards:
 ///   1. Shortcuts — recording + cancel shortcut rows (with rebind buttons).
 ///   2. How recording works — the press/release/lock/cancel callout.
 ///   3. Input device — mic source pill + Change button, music interruption picker.
+///   4. Screen capture — the OCR-fallback toggle. Displayed position is the
+///      effective state (permission granted && intent flag); an ungranted
+///      tap routes to System Settings, never a silent flip (KTD-6 of the
+///      screen-capture toggle plan).
 ///
 /// Shortcut rebinding fires through the parent shell so the rebind
 /// sheet has one owner per Settings tab.
 struct RecordingPane: View {
     @Environment(AppState.self) private var appState
+    /// Drives the Screen-capture card's effective switch position +
+    /// the grant-redirect copy. Same source `AboutPane` reads.
+    @Environment(PermissionsViewModel.self) private var permissions
 
     let onChangeRecordingShortcut: () -> Void
     let onChangeCancelShortcut: () -> Void
@@ -19,6 +26,7 @@ struct RecordingPane: View {
             shortcutsCard
             howItWorksCard
             inputDeviceCard
+            screenCaptureCard
         }
     }
 
@@ -152,6 +160,54 @@ struct RecordingPane: View {
             return "System default — \(def.name)"
         }
         return "System default"
+    }
+
+    // MARK: - Screen capture
+
+    /// OCR / screen-capture context fallback toggle. The displayed switch
+    /// position is the *effective* state (`permission granted && intent`);
+    /// the stored flag is the user's intent. When permission is missing the
+    /// switch shows off and tapping it routes to System Settings — never a
+    /// silent flip. See `AppState.screenCaptureToggleAction` (KTD-6).
+    private var screenCaptureCard: some View {
+        let granted = permissions.screenRecording == .granted
+        let effectiveOn = granted && appState.screenCaptureFallbackEnabled
+        let binding = Binding<Bool>(
+            get: { effectiveOn },
+            set: { newValue in
+                switch AppState.screenCaptureToggleAction(
+                    permissionGranted: granted,
+                    requestedOn: newValue
+                ) {
+                case .setIntent(let value):
+                    appState.setScreenCaptureFallbackEnabled(value)
+                case .openSettings:
+                    appState.setScreenCaptureFallbackEnabled(true)
+                    ScreenRecordingPermission.openSystemSettings()
+                }
+            }
+        )
+        return DSCard(title: "Screen capture") {
+            DSCardRow(
+                title: "Use screen capture for context",
+                subtitle: AttributedString(screenCaptureSubtitle(granted: granted))
+            ) {
+                Toggle("", isOn: binding)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .tint(DS.Color.accent)
+            }
+        }
+    }
+
+    /// Subtitle copy for the Screen-capture row. When permission is
+    /// ungranted, append the redirect hint so the grant-on-tap isn't a
+    /// surprise.
+    private func screenCaptureSubtitle(granted: Bool) -> String {
+        let base = "Fires only when accessibility returns no content for the active app — primarily Electron and web-views."
+        guard !granted else { return base }
+        return base + " Requires Screen Recording — turning this on opens System Settings."
     }
 }
 

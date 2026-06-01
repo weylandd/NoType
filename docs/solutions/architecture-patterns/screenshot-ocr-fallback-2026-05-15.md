@@ -31,13 +31,13 @@ These are exactly the apps users dictate into most. Without a fallback, transcri
 
 Pipeline (`NoType/Context/ScreenCapture/`):
 
-1. **Permission gate** — `ScreenRecordingPermission.current()` must be `.granted`. If not, skip the entire limb.
+1. **Gate** — OCR runs only when **both** the Screen Recording TCC permission is `.granted` **and** the user's "Use screen capture for context" toggle is on (Settings → Recording; default on). Pure gate: `RecordingSession.shouldRunOCR(fallbackEnabled:permissionGranted:pid:)`. If either is off (or there's no frontmost app), skip the entire limb.
 2. **Capture** — `ScreenCaptureKit` (`SCScreenshotManager.captureImage` against the focused window for the session's `pid`).
 3. **OCR** — `Vision` (`VNRecognizeTextRequest`, `.accurate`, auto-language).
 4. **Scrub** — every recognised line through `SecureFieldMasker.scrubContent` (cards, bearer tokens, JWTs, GitHub / OpenAI / Google / Slack / Stripe / AWS keys, PEM blocks, URL creds, 40-char opaque tokens).
 5. **Embed** — appended **inside** the existing `On-screen context:` Gemini prompt part as a `--- Screen text (OCR — active window) ---` sub-block. **Not** a new top-level prompt part.
 
-The feature is **opt-in via the Screen Recording TCC permission** with **no separate Settings toggle in v1**.
+The feature is **opt-in via the Screen Recording TCC permission**, with an in-app **"Use screen capture for context"** toggle (Settings → Recording, default on) layered on top — so a user can disable OCR without revoking the system permission. Shipped in [PR #71](https://github.com/weylandd/NoType/pull/71); rationale + switch model in `solutions/documentation-gaps/screen-capture-settings-section-2026-05-15.md`.
 
 ## Why This Matters
 
@@ -77,6 +77,7 @@ The feature is **opt-in via the Screen Recording TCC permission** with **no sepa
 ## Related
 
 - `NoType/Context/CLAUDE.md` "Screen capture fallback (optional)" — implementation detail.
+- `solutions/documentation-gaps/screen-capture-settings-section-2026-05-15.md` — the in-app off-switch toggle (PR #71) layered on the TCC gate.
 - `docs/decisions.md` ADR-014 — legacy index entry, redirects here.
 - `solutions/design-patterns/full-screen-ax-tree-2026-05-15.md` — the AX walk this fallback complements.
 - `solutions/conventions/no-telemetry-with-statsstore-carveout-2026-05-15.md` — the no-telemetry stance that this softens to "by default".
