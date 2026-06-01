@@ -140,4 +140,15 @@ final class KeychainStoreTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Access-group / entitlement consistency
+
+    func test_accessGroup_matchesEntitlementLiteral() {
+        // The hardcoded access group MUST equal the keychain-access-groups
+        // entitlement literal in NoType/NoType.entitlements verbatim. A
+        // one-sided edit is silent at build time and breaks every
+        // data-protection read at runtime with errSecMissingEntitlement —
+        // pin the literal so the drift fails here instead.
+        XCTAssertEqual(KeychainStore.accessGroup, "49T6U8DQXZ.app.notype")
+    }
 }

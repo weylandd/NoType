@@ -12,6 +12,15 @@ final class SecretStoreTests: XCTestCase {
     private let service = "app.notype.tests.secretstore"
     private let account = "default"
 
+    override func setUp() {
+        super.setUp()
+        // Reset the deliberate-delete tombstone so the migration tests that
+        // rely on the default `cleared` parameter aren't affected by ambient
+        // UserDefaults state. The tombstone tests below pass `cleared:`
+        // explicitly and don't depend on this.
+        SecretStore.deliberatelyCleared = false
+    }
+
     /// A throwaway settings.json URL. When `geminiKey` is non-nil the file is
     /// written with that key; otherwise the path simply doesn't exist.
     private func tempSettingsURL(geminiKey: String?) throws -> URL {
@@ -124,5 +133,77 @@ final class SecretStoreTests: XCTestCase {
             FileManager.default.fileExists(atPath: url.path),
             "settings.json must remain for next-launch retry when the migration write fails"
         )
+    }
+
+    // MARK: - Deliberate-delete tombstone (no resurrection / no re-prompt)
+
+    func test_resolve_clearedTombstone_dpEmpty_legacyHasKey_returnsAbsent() throws {
+        // Migrated user deleted their key: dp empty, legacy orphan still
+        // readable, tombstone set. Must NOT resurrect from legacy.
+        let result = SecretStore.migrateAndResolve(
+            service: service, account: account,
+            legacyFileURL: try tempSettingsURL(geminiKey: "file-key"),
+            cleared: true,
+            dpRead: { _, _ in nil },
+            dpWrite: { _, _, _ in XCTFail("must not migrate after a deliberate delete") },
+            legacyKeychainRead: { _, _ in "legacy-orphan" }
+        )
+        XCTAssertEqual(result, .absent)
+    }
+
+    func test_resolve_clearedTombstone_legacyThrows_returnsAbsent_notNeedsReentry() throws {
+        // Stranded user who re-pasted then deleted: an unreadable legacy item
+        // remains, tombstone set. Must return .absent, NOT re-prompt.
+        let result = SecretStore.migrateAndResolve(
+            service: service, account: account,
+            legacyFileURL: try tempSettingsURL(geminiKey: nil),
+            cleared: true,
+            dpRead: { _, _ in nil },
+            dpWrite: { _, _, _ in XCTFail("must not migrate after a deliberate delete") },
+            legacyKeychainRead: { _, _ in throw KeychainStore.KeychainError.status(errSecAuthFailed) }
+        )
+        XCTAssertEqual(result, .absent)
+    }
+
+    func test_resolve_clearedTombstone_dpPresent_stillReturnsPresent() throws {
+        // Defensive: a present data-protection key wins over the tombstone
+        // (the tombstone is consulted only after dp comes back empty).
+        let result = SecretStore.migrateAndResolve(
+            service: service, account: account,
+            legacyFileURL: try tempSettingsURL(geminiKey: nil),
+            cleared: true,
+            dpRead: { _, _ in "dp-key" },
+            dpWrite: { _, _, _ in },
+            legacyKeychainRead: { _, _ in XCTFail("dp present — legacy must not be read"); return nil }
+        )
+        XCTAssertEqual(result, .present("dp-key"))
+    }
+
+    // MARK: - Transient data-protection read failure falls through to legacy
+
+    func test_resolve_dpReadThrows_legacyHasKey_migratesAndReturnsPresent() throws {
+        var written = 0
+        let result = SecretStore.migrateAndResolve(
+            service: service, account: account,
+            legacyFileURL: try tempSettingsURL(geminiKey: nil),
+            cleared: false,
+            dpRead: { _, _ in throw KeychainStore.KeychainError.status(errSecIO) },
+            dpWrite: { _, _, _ in written += 1 },
+            legacyKeychainRead: { _, _ in "legacy-key" }
+        )
+        XCTAssertEqual(result, .present("legacy-key"))
+        XCTAssertEqual(written, 1)
+    }
+
+    func test_resolve_dpReadThrows_legacyThrows_returnsNeedsReentry() throws {
+        let result = SecretStore.migrateAndResolve(
+            service: service, account: account,
+            legacyFileURL: try tempSettingsURL(geminiKey: nil),
+            cleared: false,
+            dpRead: { _, _ in throw KeychainStore.KeychainError.status(errSecIO) },
+            dpWrite: { _, _, _ in XCTFail("nothing to migrate") },
+            legacyKeychainRead: { _, _ in throw KeychainStore.KeychainError.status(errSecAuthFailed) }
+        )
+        XCTAssertEqual(result, .needsReentry)
     }
 }

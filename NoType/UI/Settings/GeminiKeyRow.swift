@@ -102,33 +102,6 @@ private struct MaskedKeyPill: View {
     }
 }
 
-/// Calm explanatory note shown when the stored key can't be read after a
-/// signing change (`AppState.apiKeyNeedsReentry` →
-/// `SecretStore.KeyResolution.needsReentry`). Reused in Settings and
-/// onboarding. Deliberately neutral (info glyph, not a red error) — this is
-/// expected one-time maintenance, not a failure.
-struct ReenterKeyNote: View {
-    var body: some View {
-        HStack(alignment: .top, spacing: DS.Space.s2) {
-            Image(systemName: "key.fill")
-                .font(.system(size: 11))
-                .foregroundStyle(DS.Color.textTertiary)
-            Text("Your saved key couldn't be read after an app or macOS update. Paste it once below to re-save it securely — this won't happen again.")
-                .font(DS.Font.bodySM())
-                .foregroundStyle(DS.Color.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(DS.Space.s3)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(DS.Color.bgInset, in: RoundedRectangle(cornerRadius: DS.Radius.sm))
-        .overlay(
-            RoundedRectangle(cornerRadius: DS.Radius.sm)
-                .strokeBorder(DS.Color.borderSubtle, lineWidth: DS.Border.hairline)
-        )
-        .accessibilityElement(children: .combine)
-    }
-}
-
 extension GeminiKeyRow {
     /// Translate a thrown error from the validate / save path into
     /// the inline label shown inside the Edit sheet. Case-mapped

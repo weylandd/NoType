@@ -28,6 +28,22 @@ import OSLog
 enum SecretStore {
     private static let log = Logger(subsystem: "app.notype", category: "secret")
     private static let envVar = "NOTYPE_GEMINI_KEY"
+    private static let clearedKey = "notype.keychain.cleared"
+
+    /// Tombstone for a deliberate delete. Set by `deleteGeminiKey`, cleared by
+    /// `saveGeminiKey`. While set, `migrateAndResolve` returns `.absent`
+    /// instead of resurrecting / re-prompting from a legacy source — a
+    /// deliberate delete must NOT be undone by the migration re-reading an
+    /// orphaned (still-readable) or unreadable legacy keychain item. Without
+    /// this, a user who migrated from the legacy keychain and then deleted
+    /// their key would have it silently re-migrated on the next launch.
+    /// Persisted (survives relaunch) and intentionally NOT cleared by an
+    /// onboarding reset — the key itself survives a wizard reset, so its
+    /// tombstone must too.
+    static var deliberatelyCleared: Bool {
+        get { UserDefaults.standard.bool(forKey: clearedKey) }
+        set { UserDefaults.standard.set(newValue, forKey: clearedKey) }
+    }
 
     enum SecretError: Error, LocalizedError {
         case write(Error)
@@ -66,8 +82,10 @@ enum SecretStore {
         // delete query can also match the data-protection item we just wrote
         // (asymmetric macOS semantics, pinned by KeychainStoreTests) and would
         // nuke it. The orphaned legacy item is harmless: resolution always
-        // reads data-protection first.
+        // reads data-protection first, and the tombstone (below) blocks
+        // resurrection after a delete.
         legacyFile.removeIfPresent()
+        deliberatelyCleared = false
     }
 
     static func deleteGeminiKey() throws {
@@ -77,6 +95,9 @@ enum SecretStore {
             throw SecretError.write(error)
         }
         legacyFile.removeIfPresent()
+        // Tombstone the delete so the migration can't resurrect the key from
+        // an orphaned (or unreadable) legacy item on the next resolution.
+        deliberatelyCleared = true
     }
 
     /// Env var wins (dev-only, never persisted), otherwise the
@@ -109,14 +130,17 @@ enum SecretStore {
     /// successful migration: an unscoped legacy delete query can also match
     /// the freshly written data-protection item and remove it. The orphaned
     /// legacy item is invisible to all later reads (data-protection is checked
-    /// first), so leaving it is both safe and correct.
+    /// first) and the `cleared` tombstone blocks resurrection after a delete,
+    /// so leaving it is both safe and correct.
     static func migrateAndResolve(
         service: String = KeychainStore.defaultService,
         account: String = KeychainStore.defaultAccount,
         legacyFileURL: URL = legacyFile.url,
+        cleared: Bool = deliberatelyCleared,
         dpRead: (String, String) throws -> String? = {
             try KeychainStore.load(service: $0, account: $1, store: .dataProtection)
         },
+        // (service, account, value)
         dpWrite: (String, String, String) throws -> Void = {
             try KeychainStore.save($2, service: $0, account: $1, store: .dataProtection)
         },
@@ -134,6 +158,11 @@ enum SecretStore {
             // point), but don't strand on a transient hiccup — fall through.
             log.error("data-protection read failed: \(error.localizedDescription, privacy: .public)")
         }
+
+        // 1b. Deliberate-delete tombstone. The user explicitly cleared their
+        // key and the data-protection store is empty — do NOT resurrect it
+        // from, or re-prompt because of, an orphaned/unreadable legacy item.
+        if cleared { return .absent }
 
         // 2. Legacy file-keychain — pre-migration item.
         var strandedLegacy = false

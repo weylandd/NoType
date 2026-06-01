@@ -52,6 +52,8 @@ Two different mechanisms, and the difference is the whole point of the data-prot
 
 A migration write that fails returns the value anyway (no lock-out) and leaves the source for next-launch retry. `saveGeminiKey` / `deleteGeminiKey` also remove the legacy `settings.json` file if present.
 
+**Deliberate-delete tombstone.** `deleteGeminiKey` sets a `notype.keychain.cleared` UserDefaults flag (cleared by `saveGeminiKey`). When set, `migrateAndResolve` returns `.absent` immediately after an empty data-protection read — *before* consulting the legacy keychain or `settings.json`. Without it, a user who migrated from the legacy keychain and then deleted their key would have it silently **resurrected** (the orphaned legacy item, which we deliberately never delete per the asymmetry hard rule, gets re-migrated), or — for a stranded user who re-pasted then deleted — be **re-prompted** by the unreadable legacy item. The flag is persisted (survives relaunch) and intentionally **not** cleared by an onboarding reset, mirroring the key itself surviving a wizard reset. Pinned by `SecretStoreTests` (`…clearedTombstone…` cases).
+
 **Stranded users.** Anyone whose legacy keychain read already throws `errSecAuthFailed` (the bug, pre-fix) can't be recovered programmatically — the value is unreadable. They re-paste once via the calm `AppState.apiKeyNeedsReentry` surface (Settings → API key / onboarding's `ReenterKeyNote`); the key then lands in the data-protection store and is stable thereafter.
 
 ## Testing
