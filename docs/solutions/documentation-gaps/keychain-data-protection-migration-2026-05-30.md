@@ -47,7 +47,7 @@ is **read authorization**, not the data:
 
 1. `SecItemCopyMatching` → `errSecAuthFailed` (current build's signature no
    longer satisfies the item's ACL).
-2. `KeychainStore.load()` throws → `SecretStore.loadGeminiKey()` falls
+2. `KeychainStore.load()` throws → `SecretStore`'s key-load chain falls
    through to the legacy `settings.json`.
 3. That file was deleted after the original one-shot migration → returns
    `nil` → the app renders an empty key field as if the user never set one.
@@ -125,11 +125,14 @@ Concrete work:
    preserves the "no re-entry after FileVault auto-login" behaviour from
    invariant 2).
 3. **Migration (chained, one-shot).** On first launch of a data-protection
-   build, `SecretStore.loadGeminiKey()` resolves in order:
+   build, `SecretStore.migrateAndResolve()` resolves in order:
    1. Data-protection item present → use it (steady state).
    2. Else best-effort read the **legacy file-keychain** item (omit the
-      flag). If it returns a value → write into the data-protection store,
-      then delete the legacy item. *Most* users migrate transparently here.
+      flag). If it returns a value → write into the data-protection store
+      and return it. *Most* users migrate transparently here. (As shipped,
+      the legacy keychain item is **not** deleted — an asymmetric-isolation
+      hazard, see the status block — and a delete tombstone prevents
+      resurrection.)
    3. Else the existing `settings.json` legacy-file path (kept as the
       third source).
    4. Else `nil`.
@@ -226,8 +229,8 @@ let query: [String: Any] = [
 
 - `NoType/Keychain/KeychainStore.swift` — the three `SecItem*` queries to
   migrate; current `load()` throws `errSecAuthFailed` on cert mismatch.
-- `NoType/Keychain/SecretStore.swift` — `loadGeminiKey()` fall-through
-  chain; add the data-protection source ahead of the legacy file.
+- `NoType/Keychain/SecretStore.swift` — `migrateAndResolve()` fall-through
+  chain (+ `currentKeyResolution()` env wrapper, `deliberatelyCleared` tombstone).
 - `NoType/Keychain/CLAUDE.md` — "Why this works silently" + invariant 1/2;
   needs the "Developer ID only; dev-cert rotation breaks legacy ACL" caveat
   now, and a rewrite to the access-group model once this ships.
