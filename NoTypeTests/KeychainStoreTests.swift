@@ -12,6 +12,16 @@ import Security
 /// can't exercise notarization. See
 /// `docs/plans/2026-05-30-001-fix-keychain-data-protection-migration-plan.md`.
 ///
+/// **Environment gate.** The data-protection access group only works when the
+/// test host is signed with the entitlement AND that entitlement is honoured
+/// (a dev machine with the "Keychain Sharing" capability set up, or a signed
+/// release). On a CI runner whose Debug build is ad-hoc / unentitled, the
+/// access group is unavailable and `SecItem*` returns `errSecMissingEntitlement`.
+/// Every test that touches the real keychain calls
+/// `skipIfDataProtectionUnavailable()` first and `XCTSkip`s there — same
+/// pattern as `PromptEvalTests` skipping without an API key. The real
+/// verification of the entitlement is the notarized build (U1 step 3), not CI.
+///
 /// Each test uses a UUID-suffixed service so it never touches the production
 /// item (`app.notype.gemini`) and parallel runs don't collide. The access
 /// group is fixed by entitlement, so only the service varies for isolation.
@@ -22,9 +32,28 @@ final class KeychainStoreTests: XCTestCase {
         "app.notype.tests.keychainstore.\(UUID().uuidString)"
     }
 
+    /// Skip when the data-protection keychain access group isn't usable in
+    /// this environment (e.g. an unentitled CI Debug build). Probes with a
+    /// throwaway save+delete; any thrown `OSStatus` (typically
+    /// `errSecMissingEntitlement`) means the access group is unavailable.
+    private func skipIfDataProtectionUnavailable() throws {
+        let probe = "app.notype.tests.keychainstore.probe.\(UUID().uuidString)"
+        do {
+            try KeychainStore.save("probe", service: probe, account: account)
+            try KeychainStore.delete(service: probe, account: account)
+        } catch {
+            throw XCTSkip(
+                "data-protection keychain access group unavailable (\(error.localizedDescription)); "
+                + "needs the keychain-access-groups entitlement + Keychain Sharing capability — "
+                + "see the U1 signing spike. Verified on a signed build."
+            )
+        }
+    }
+
     // MARK: - Data-protection round trip
 
     func test_dataProtection_roundTrip() throws {
+        try skipIfDataProtectionUnavailable()
         let service = uniqueService()
         defer { try? KeychainStore.delete(service: service, account: account) }
 
@@ -34,6 +63,7 @@ final class KeychainStoreTests: XCTestCase {
     }
 
     func test_dataProtection_deleteThenLoadReturnsNil() throws {
+        try skipIfDataProtectionUnavailable()
         let service = uniqueService()
         try KeychainStore.save("value", service: service, account: account)
         try KeychainStore.delete(service: service, account: account)
@@ -42,6 +72,7 @@ final class KeychainStoreTests: XCTestCase {
     }
 
     func test_dataProtection_upsertReturnsSecondValue() throws {
+        try skipIfDataProtectionUnavailable()
         let service = uniqueService()
         defer { try? KeychainStore.delete(service: service, account: account) }
 
@@ -51,13 +82,15 @@ final class KeychainStoreTests: XCTestCase {
         XCTAssertEqual(loaded, "second")
     }
 
-    func test_dataProtection_idempotentDeleteOnMissing() {
+    func test_dataProtection_idempotentDeleteOnMissing() throws {
+        try skipIfDataProtectionUnavailable()
         let service = uniqueService()
         // No item was ever written — delete must be a no-op, not a throw.
         XCTAssertNoThrow(try KeychainStore.delete(service: service, account: account))
     }
 
     func test_load_missingItemReturnsNil() throws {
+        try skipIfDataProtectionUnavailable()
         let service = uniqueService()
         XCTAssertNil(try KeychainStore.load(service: service, account: account))
     }
@@ -65,6 +98,7 @@ final class KeychainStoreTests: XCTestCase {
     // MARK: - Store isolation (proves the migration reads the right backend)
 
     func test_storeIsolation_legacyItemInvisibleToDataProtection() throws {
+        try skipIfDataProtectionUnavailable()
         let service = uniqueService()
         defer { try? KeychainStore.delete(service: service, account: account, store: .legacyFile) }
 
@@ -84,7 +118,7 @@ final class KeychainStoreTests: XCTestCase {
     /// macOS keychain isolation is **asymmetric**, and the migration relies on
     /// only one direction (the one `test_storeIsolation_legacyItemInvisibleToDataProtection`
     /// pins): a scoped `.dataProtection` read never surfaces a legacy item, so
-    /// the production read path can't accidentally pick up a stale legacy key.
+    /// the production read path can't accidentally pick up a stale legacy item.
     ///
     /// The reverse does NOT hold and we pin the real behavior here so nobody
     /// assumes bidirectional isolation: an unscoped `.legacyFile` query (no
@@ -96,6 +130,7 @@ final class KeychainStoreTests: XCTestCase {
     /// to `.dataProtection` and resolve it first, so the legacy path is never
     /// reached when a data-protection item exists.
     func test_storeIsolation_legacyQuerySurfacesDataProtectionItem_documentedMacOSBehavior() throws {
+        try skipIfDataProtectionUnavailable()
         let service = uniqueService()
         defer { try? KeychainStore.delete(service: service, account: account, store: .dataProtection) }
 
@@ -116,6 +151,7 @@ final class KeychainStoreTests: XCTestCase {
     // MARK: - Malformed item
 
     func test_load_malformedItem_throws() throws {
+        try skipIfDataProtectionUnavailable()
         let service = uniqueService()
         defer { try? KeychainStore.delete(service: service, account: account, store: .dataProtection) }
 
@@ -148,7 +184,8 @@ final class KeychainStoreTests: XCTestCase {
         // entitlement literal in NoType/NoType.entitlements verbatim. A
         // one-sided edit is silent at build time and breaks every
         // data-protection read at runtime with errSecMissingEntitlement —
-        // pin the literal so the drift fails here instead.
+        // pin the literal so the drift fails here instead. (No keychain
+        // access — runs everywhere, including unentitled CI.)
         XCTAssertEqual(KeychainStore.accessGroup, "49T6U8DQXZ.app.notype")
     }
 }
