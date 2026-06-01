@@ -25,21 +25,29 @@ struct GeminiKeyRow: View {
 
     var body: some View {
         let key = appState.currentAPIKey ?? ""
-        DSCardRow(
-            title: "API key",
-            subtitle: Self.subtitle,
-            hideTopBorder: true
-        ) {
-            HStack(spacing: DS.Space.s3) {
-                MaskedKeyPill(value: Self.maskedDisplay(for: key))
-                DSSecondaryButton(
-                    label: "Edit",
-                    leadingSystemSymbol: "pencil"
-                ) {
-                    showingEditSheet = true
+        VStack(alignment: .leading, spacing: DS.Space.s2) {
+            if appState.apiKeyNeedsReentry {
+                ReenterKeyNote()
+            }
+            DSCardRow(
+                title: "API key",
+                subtitle: Self.subtitle,
+                hideTopBorder: true
+            ) {
+                HStack(spacing: DS.Space.s3) {
+                    MaskedKeyPill(value: Self.maskedDisplay(for: key))
+                    DSSecondaryButton(
+                        label: "Edit",
+                        leadingSystemSymbol: "pencil"
+                    ) {
+                        showingEditSheet = true
+                    }
                 }
             }
         }
+        // Resolve the tri-state post-render (never during a body read) so the
+        // observable write can't land mid-update. See AppState.refreshAPIKeyState.
+        .task { appState.refreshAPIKeyState() }
         .sheet(isPresented: $showingEditSheet) {
             EditAPIKeySheet(isPresented: $showingEditSheet)
                 .environment(appState)

@@ -24,7 +24,10 @@ resolves the key from two sources, **in priority order**:
 
 1. `NOTYPE_GEMINI_KEY` environment variable (CI, one-off override).
 2. macOS Keychain entry: service `app.notype.tests.gemini`,
-   account `default`.
+   account `default` — read from the **legacy file keychain**
+   (`KeychainStore.load(..., store: .legacyFile)`), which is where the
+   `security … -A` recipe below lands it. The production key's migration to
+   the data-protection keychain does not affect this eval-key path.
 
 If neither is set, every test in `PromptEvalTests` `XCTSkip`s with
 the setup instructions printed inline.

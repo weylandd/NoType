@@ -215,6 +215,14 @@ final class AppState {
     @ObservationIgnored private var cachedAPIKey: String?
     @ObservationIgnored private var apiKeyLoaded = false
 
+    /// `true` when a key exists in legacy storage but can't be read — the
+    /// `errSecAuthFailed` cert-rotation bug surfaced as
+    /// `SecretStore.KeyResolution.needsReentry`. Drives the calm "paste your
+    /// key once" surface in Settings / onboarding instead of treating the
+    /// user as brand-new. Observed (not `@ObservationIgnored`) so the
+    /// key-entry views react; refreshed via `refreshAPIKeyState()`.
+    private(set) var apiKeyNeedsReentry = false
+
     /// "Prevent sleep while recording" toggle from the Settings → General
     /// section. Default `false` — most sessions are short enough that
     /// the system never reaches its idle-sleep threshold. UserDefaults-
@@ -564,7 +572,34 @@ final class AppState {
             try SecretStore.saveGeminiKey(trimmed)
             cachedAPIKey = trimmed
         }
+        // Either branch resolves the stranded state: save → present,
+        // delete → absent. No longer "needs re-entry" either way.
+        apiKeyNeedsReentry = false
         apiKeyLoaded = true
+    }
+
+    /// Resolves the stored key into the UI tri-state and refreshes the cache
+    /// + `apiKeyNeedsReentry`. Call from a view's `.task` (post-render), never
+    /// from a `body` read, so the observable write never lands during a view
+    /// update. Idempotent.
+    func refreshAPIKeyState() {
+        let state = Self.keyUIState(for: SecretStore.currentKeyResolution())
+        cachedAPIKey = state.key
+        apiKeyNeedsReentry = state.needsReentry
+        apiKeyLoaded = true
+    }
+
+    /// Pure mapping from a `SecretStore.KeyResolution` to the UI's
+    /// `(key, needsReentry)` pair. `nonisolated static` so it's unit-testable
+    /// without constructing `AppState`.
+    nonisolated static func keyUIState(
+        for resolution: SecretStore.KeyResolution
+    ) -> (key: String?, needsReentry: Bool) {
+        switch resolution {
+        case .present(let value): return (value, false)
+        case .needsReentry:       return (nil, true)
+        case .absent:             return (nil, false)
+        }
     }
 
     // MARK: - Hotkey
