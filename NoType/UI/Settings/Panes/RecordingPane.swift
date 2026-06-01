@@ -1,10 +1,14 @@
 import AppKit
 import SwiftUI
 
-/// Recording pane of the redesigned Settings screen. Three cards:
+/// Recording pane of the redesigned Settings screen. Four cards:
 ///   1. Shortcuts — recording + cancel shortcut rows (with rebind buttons).
 ///   2. How recording works — the press/release/lock/cancel callout.
 ///   3. Input device — mic source pill + Change button, music interruption picker.
+///   4. Screen capture — the OCR-fallback toggle. Displayed position is the
+///      effective state (permission granted && intent flag); an ungranted
+///      tap routes to System Settings, never a silent flip (KTD-6 of the
+///      screen-capture toggle plan).
 ///
 /// Shortcut rebinding fires through the parent shell so the rebind
 /// sheet has one owner per Settings tab.
