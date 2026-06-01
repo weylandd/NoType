@@ -1503,6 +1503,30 @@ final class AppState {
         UserDefaults.standard.set(enabled, forKey: Self.dictionaryEnabledKey)
     }
 
+    /// What a tap on the Screen-capture toggle should do, given the current
+    /// Screen Recording permission state. The stored flag is the user's
+    /// *intent* ("I want OCR when it's available"); the toggle's displayed
+    /// position is the *effective* state (`granted && intent`). See the
+    /// screen-capture toggle plan, KTD-6.
+    enum ScreenCaptureToggleAction: Equatable {
+        /// Permission is granted — store the requested intent value.
+        case setIntent(Bool)
+        /// Permission is missing — don't flip; the caller redirects to
+        /// System Settings (and sets intent `true`, so the switch springs
+        /// on once `PermissionsViewModel` polling sees the grant).
+        case openSettings
+    }
+
+    /// Pure decision for `ScreenCaptureToggleAction`. Extracted as a
+    /// `nonisolated static` so `ScreenCaptureToggleActionTests` can pin the
+    /// "ungranted never silently flips" rule without standing up `AppState`.
+    nonisolated static func screenCaptureToggleAction(
+        permissionGranted: Bool,
+        requestedOn: Bool
+    ) -> ScreenCaptureToggleAction {
+        permissionGranted ? .setIntent(requestedOn) : .openSettings
+    }
+
     /// Two-stage bulk delete. First call wipes every `.auto` entry; once
     /// only `.user` entries remain, a second call wipes those. The UI's
     /// "Clear all" button selects the source based on what's still

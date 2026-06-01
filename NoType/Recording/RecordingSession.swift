@@ -70,6 +70,26 @@ final class RecordingSession {
             && totalBatchSamples < shortSessionMaxSamples
     }
 
+    /// Pure-function gate for the screenshot + OCR context fallback.
+    /// Extracted so `RecordingSessionOCRGateTests` can pin the contract
+    /// without standing up a full `RecordingSession`.
+    ///
+    /// OCR runs iff ALL hold:
+    ///   1. `fallbackEnabled` — the user's in-app "Use screen capture for
+    ///      context" toggle (frozen at session start). Default on.
+    ///   2. `permissionGranted` — Screen Recording TCC permission is granted.
+    ///   3. `pid > 0` — there is a frontmost app to screenshot.
+    ///
+    /// The toggle is an independent off-switch layered on top of the TCC
+    /// permission: a user can keep the permission granted but disable OCR.
+    nonisolated static func shouldRunOCR(
+        fallbackEnabled: Bool,
+        permissionGranted: Bool,
+        pid: pid_t
+    ) -> Bool {
+        fallbackEnabled && permissionGranted && pid > 0
+    }
+
     enum SessionError: Error, LocalizedError {
         case notStarted
         case noSpeech
