@@ -65,6 +65,7 @@ The decision logic is pinned by `RecordingSessionOCRGateTests` (gate) + `ScreenC
 
 ## Related
 
+- Closed in [PR #71](https://github.com/weylandd/NoType/pull/71).
 - `docs/plans/2026-06-01-001-feat-screen-capture-toggle-plan.md` — the closing plan (U1–U4), incl. KTD-6 (intent vs displayed position).
 - `NoType/UI/CLAUDE.md` "Settings file list" — the Recording-pane card.
 - `solutions/architecture-patterns/screenshot-ocr-fallback-2026-05-15.md` — the feature the toggle gates.
