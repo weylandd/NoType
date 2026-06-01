@@ -75,9 +75,20 @@ echo "▶ Archiving (${CONFIG})"
 #    "Mac Development" cert) to sign intermediate artefacts like
 #    Sparkle.framework — and fails on the runner.
 #  - Manual signing + Developer ID Application + Hardened Runtime is the
-#    standard recipe for non-App-Store macOS apps. Developer ID
-#    distribution does NOT require a provisioning profile, so we don't
-#    need to pin one here.
+#    standard recipe for non-App-Store macOS apps.
+#  - `PROVISIONING_PROFILE_SPECIFIER=""` is load-bearing since the
+#    data-protection keychain migration (#70) added the
+#    `keychain-access-groups` entitlement. The moment Xcode's build
+#    system sees that entitlement it defaults to "this target requires a
+#    provisioning profile" and `archive` fails with
+#    `"NoType" requires a provisioning profile` — even under Manual
+#    signing. For a NON-sandboxed macOS app on Developer ID the entitlement
+#    needs NO profile at runtime: the access group is prefixed with the
+#    literal Team ID (`49T6U8DQXZ.app.notype`, see NoType.entitlements),
+#    which the Developer ID signature authorizes directly. So we explicitly
+#    clear the specifier to tell xcodebuild "there is no profile, sign with
+#    the cert + entitlements as-is". (iOS would need a real profile here;
+#    macOS Developer ID does not.)
 xcodebuild -project "${PROJECT}" \
            -scheme "${SCHEME}" \
            -configuration "${CONFIG}" \
@@ -85,6 +96,7 @@ xcodebuild -project "${PROJECT}" \
            -destination "generic/platform=macOS" \
            CODE_SIGN_STYLE=Manual \
            CODE_SIGN_IDENTITY="${SIGN_IDENTITY}" \
+           PROVISIONING_PROFILE_SPECIFIER="" \
            DEVELOPMENT_TEAM="49T6U8DQXZ" \
            -quiet \
            archive
