@@ -12,6 +12,29 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
 
 ---
 
+## [0.1.11] — 2026-06-01
+
+### Added
+- **Screen-capture context toggle** (#71). Settings → Recording now has a
+  "Use screen capture for context" switch that turns the OCR/screenshot
+  fallback off independently of the Screen Recording permission — so you
+  can keep the permission granted but stop NoType from screenshotting.
+  Default on; when the permission isn't granted the switch routes you to
+  System Settings.
+
+### Fixed
+- **Gemini API key no longer "disappears"** (#70). The key now lives in
+  the data-protection keychain, scoped by an access group instead of the
+  rotating code-signing identity. Reading it survives re-signing and dev
+  certificate rotation and never pops the login-password prompt. Existing
+  keys migrate automatically on first launch; anyone already stranded by
+  the old bug gets a calm one-time "re-enter your key" note.
+
+### Changed
+- **New app icon** (#69).
+
+---
+
 ## [0.1.10] — 2026-05-29
 
 ### Added
