@@ -183,13 +183,18 @@ final class TextReplacementEngineTests: XCTestCase {
     }
 
     func test_punctuationFrom_doesNotOverMatch_dottedInsideToken() {
-        // Regression: `e.g.` must NOT fire inside `beg.example` — the
-        // look-around anchors at real boundaries only.
+        // Regression: `e.g.` must NOT fire when it appears glued inside a
+        // larger token. `code.g.example` literally contains the substring
+        // `e.g.` (…cod[e.g.]example…) with a letter on BOTH sides, so the
+        // look-behind (`d` before `e`) AND the look-ahead (`e` after the
+        // trailing dot) each block the match. The old fixture `beg.example`
+        // was vacuous — it has a single dot and never contains `e.g.` at
+        // all, so it passed regardless of the boundary regex.
         let out = TextReplacementEngine.apply(
-            "beg.example works",
+            "code.g.example works",
             replacements: [pair("e.g.", "for example")]
         )
-        XCTAssertEqual(out, "beg.example works")
+        XCTAssertEqual(out, "code.g.example works")
     }
 
     func test_punctuationFrom_wordCharBoundedPairStillReplaces() {

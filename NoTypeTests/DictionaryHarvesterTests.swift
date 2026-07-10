@@ -761,6 +761,22 @@ final class DictionaryHarvesterTests: XCTestCase {
             "clean term still captured; got \(words)")
     }
 
+    func test_harvest_chromeHead_strictShapeHead_survivesAtSentenceStart() {
+        // Guard exemption: a sentence-start head that passes the STRICT
+        // shape filter is real signal, not chrome, so the chrome-head
+        // guard must NOT reject it. `GitHub` (internal cap) heads the
+        // 2-span `GitHub Actions` at sentence-start; `passesShape` is
+        // true, so the guard's `!passesShape(first.text)` clause exempts
+        // it. Without that clause the span would collapse to `GitHub`
+        // (isFirstCapPlainShape("GitHub") is also true), so this pins the
+        // exemption against a future refactor dropping it.
+        let transcript = "GitHub Actions failed today"
+        let context    = "Building: GitHub Actions pipeline"
+        let words = DictionaryHarvester.harvest(transcript: transcript, context: context, existing: [])
+        XCTAssertEqual(words, ["GitHub Actions"],
+            "strict-shape sentence-start head must survive the chrome-head guard; got \(words)")
+    }
+
     func test_harvest_chromeHead_noOverSuppression_midSentenceHeadSurvives() {
         // Guard exemption: when the first-cap head sits MID-sentence
         // (not chrome), the multi-word phrase is unaffected. `Вася`
