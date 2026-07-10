@@ -424,6 +424,21 @@ final class AppState {
 
     // MARK: - Observation of PermissionsViewModel
 
+    /// Pure gate: when Accessibility is revoked, should an active session
+    /// be cancelled (not just have its hotkey tap torn down)? True while
+    /// the session is live — `.recording` or `.sending`. Extracted so
+    /// `AppStateAxRevokeTests` can pin the contract without standing up a
+    /// full `AppState`. Mirrors `cancelRecording()`'s own actionable-state
+    /// guard so the two never drift.
+    nonisolated static func shouldCancelActiveSessionOnAxRevoke(
+        recordingState: RecordingState
+    ) -> Bool {
+        switch recordingState {
+        case .recording, .sending: return true
+        case .idle, .error:        return false
+        }
+    }
+
     /// Synchronous accessibility-state application — install or uninstall
     /// the hotkey to match the current permission. Called once at init
     /// and once after every change observed by `observePermissions()`.
@@ -431,6 +446,19 @@ final class AppState {
         if permissions.accessibility.isGranted {
             installHotkeyIfPossible()
         } else {
+            // Accessibility was revoked. If a session is live, unwind it
+            // fully — mic, HUD, sleep assertion, and any in-flight Gemini
+            // call — before tearing down the tap. Without the tap the
+            // release / Esc events can never arrive, so tearing down only
+            // the tap (the previous behaviour) would strand the session
+            // with the mic hot until the process dies (R4).
+            // `cancelRecording()` self-guards on state and releases the
+            // sleep assertion exactly once (both it and
+            // `releaseSleepAssertion()` are idempotent), so there is no
+            // double-release with the normal session-end paths.
+            if Self.shouldCancelActiveSessionOnAxRevoke(recordingState: recordingState) {
+                cancelRecording()
+            }
             uninstallHotkey()
         }
     }
