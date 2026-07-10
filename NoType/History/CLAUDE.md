@@ -78,7 +78,7 @@ struct StatsSnapshot: Codable, Sendable, Equatable {
 
 ## Wiring
 
-`AppState` (`@MainActor @Observable`) owns the SwiftUI-facing mirrors `history: [HistoryEntry]` and `statsSummary: StatsSnapshot`. Single write point for stats is `AppState.finalizeRecording()`'s success arm: after `history.append(entry)` succeeds, a detached `Task` calls `await statsStore.record(entry)` and assigns the returned snapshot back.
+`AppState` (`@MainActor @Observable`) owns the SwiftUI-facing mirrors `history: [HistoryEntry]` and `statsSummary: StatsSnapshot`. Single write point for stats is `AppState.finalizeRecording()`'s success arm: after `history.append(entry)` succeeds, a detached `Task` calls `await statsStore.record(entry, tokens: session.summary.tokens, model: session.summary.model)` and assigns the returned snapshot back to `statsSummary` on the main actor.
 
 `HomeView` reads `statsSummary` (windowed by `HomeRange`: 7D / 30D / 90D / All); only the bottom "Recent transcripts" list reads `history`. The popover reads `history` for the last-10 list.
 
