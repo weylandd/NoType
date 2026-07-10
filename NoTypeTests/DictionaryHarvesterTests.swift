@@ -731,6 +731,48 @@ final class DictionaryHarvesterTests: XCTestCase {
         XCTAssertEqual(words, ["Вася Пупкин"])
     }
 
+    // MARK: - Chrome-head guard (U6 / R6)
+
+    func test_harvest_chromeHead_russianVot_savesCleanTerm() {
+        // `Вот` is sentence-start chrome (capital + letters only, below
+        // the trigger length floor). The real trigger is `Anthropic`
+        // (mid). Longest-first would otherwise prefer the chrome-led
+        // 2-span `Вот Anthropic` — its head `Вот` carries a capital so
+        // `hasInterestingSignal` accepts it. The chrome-head guard
+        // rejects the `Вот`-led span, so the loop falls back to the
+        // clean `Anthropic`.
+        let transcript = "Вот Anthropic работает"
+        let context    = "Вот Anthropic"
+        let words = DictionaryHarvester.harvest(transcript: transcript, context: context, existing: [])
+        XCTAssertEqual(words, ["Anthropic"],
+            "chrome-led span must fall back to the clean term; got \(words)")
+        XCTAssertFalse(words.contains("Вот Anthropic"),
+            "sentence-start chrome word must not head a saved phrase; got \(words)")
+    }
+
+    func test_harvest_chromeHead_englishThe_savesCleanTerm() {
+        // Same class in English: `The` at sentence-start is chrome.
+        let transcript = "The Anthropic model shipped"
+        let context    = "The Anthropic model"
+        let words = DictionaryHarvester.harvest(transcript: transcript, context: context, existing: [])
+        XCTAssertFalse(words.contains("The Anthropic"),
+            "`The`-led span must be rejected; got \(words)")
+        XCTAssertTrue(words.contains("Anthropic"),
+            "clean term still captured; got \(words)")
+    }
+
+    func test_harvest_chromeHead_noOverSuppression_midSentenceHeadSurvives() {
+        // Guard exemption: when the first-cap head sits MID-sentence
+        // (not chrome), the multi-word phrase is unaffected. `Вася`
+        // (first-cap-plain) heads `Вася Пупкин` but is not at
+        // sentence-start, so the guard leaves it alone.
+        let transcript = "пиши Вася Пупкин завтра"
+        let context    = "Recipient: Вася Пупкин — manager"
+        let words = DictionaryHarvester.harvest(transcript: transcript, context: context, existing: [])
+        XCTAssertEqual(words, ["Вася Пупкин"],
+            "mid-sentence first-cap head must not be suppressed; got \(words)")
+    }
+
     // MARK: - Dedup
 
     func test_harvest_excludesExistingEntries_caseInsensitive() {
