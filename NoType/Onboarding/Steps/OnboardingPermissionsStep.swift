@@ -36,7 +36,7 @@ struct OnboardingPermissionsStep: View {
             }
             .frame(maxWidth: .infinity)
         } footer: {
-            Text("NoType is open-source and transparent — we prioritize your privacy and local data handling.")
+            Text("NoType is open-source and transparent — we prioritize your privacy.")
                 .font(.system(size: 11.5))
                 .lineSpacing(3)
                 .foregroundStyle(DS.Color.textQuaternary)
