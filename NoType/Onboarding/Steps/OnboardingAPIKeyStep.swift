@@ -277,7 +277,7 @@ struct OnboardingAPIKeyStep: View {
         HStack(spacing: 6) {
             Image(systemName: "lock.fill")
                 .font(.system(size: 9, weight: .semibold))
-            Text("STORED LOCALLY · KEYCHAIN · NEVER LEAVES YOUR MAC")
+            Text("KEYCHAIN · SENT TO GOOGLE ONLY · NEVER TO US")
                 .font(.system(size: 10.5, weight: .medium, design: .monospaced))
                 .tracking(0.04 * 10.5)
         }
