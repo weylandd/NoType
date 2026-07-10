@@ -101,6 +101,26 @@ final class RecordingSession {
         fallbackEnabled && permissionGranted && pid > 0
     }
 
+    /// Pure gate: should `stop()` abort immediately before committing the
+    /// paste? Extracted so `RecordingSessionCancellationTests` can pin the
+    /// paste-abort contract without standing up a full session.
+    ///
+    /// Returns `true` when either:
+    ///   1. `failureIsSet` — the cancellation latch is installed
+    ///      (`cancel()` sets `failure = CancellationError()` as its first
+    ///      statement, but a terminal Gemini error also sets it), or
+    ///   2. `taskIsCancelled` — the enclosing task was cancelled.
+    ///
+    /// `stop()` calls this synchronously right before `TextInjector.paste`,
+    /// after its drain-loop suspension point, so a cancel that lands while
+    /// `stop()` was suspended is honoured: no paste, no history write.
+    nonisolated static func shouldAbortBeforePaste(
+        failureIsSet: Bool,
+        taskIsCancelled: Bool
+    ) -> Bool {
+        failureIsSet || taskIsCancelled
+    }
+
     enum SessionError: Error, LocalizedError {
         case notStarted
         case noSpeech
@@ -509,6 +529,19 @@ final class RecordingSession {
     /// Best-effort cancel: stop capturing, drop any in-flight sender,
     /// and discard accumulated responses. Pasting is skipped.
     func cancel() async {
+        // Set the cancellation latch FIRST — synchronously, before
+        // `recorder.stop()` and both `await` points below. A racing
+        // `stop()` re-checks `failure` right before it pastes (see
+        // `shouldAbortBeforePaste`), so latching here guarantees that a
+        // `stop()` suspended in its sender drain-loop observes the
+        // cancelled state the moment it resumes and bails without
+        // pasting or writing history. Deferring the latch until after
+        // the two awaits (the previous ordering) left a window where a
+        // resuming `stop()` slipped past its `failure` guard while this
+        // task was still suspended on `await senderTask?.value`.
+        if failure == nil {
+            failure = CancellationError()
+        }
         recorder.stop()
         senderTask?.cancel()
         vadTask?.cancel()
@@ -523,11 +556,6 @@ final class RecordingSession {
         // prevents a future refactor from introducing a subtle stale-
         // state bug).
         lastRecoverableError = nil
-        // Mark a synthetic failure so `stop()` (if it's racing this
-        // call) sees a cancelled state rather than trying to paste.
-        if failure == nil {
-            failure = CancellationError()
-        }
     }
 
     /// Post-session diagnostics — read by `AppState.finalizeRecording`
@@ -654,6 +682,25 @@ final class RecordingSession {
         // at session start; that way a Dictionary-tab edit during a
         // session doesn't perturb the result.
         let final = TextReplacementEngine.apply(finalRaw, replacements: replacementsFrozen)
+
+        // Re-check the cancellation latch immediately before committing
+        // the paste. `cancel()` installs `failure` as its first statement,
+        // but it may have fired while we were suspended in the sender
+        // drain-loop above — after the early `if let err = failure` guard
+        // near the top of `stop()`. Everything between that guard and this
+        // point runs synchronously on the main actor, so this is the last
+        // safe place to bail: without it, a cancel landing during the
+        // drain would still paste and write history. Throwing here routes
+        // into `finalizeRecording`'s `catch is CancellationError` arm
+        // (no paste, no history, no double sleep-assertion release). A
+        // cancel that lands *after* `TextInjector.paste` begins is
+        // genuinely late and acceptable — the text is already in flight.
+        if Self.shouldAbortBeforePaste(
+            failureIsSet: failure != nil,
+            taskIsCancelled: Task.isCancelled
+        ) {
+            throw failure ?? CancellationError()
+        }
 
         await TextInjector.paste(final)
         let tPaste = Date()
