@@ -254,6 +254,65 @@ final class DictionaryStoreTests: XCTestCase {
         XCTAssertEqual(snap.replacements.first?.to, "ТЕ")
     }
 
+    func test_updateReplacement_rejectsCaseInsensitiveFromCollision() async {
+        // Two pairs A(`ml`) and B(`ai`). Editing B.from to `ML` collides
+        // (case-insensitively) with A → the edit is REJECTED, leaving the
+        // pairs untouched. There must never be two rows whose `from` is
+        // case-insensitively equal.
+        let store = DictionaryStore(url: url)
+        _ = await store.addReplacement(from: "ml", to: "machine learning")
+        var snap = await store.addReplacement(from: "ai", to: "artificial intelligence")
+        let idB = try? XCTUnwrap(snap.replacements.first(where: { $0.from == "ai" })?.id)
+
+        snap = await store.updateReplacement(id: idB ?? UUID(), from: "ML", to: "artificial intelligence")
+
+        XCTAssertEqual(snap.replacements.count, 2, "collision must not add or drop a row")
+        let froms = snap.replacements.map { $0.from.lowercased() }.sorted()
+        XCTAssertEqual(froms, ["ai", "ml"],
+            "B.from must stay `ai` — the colliding edit is rejected")
+        XCTAssertEqual(snap.replacements.first(where: { $0.id == idB })?.from, "ai",
+            "the edited pair keeps its original `from`")
+    }
+
+    func test_updateReplacement_toOnly_succeeds() async {
+        // Editing only the `to` side (same `from`) is not a collision.
+        let store = DictionaryStore(url: url)
+        _ = await store.addReplacement(from: "ml", to: "machine learning")
+        var snap = await store.addReplacement(from: "ai", to: "artificial intelligence")
+        let idA = try? XCTUnwrap(snap.replacements.first(where: { $0.from == "ml" })?.id)
+
+        snap = await store.updateReplacement(id: idA ?? UUID(), from: "ml", to: "meta learning")
+
+        XCTAssertEqual(snap.replacements.first(where: { $0.id == idA })?.to, "meta learning")
+        XCTAssertEqual(snap.replacements.count, 2)
+    }
+
+    func test_updateReplacement_fromToNewValue_succeeds() async {
+        // Editing B.from to a genuinely new value (`dl`) is accepted.
+        let store = DictionaryStore(url: url)
+        _ = await store.addReplacement(from: "ml", to: "machine learning")
+        var snap = await store.addReplacement(from: "ai", to: "artificial intelligence")
+        let idB = try? XCTUnwrap(snap.replacements.first(where: { $0.from == "ai" })?.id)
+
+        snap = await store.updateReplacement(id: idB ?? UUID(), from: "dl", to: "deep learning")
+
+        XCTAssertEqual(snap.replacements.first(where: { $0.id == idB })?.from, "dl")
+        XCTAssertEqual(snap.replacements.count, 2)
+    }
+
+    func test_updateReplacement_ownCasingChange_succeeds() async {
+        // Changing a pair's OWN casing (`ml` → `ML`) is allowed — the
+        // collision check excludes the pair being edited via `id != id`.
+        let store = DictionaryStore(url: url)
+        var snap = await store.addReplacement(from: "ml", to: "machine learning")
+        let idA = try? XCTUnwrap(snap.replacements.first?.id)
+
+        snap = await store.updateReplacement(id: idA ?? UUID(), from: "ML", to: "machine learning")
+
+        XCTAssertEqual(snap.replacements.count, 1)
+        XCTAssertEqual(snap.replacements.first?.from, "ML")
+    }
+
     func test_removeReplacement_byID() async {
         let store = DictionaryStore(url: url)
         let snap = await store.addReplacement(from: "то есть", to: "т.е.")
