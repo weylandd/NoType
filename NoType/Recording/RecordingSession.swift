@@ -60,14 +60,25 @@ final class RecordingSession {
     ///      and the lite shape no longer fits.
     ///   3. `totalBatchSamples < shortSessionMaxSamples` — audio fits
     ///      under the 2 s short-utterance threshold.
+    ///   4. `batchChunkCount == 1` — the batch encodes to exactly one
+    ///      audio chunk. The lite dispatch ships `encoded[0]` only
+    ///      (`GeminiClient.transcribeShort` is single-audio by
+    ///      construction), so a ≥2-chunk batch routed through the lite
+    ///      path would silently drop every chunk after the first while
+    ///      still recording all of them as covered. Gating on the
+    ///      post-encode count keeps a short-but-multi-chunk final batch
+    ///      on the normal batched path. See `NoType/Recording/CLAUDE.md`
+    ///      invariant 11.
     nonisolated static func shouldUseLitePath(
         isFinalBatch: Bool,
         priorTranscriptCount: Int,
-        totalBatchSamples: Int
+        totalBatchSamples: Int,
+        batchChunkCount: Int
     ) -> Bool {
         isFinalBatch
             && priorTranscriptCount == 0
             && totalBatchSamples < shortSessionMaxSamples
+            && batchChunkCount == 1
     }
 
     /// Pure-function gate for the screenshot + OCR context fallback.
@@ -832,38 +843,6 @@ final class RecordingSession {
     /// terminal errors (auth, blocked, encode); recoverable failures
     /// leave gaps and continue draining.
     private func processBatch(_ batch: [PendingChunk]) async {
-        // Batches containing the **final** chunk come from a user release.
-        // For those we don't wait on the context task — if AX / OCR
-        // happened to finish already we use the cached value; otherwise
-        // we fall back to a minimal snapshot. Rationale: a fast tap-and-
-        // release session shouldn't sit blocked behind the 2.5 s OCR cap.
-        // Mid-session batches (pause-triggered) keep the awaiting path
-        // since the user is clearly speaking and we have time to spare.
-        //
-        // Additionally: when the final batch is short (<2 s) AND this is
-        // the only batch of the session, route through the lite path —
-        // a synchronous trimmed snapshot (no AX, no OCR) + a smaller
-        // system prompt at the Gemini layer. Reduces prompt by ~70% on
-        // single-word sessions where context never helps anyway.
-        let isFinalBatch = batch.contains { $0.isFinal }
-        let totalBatchSamples = batch.reduce(0) { $0 + ($1.pcmEnd - $1.pcmStart) }
-        // Lite path requires no prior transcript text to ship in the
-        // `Prior chunks (this session):` section. Recoverable failures
-        // (markers) don't produce text, so they don't disqualify the
-        // lite path — if every prior call failed, the prompt's prior
-        // section would be `(none yet)` anyway and the trimmed shape
-        // still fits. Use `currentPriors().count` rather than
-        // `responses.count` for this reason.
-        let isShortFinalOnly = Self.shouldUseLitePath(
-            isFinalBatch: isFinalBatch,
-            priorTranscriptCount: currentPriors().count,
-            totalBatchSamples: totalBatchSamples
-        )
-        guard let snap = await snapshotForChunk(
-            allowMinimalFallback: isFinalBatch,
-            forceLite: isShortFinalOnly
-        ) else { return }
-
         let recorder = self.recorder
         let gemini = self.gemini
 
@@ -871,6 +850,11 @@ final class RecordingSession {
         // / lip clicks would otherwise produce empty Gemini calls).
         // `samples` carries the PCM sample count for the downstream
         // `HallucinationLengthGate` (audio duration = samples / 16 kHz).
+        //
+        // Encoding runs BEFORE the lite-path discriminator below so the
+        // gate can key on the post-drop chunk count (`encoded.count`):
+        // the lite dispatch ships a single audio, so a batch that encodes
+        // to ≥2 chunks must never take that path (R1).
         var encoded: [EncodedChunk] = []
         for pc in batch {
             let pcm = recorder.samples(from: pc.pcmStart, to: pc.pcmEnd)
@@ -894,13 +878,51 @@ final class RecordingSession {
             ? "chunk_\(encoded[0].idx)"
             : "chunks_\(encoded.first?.idx ?? -1)..\(encoded.last?.idx ?? -1)"
 
+        // Batches containing the **final** chunk come from a user release.
+        // For those we don't wait on the context task — if AX / OCR
+        // happened to finish already we use the cached value; otherwise
+        // we fall back to a minimal snapshot. Rationale: a fast tap-and-
+        // release session shouldn't sit blocked behind the 2.5 s OCR cap.
+        // Mid-session batches (pause-triggered) keep the awaiting path
+        // since the user is clearly speaking and we have time to spare.
+        //
+        // Additionally: when the final batch is short (<2 s) AND this is
+        // the only batch of the session AND it encoded to a single chunk,
+        // route through the lite path — a synchronous trimmed snapshot
+        // (no AX, no OCR) + a smaller system prompt at the Gemini layer.
+        // Reduces prompt by ~70% on single-word sessions where context
+        // never helps anyway.
+        let isFinalBatch = batch.contains { $0.isFinal }
+        let totalBatchSamples = batch.reduce(0) { $0 + ($1.pcmEnd - $1.pcmStart) }
+        // Lite path requires no prior transcript text to ship in the
+        // `Prior chunks (this session):` section. Recoverable failures
+        // (markers) don't produce text, so they don't disqualify the
+        // lite path — if every prior call failed, the prompt's prior
+        // section would be `(none yet)` anyway and the trimmed shape
+        // still fits. Use `currentPriors().count` rather than
+        // `responses.count` for this reason. `batchChunkCount` is the
+        // post-encode chunk count so a short-but-multi-chunk final batch
+        // stays on the batched path (see invariant 11 / R1).
+        let isShortFinalOnly = Self.shouldUseLitePath(
+            isFinalBatch: isFinalBatch,
+            priorTranscriptCount: currentPriors().count,
+            totalBatchSamples: totalBatchSamples,
+            batchChunkCount: encoded.count
+        )
+        guard let snap = await snapshotForChunk(
+            allowMinimalFallback: isFinalBatch,
+            forceLite: isShortFinalOnly
+        ) else { return }
+
         do {
             let result: (text: String, tokens: TokenUsage)
             if snap.isLite {
                 // Lite path is reachable only via the discriminator in
-                // `processBatch` — guaranteed `encoded.count == 1` and
-                // `containsFinal == true` by construction (final-only
-                // batch, no successful priors, audio < 2 s).
+                // `processBatch`, which gates on `batchChunkCount == 1`
+                // — so `encoded.count == 1` is enforced (not merely
+                // implied by the <2 s threshold) and `containsFinal` is
+                // true (final-only batch, no successful priors). Shipping
+                // `encoded[0]` therefore covers the whole batch (R1).
                 let one = encoded[0]
                 result = try await gemini.transcribeShortWithUsage(
                     audio: one.audio,
