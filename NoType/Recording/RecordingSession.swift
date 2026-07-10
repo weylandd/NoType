@@ -756,6 +756,14 @@ final class RecordingSession {
             var slowInferences = 0
             var totalInferences = 0
             for await frame in stream {
+                // Stop submitting to the app-shared `SileroVAD` actor the
+                // moment this session is cancelled. Without this, a
+                // cancelled session A keeps feeding `vad.probability(...)`
+                // to the shared actor while session B's `vad.reset()`
+                // interleaves — corrupting B's hidden/cell state (R3).
+                // `cancel()` calls `vadTask?.cancel()`, so the flag is set
+                // by the time the next frame arrives.
+                if Task.isCancelled { break }
                 let frameEnd = frameStart + frame.count
                 let inferenceStart = ContinuousClock.now
                 let prob: Float
