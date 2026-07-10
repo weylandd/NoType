@@ -18,10 +18,12 @@ import Foundation
 /// in the user's input only generates one extra variant, not the full
 /// stress-test set. The user can add an explicit pair if they need it.
 ///
-/// Word boundaries are ICU-aware (`NSRegularExpression`'s `\b` uses
-/// Unicode word-character classes), so Cyrillic and other non-ASCII
-/// alphabets work as expected — `то есть` won't match inside `кто
-/// есть`.
+/// Word boundaries use a Unicode look-around against `[\p{L}\p{N}]`
+/// (not `\b`), so Cyrillic and other non-ASCII alphabets work as
+/// expected — `то есть` won't match inside `кто есть` — AND pairs whose
+/// `from` starts or ends with punctuation (`т.е.`, `e.g.`, `.com`,
+/// `c#`, `#tag`) still match at real boundaries. `\b` would mis-anchor
+/// those because ICU treats leading / trailing punctuation as non-word.
 ///
 /// Each pair is applied to the **input** independently (no cascading) —
 /// avoids loops when the user enters two pairs that chain (`ML → machine
@@ -88,13 +90,22 @@ enum TextReplacementEngine {
     }
 
     /// Word-boundary replacement using `NSRegularExpression`. The
-    /// pattern is `\b<escaped find>\b`; ICU's `\b` covers Unicode word
-    /// characters, so Cyrillic / Greek / etc. work without extra
-    /// plumbing. `find` is escaped, so dots, plus signs, brackets etc.
-    /// are treated literally. The replacement template needs separate
-    /// escaping because regex replacement honours `$0..$9` and `\$`.
+    /// pattern wraps the escaped `find` in a Unicode look-around —
+    /// `(?<![\p{L}\p{N}]) … (?![\p{L}\p{N}])` — instead of `\b`. ICU's
+    /// `\b` treats leading / trailing punctuation in `find` (`т.е.`,
+    /// `e.g.`, `.com`, `c#`, `#tag`) as non-word, so a `\b` anchored
+    /// against a punctuation edge either fails to match or matches
+    /// inside a larger token. The look-around instead asserts only that
+    /// the characters immediately outside the match are not
+    /// letters/digits, which handles both alphabetic and
+    /// punctuation-bounded `from` values. Mirrors
+    /// `DictionaryHarvester.findInContext` so the module shares one
+    /// boundary idiom. `find` is escaped, so dots, plus signs, brackets
+    /// etc. are treated literally. The replacement template needs
+    /// separate escaping because regex replacement honours `$0..$9` and
+    /// `\$`.
     private static func replaceWordBoundary(in text: String, find: String, with replacement: String) -> String {
-        let pattern = "\\b" + NSRegularExpression.escapedPattern(for: find) + "\\b"
+        let pattern = "(?<![\\p{L}\\p{N}])" + NSRegularExpression.escapedPattern(for: find) + "(?![\\p{L}\\p{N}])"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
             return text
         }

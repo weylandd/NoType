@@ -112,6 +112,102 @@ final class TextReplacementEngineTests: XCTestCase {
             "applying the same pairs twice produces the same output")
     }
 
+    // MARK: - Punctuation-bounded `from` (U5 / R5)
+
+    func test_punctuationFrom_dottedAbbreviation_englishReplaces() {
+        // `e.g.` starts+ends with a boundary that ICU `\b` mis-anchors.
+        // The look-around matches it at real word boundaries.
+        let out = TextReplacementEngine.apply(
+            "use e.g. this",
+            replacements: [pair("e.g.", "for example")]
+        )
+        XCTAssertEqual(out, "use for example this")
+    }
+
+    func test_punctuationFrom_dottedAbbreviation_russianReplaces() {
+        let out = TextReplacementEngine.apply(
+            "Короче, т.е. дальше.",
+            replacements: [pair("т.е.", "то есть")]
+        )
+        XCTAssertEqual(out, "Короче, то есть дальше.")
+    }
+
+    func test_punctuationFrom_leadingDot_replacesAtBoundary() {
+        // `.com` leads with punctuation. Matches only at a real boundary
+        // (preceded by non-letter), never glued inside `example.com`.
+        let out = TextReplacementEngine.apply(
+            "buy a .com domain",
+            replacements: [pair(".com", "dot com")]
+        )
+        XCTAssertEqual(out, "buy a dot com domain")
+    }
+
+    func test_punctuationFrom_leadingDot_doesNotMatchInsideWord() {
+        // `.com` must NOT fire inside `example.com` — the char before
+        // the dot is a letter, so the look-behind blocks it.
+        let out = TextReplacementEngine.apply(
+            "visit example.com today",
+            replacements: [pair(".com", "dot com")]
+        )
+        XCTAssertEqual(out, "visit example.com today")
+    }
+
+    func test_punctuationFrom_leadingHash_replaces() {
+        // `#tag` leads with `#` (a non-word char). First char is not a
+        // lowercase letter, so no auto-cap variant is generated.
+        let out = TextReplacementEngine.apply(
+            "use #tag here",
+            replacements: [pair("#tag", "hashtag")]
+        )
+        XCTAssertEqual(out, "use hashtag here")
+    }
+
+    func test_punctuationFrom_trailingHash_replaces() {
+        // `c#` ends with `#`. Matches at boundary; must not fire inside
+        // `abc#def`.
+        let out = TextReplacementEngine.apply(
+            "code in c# today, not abc#def",
+            replacements: [pair("c#", "c sharp")]
+        )
+        XCTAssertEqual(out, "code in c sharp today, not abc#def")
+    }
+
+    func test_punctuationFrom_autoCap_dottedAbbreviationReplaces() {
+        // Auto-capitalized variant `E.g.` fires from a lowercase `e.g.`
+        // pair, capitalizing the first char of both sides.
+        let out = TextReplacementEngine.apply(
+            "E.g. this works",
+            replacements: [pair("e.g.", "for example")]
+        )
+        XCTAssertEqual(out, "For example this works")
+    }
+
+    func test_punctuationFrom_doesNotOverMatch_dottedInsideToken() {
+        // Regression: `e.g.` must NOT fire inside `beg.example` — the
+        // look-around anchors at real boundaries only.
+        let out = TextReplacementEngine.apply(
+            "beg.example works",
+            replacements: [pair("e.g.", "for example")]
+        )
+        XCTAssertEqual(out, "beg.example works")
+    }
+
+    func test_punctuationFrom_wordCharBoundedPairStillReplaces() {
+        // Regression: an ordinary word-char-bounded pair still replaces
+        // and still respects boundaries (does not fire inside `кто есть`).
+        let replaced = TextReplacementEngine.apply(
+            "то есть, продолжаем.",
+            replacements: [pair("то есть", "т.е.")]
+        )
+        XCTAssertEqual(replaced, "т.е., продолжаем.")
+
+        let notMatched = TextReplacementEngine.apply(
+            "Кто есть кто.",
+            replacements: [pair("то есть", "т.е.")]
+        )
+        XCTAssertEqual(notMatched, "Кто есть кто.")
+    }
+
     // MARK: - Regex special characters
 
     func test_regexSpecialCharsInFrom_areEscaped() {
