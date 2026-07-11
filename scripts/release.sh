@@ -25,7 +25,6 @@ KEYCHAIN_PROFILE="notype-notary"
 BUILD_DIR="build"
 ARCHIVE_PATH="${BUILD_DIR}/NoType.xcarchive"
 EXPORT_DIR="${BUILD_DIR}/export"
-EXPORT_OPTIONS="ExportOptions.plist"
 
 VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" NoType/Info.plist)
 DMG_PATH="${BUILD_DIR}/NoType-${VERSION}.dmg"
@@ -63,52 +62,66 @@ rm -rf "${ARCHIVE_PATH}" "${EXPORT_DIR}" "${STAGING}" "${DMG_PATH}" "${DMG_LATES
 echo "▶ Regenerating Xcode project from project.yml"
 xcodegen generate
 
-echo "▶ Archiving (${CONFIG})"
-# Override the project's `CODE_SIGN_STYLE: Automatic` (set in project.yml)
-# to Manual for the archive step, and pin the identity explicitly.
-# Background:
-#  - project.yml uses Automatic so Debug builds on the maintainer's Mac
-#    can pick up Apple Development cleanly.
-#  - On CI only `Developer ID Application` is imported (via
-#    `apple-actions/import-codesign-certs` in release.yml). Automatic
-#    signing still tries to find "Apple Development" (the legacy
-#    "Mac Development" cert) to sign intermediate artefacts like
-#    Sparkle.framework — and fails on the runner.
-#  - Manual signing + Developer ID Application + Hardened Runtime is the
-#    standard recipe for non-App-Store macOS apps.
-#  - `PROVISIONING_PROFILE_SPECIFIER=""` is load-bearing since the
-#    data-protection keychain migration (#70) added the
-#    `keychain-access-groups` entitlement. The moment Xcode's build
-#    system sees that entitlement it defaults to "this target requires a
-#    provisioning profile" and `archive` fails with
-#    `"NoType" requires a provisioning profile` — even under Manual
-#    signing. For a NON-sandboxed macOS app on Developer ID the entitlement
-#    needs NO profile at runtime: the access group is prefixed with the
-#    literal Team ID (`49T6U8DQXZ.app.notype`, see NoType.entitlements),
-#    which the Developer ID signature authorizes directly. So we explicitly
-#    clear the specifier to tell xcodebuild "there is no profile, sign with
-#    the cert + entitlements as-is". (iOS would need a real profile here;
-#    macOS Developer ID does not.)
+echo "▶ Archiving (${CONFIG}) unsigned"
+# We archive WITHOUT signing, then code-sign the exported .app by hand below.
+# Why we can't let xcodebuild sign during archive/export:
+#  - The data-protection keychain migration (#70) added the
+#    `keychain-access-groups` entitlement. The moment Xcode's build system
+#    sees that entitlement, `archive` (and `exportArchive`) demand a
+#    provisioning profile and fail with
+#    `"NoType" requires a provisioning profile` — even under Manual signing
+#    with an empty PROVISIONING_PROFILE_SPECIFIER. (Confirmed twice on CI.)
+#  - A NON-sandboxed macOS app on Developer ID needs NO profile for this
+#    entitlement: the access group is prefixed with the literal Team ID
+#    (`49T6U8DQXZ.app.notype`, see NoType.entitlements), which the Developer
+#    ID signature authorizes directly. (iOS would need a real profile.)
+#  - So we sidestep xcodebuild's profile machinery entirely: archive
+#    unsigned (`CODE_SIGNING_ALLOWED=NO`), then `codesign` the bundle
+#    inside-out with the Developer ID identity + `NoType.entitlements`.
+#    This is the standard recipe for Developer ID apps carrying entitlements
+#    that Xcode wants a profile for.
 xcodebuild -project "${PROJECT}" \
            -scheme "${SCHEME}" \
            -configuration "${CONFIG}" \
            -archivePath "${ARCHIVE_PATH}" \
            -destination "generic/platform=macOS" \
-           CODE_SIGN_STYLE=Manual \
-           CODE_SIGN_IDENTITY="${SIGN_IDENTITY}" \
-           PROVISIONING_PROFILE_SPECIFIER="" \
-           DEVELOPMENT_TEAM="49T6U8DQXZ" \
+           CODE_SIGNING_ALLOWED=NO \
+           CODE_SIGNING_REQUIRED=NO \
            -quiet \
            archive
 
-echo "▶ Exporting signed .app with Developer ID"
-xcodebuild -exportArchive \
-           -archivePath "${ARCHIVE_PATH}" \
-           -exportOptionsPlist "${EXPORT_OPTIONS}" \
-           -exportPath "${EXPORT_DIR}" \
-           -quiet
+echo "▶ Exporting the unsigned .app from the archive"
+# No `-exportArchive` — it would re-sign and hit the same profile wall.
+# Just copy the built bundle out of the archive into EXPORT_DIR.
+rm -rf "${EXPORT_DIR}"
+mkdir -p "${EXPORT_DIR}"
+ditto "${ARCHIVE_PATH}/Products/Applications/NoType.app" "${APP_PATH}"
 
-echo "▶ Verifying signature on the exported .app"
+echo "▶ Code-signing with Developer ID (inside-out, hardened runtime)"
+# Sign nested Mach-O code first (Sparkle's XPC services, Updater.app,
+# Autoupdate, then the framework bundle), each with the hardened runtime.
+# These helpers carry no entitlements in a non-sandboxed app; Autoupdate's
+# lone `application-identifier` is intentionally dropped on re-sign — it is
+# unused here and keeping it would re-trigger the profile requirement.
+SPK_V="${APP_PATH}/Contents/Frameworks/Sparkle.framework/Versions/B"
+for nested in \
+    "${SPK_V}/XPCServices/Downloader.xpc" \
+    "${SPK_V}/XPCServices/Installer.xpc" \
+    "${SPK_V}/Updater.app" \
+    "${SPK_V}/Autoupdate" \
+    "${APP_PATH}/Contents/Frameworks/Sparkle.framework"; do
+    codesign --force --options runtime --timestamp --sign "${SIGN_IDENTITY}" "${nested}"
+done
+# Main app last: our entitlements (keychain-access-groups + audio-input) and
+# the stable designated requirement (`identifier "app.notype"`) so TCC grants
+# survive across updates (signing/NoType.xcrequirements — same DR the old
+# xcodebuild path embedded via OTHER_CODE_SIGN_FLAGS).
+codesign --force --options runtime --timestamp \
+         --entitlements "NoType/NoType.entitlements" \
+         --requirements="$(pwd)/signing/NoType.xcrequirements" \
+         --sign "${SIGN_IDENTITY}" "${APP_PATH}"
+
+echo "▶ Verifying signature on the signed .app"
 codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
 
 echo "▶ Submitting .app to Apple notary service (1–5 min)"
