@@ -12,7 +12,7 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
 
 ---
 
-## [0.1.11] — 2026-06-01
+## [0.1.11] — 2026-07-11
 
 ### Added
 - **Screen-capture context toggle** (#71). Settings → Recording now has a
@@ -29,9 +29,46 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
   certificate rotation and never pops the login-password prompt. Existing
   keys migrate automatically on first launch; anyone already stranded by
   the old bug gets a calm one-time "re-enter your key" note.
+- **Replacements now fire on punctuation-edged pairs** (#77). Auto-
+  replacement pairs whose `from` starts or ends with punctuation
+  (`e.g.`, `.com`, `c#`, `#tag`, `т.е.`) are now matched and applied —
+  previously the word-boundary rule silently skipped them.
+- **Final words of a quick multi-phrase dictation no longer dropped**
+  (#77). Releasing the hotkey right after a fast burst of phrases could
+  occasionally lose the last phrase's text; it's now retained.
+- **Cancelling a finishing transcription leaves nothing behind** (#77).
+  Pressing the cancel key while a transcription is wrapping up no longer
+  pastes or saves a stray transcript.
+- **Revoking Accessibility mid-recording releases the mic** (#77).
+  Turning off the Accessibility permission during a recording now ends
+  the session and stops capture instead of leaving the microphone live.
+- **Your clipboard is left alone during the paste restore delay** (#77).
+  If you copy something while NoType is restoring your clipboard after a
+  paste, your copy is no longer overwritten.
+- **Onboarding no longer jumps forward after you go Back** (#77). When
+  API-key validation finishes after you've navigated to an earlier step,
+  the wizard now stays where you are instead of skipping ahead.
+- **No surprise Screen Recording prompt when capture context is off**
+  (#77). With the screen-capture context toggle off, the first push-to-
+  talk press no longer interrupts you with a Screen Recording prompt.
+- **Blocked or cut-short transcriptions surface a clear message** (#77).
+  A transcription the model blocks or truncates now shows a readable
+  message and a gap marker instead of a silent or garbled result.
 
 ### Changed
 - **New app icon** (#69).
+- **Honest onboarding privacy wording** (#77). The onboarding privacy
+  copy now accurately describes how dictation works: your audio and API
+  key go to Google's Gemini for transcription, and nothing is sent to us.
+- Audio compression moved off the main thread; assorted robustness fixes
+  and dead-code cleanup (#77).
+
+### Security
+- **Wider redaction of secrets in the on-screen context** (#77). The
+  context sent for transcription now scrubs more: window and element
+  titles, secrets straddling the text cursor, and standard-base64
+  tokens — and the focused-field skip rules match the full accessibility
+  walker.
 
 ---
 
