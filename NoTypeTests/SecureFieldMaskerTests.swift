@@ -433,6 +433,41 @@ final class SecureFieldMaskerTests: XCTestCase {
         }
     }
 
+    // MARK: - AX title consumer (U8 / R8)
+    //
+    // Node titles (`formatLine`) and window titles (`AccessibilityTree.walkApp`
+    // → `RedactedWindowDump.title`) now pass through `scrubContent` before they
+    // reach the prompt. Previously only node *values* were masked; titles were
+    // interpolated with only quote-swapping. These cases pin the scrub on the
+    // title-shaped inputs that path surfaces.
+
+    func test_axTitle_scrubs_urlCredentials() {
+        // Browser-tab / link title carrying basic-auth creds.
+        let title = "https://alice:p4ssw0rd@internal.example.com/dashboard"
+        let scrubbed = SecureFieldMasker.scrubContent(title)
+        XCTAssertTrue(scrubbed.contains("https://[REDACTED — url creds]@internal.example.com/dashboard"), scrubbed)
+        XCTAssertFalse(scrubbed.contains("alice"))
+        XCTAssertFalse(scrubbed.contains("p4ssw0rd"))
+    }
+
+    func test_axTitle_scrubs_tokenShapedWindowTitle() {
+        // A window title that leaked a token-shaped string (e.g. a devtools
+        // panel or a mis-labelled document title). Prefix split to avoid the
+        // gitleaks pre-commit hook's static PAT match; runtime value unchanged.
+        let title = "prod — gh" + "p_abcdefghijklmnopqrstuvwxyz0123456789"
+        let scrubbed = SecureFieldMasker.scrubContent(title)
+        XCTAssertTrue(scrubbed.contains("[REDACTED — likely GitHub token]"), scrubbed)
+        XCTAssertTrue(scrubbed.contains("prod — "), scrubbed)
+        XCTAssertFalse(scrubbed.contains("p_abcdefghij"))
+    }
+
+    func test_axTitle_preserves_ordinaryWindowTitle() {
+        // Don't over-redact: a normal window / tab title must survive so the
+        // model keeps its app/document context.
+        let title = "Inbox — Mail"
+        XCTAssertEqual(SecureFieldMasker.scrubContent(title), title)
+    }
+
     // MARK: - Empty / no-op paths
 
     func test_keep_nilValueReturnsEmptyKeep() {

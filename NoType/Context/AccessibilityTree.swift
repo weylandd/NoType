@@ -296,7 +296,15 @@ enum AccessibilityTree {
             // R6: collapse repetitive packs once per window AFTER the walk.
             // Pure post-pass on rendered lines; no AX calls.
             AXNoiseFilter.collapseRepetitivePacks(&lines)
-            windowDumps.append(RedactedWindowDump(title: title, lines: lines))
+            // Scrub the window title before it enters the (egress) dump. The
+            // `RedactedWindowDump` type name is a promise: it must never carry
+            // a raw secret. Window titles routinely embed URLs (browser tabs)
+            // and occasionally token-shaped strings; the raw `title` above is
+            // kept only as the internal `parentTitle` for the sensitive-sheet
+            // heuristic (keyword-based, so scrubbing wouldn't change its
+            // verdict). See R8.
+            let scrubbedTitle = title.map { SecureFieldMasker.scrubContent($0) }
+            windowDumps.append(RedactedWindowDump(title: scrubbedTitle, lines: lines))
         }
 
         if windowDumps.isEmpty { return nil }
@@ -402,7 +410,16 @@ enum AccessibilityTree {
     ) -> String? {
         let shortRole = role.map { stripAXPrefix($0) }
         let shortSubrole = subrole.map { stripAXPrefix($0) }
-        let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Scrub the title through the content layer before it renders. The
+        // node value already goes through `SecureFieldMasker` (via
+        // `decideForNode`), but titles (link text, labels, tab names)
+        // previously reached the prompt with only quote-swapping — a title
+        // like `https://user:pass@host` or a token-shaped label would leak.
+        // Consistent with `classifyApp` omitting titles for the same PII
+        // reason (R8).
+        let trimmedTitle = title
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .map { SecureFieldMasker.scrubContent($0) }
         let trimmedValue = truncateValue(value)
 
         // Drop nodes that have nothing useful to say.
