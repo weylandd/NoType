@@ -1,29 +1,31 @@
 ---
 slug: keychain-data-protection-migration
 created: 2026-05-30
-status: open
+status: closed
 size: L
 category: documentation-gaps
 ---
 
 # Move the Gemini key to the data-protection keychain (survive re-sign, never prompt)
 
-> **Implementation status (2026-05-31):** U1–U5 implemented on branch
-> `fix/keychain-data-protection-migration` — `keychain-access-groups`
-> entitlement, `KeychainStore` data-protection migration (`Store` param),
-> `SecretStore.migrateAndResolve` chained migration + `KeyResolution`
-> tri-state, the calm "re-enter your key" UX (`ReenterKeyNote` +
-> `AppState.apiKeyNeedsReentry`), and the doc updates. 18 unit tests green
-> (`KeychainStoreTests` / `SecretStoreTests` / `AppStateKeyStateTests`).
-> Spike **step 1** (the access-group data-protection keychain works under our
-> signing) is **proven** locally. **Remaining before this entry closes:** the
-> maintainer's notarized Developer ID verification (spike step 3 / **S3**) and
-> PR merge — keep this entry indexed in `docs/TECHDEBT.md` until both land.
-> A surprising finding surfaced during implementation: legacy↔data-protection
-> keychain isolation is **asymmetric** (an unscoped legacy query surfaces
-> data-protection items), which is why the migration never deletes the legacy
-> keychain item — pinned by `KeychainStoreTests` and documented in
-> `NoType/Keychain/CLAUDE.md`.
+> **Resolved — shipped in #70 (commit `de230d7`).** U1–U5 landed: the
+> `keychain-access-groups` entitlement, `KeychainStore` data-protection
+> migration (`Store` param), `SecretStore.migrateAndResolve` chained
+> migration + `KeyResolution` tri-state, the calm "re-enter your key" UX
+> (`ReenterKeyNote` + `AppState.apiKeyNeedsReentry`), and the doc updates. 18
+> unit tests green (`KeychainStoreTests` / `SecretStoreTests` /
+> `AppStateKeyStateTests`). The steady state — access-group-scoped
+> data-protection storage that survives re-sign and never prompts — is now
+> documented in `NoType/Keychain/CLAUDE.md`; this file stays for institutional
+> memory (what was tried, what was rejected, what shipped). Two follow-ups
+> from the notarized-Developer-ID verification (spike step 3 / **S3**): (a)
+> the new entitlement makes `xcodebuild archive` / `-exportArchive` demand a
+> provisioning profile, resolved in the release pipeline by archiving unsigned
+> + manually code-signing the Developer ID app inside-out (see
+> `scripts/release.sh`); (b) legacy↔data-protection keychain isolation is
+> **asymmetric** (an unscoped legacy query surfaces data-protection items),
+> which is why the migration never deletes the legacy keychain item — pinned
+> by `KeychainStoreTests` and documented in `NoType/Keychain/CLAUDE.md`.
 
 ## Context
 
@@ -227,13 +229,17 @@ let query: [String: Any] = [
 
 ## Related
 
+- **Closed by #70** (commit `de230d7` — "migrate Gemini key to the
+  data-protection keychain (survive re-sign, never prompt)"). The
+  release-signing follow-up (archive unsigned + manual Developer ID codesign
+  for the new `keychain-access-groups` entitlement) lives in
+  `scripts/release.sh`.
 - `NoType/Keychain/KeychainStore.swift` — the three `SecItem*` queries to
   migrate; current `load()` throws `errSecAuthFailed` on cert mismatch.
 - `NoType/Keychain/SecretStore.swift` — `migrateAndResolve()` fall-through
   chain (+ `currentKeyResolution()` env wrapper, `deliberatelyCleared` tombstone).
 - `NoType/Keychain/CLAUDE.md` — "Why this works silently" + invariant 1/2;
-  needs the "Developer ID only; dev-cert rotation breaks legacy ACL" caveat
-  now, and a rewrite to the access-group model once this ships.
+  rewritten to the access-group / data-protection model when #70 shipped.
 - `solutions/tooling-decisions/byok-keychain-storage-2026-05-15.md` — "Why
   This Matters" #4 makes the rebuild-stable claim that this entry qualifies.
 - `project.yml` — `DEVELOPMENT_TEAM = 49T6U8DQXZ`, `CODE_SIGN_ENTITLEMENTS`

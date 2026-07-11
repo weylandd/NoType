@@ -25,21 +25,22 @@ import Foundation
 /// `c#`, `#tag`) still match at real boundaries. `\b` would mis-anchor
 /// those because ICU treats leading / trailing punctuation as non-word.
 ///
-/// Each pair is applied to the **input** independently (no cascading) —
-/// avoids loops when the user enters two pairs that chain (`ML → machine
-/// learning` plus `learning → studying` would otherwise produce `machine
-/// studying`). The price is that overlapping pairs can produce
-/// surprising outcomes; trade-off chosen for predictability over
-/// "smart" sequential application.
+/// Each pair is applied **sequentially to the running result**, so later
+/// pairs see the output of earlier ones — they cascade. `ML → machine
+/// learning` followed by `learning → studying` therefore produces
+/// `machine studying`, because the second pair's regex runs against the
+/// text the first pair already rewrote. This is deliberate: pairs apply
+/// in creation order and the user controls that order. The trade-off is
+/// that overlapping pairs can chain in surprising ways — predictable
+/// ordering was chosen over trying to detect and block cascades.
 enum TextReplacementEngine {
 
-    /// Apply `replacements` to `text` and return the result. Order of
-    /// pairs follows `replacements` (creation order); each pair is
-    /// applied to the original text and the results are merged into one
-    /// final output via sequential string mutation, but each `from`
-    /// pattern is matched against the **pre-replacement** snapshot for
-    /// that pair — so a `to` containing another pair's `from` won't
-    /// trigger a second replacement.
+    /// Apply `replacements` to `text` and return the result. Pairs run in
+    /// `replacements` order (creation order), each as a single regex pass
+    /// over the **running** result. A pair never re-scans its own output,
+    /// but a *later* pair whose `from` appears in an *earlier* pair's `to`
+    /// WILL match — the pairs cascade in creation order. Ordering is the
+    /// user's control.
     static func apply(_ text: String, replacements: [DictionaryReplacement]) -> String {
         guard !text.isEmpty, !replacements.isEmpty else { return text }
 

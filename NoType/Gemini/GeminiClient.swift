@@ -195,8 +195,12 @@ actor GeminiClient {
     ///
     /// Independent of transcription state: no audio, no `ContextSnapshot`,
     /// no implicit-cache prefix to preserve. Different prompt, different
-    /// generation config, different `tools`. The shared retry-classifier
-    /// rules apply.
+    /// generation config, different `tools`. Unlike the `transcribe*`
+    /// methods, this call does **not** go through the shared `sendRequest`
+    /// retry loop (`retryDecision`) — it issues a single
+    /// `URLSession.data(for:)` request and throws on any non-200 or
+    /// network error. Retry resilience lives one layer up: `AppCategorizer`
+    /// logs the failure and re-classifies on the next session.
     func classifyApp(
         displayName: String,
         bundleID: String,
