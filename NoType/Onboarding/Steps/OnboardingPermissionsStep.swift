@@ -36,7 +36,7 @@ struct OnboardingPermissionsStep: View {
             }
             .frame(maxWidth: .infinity)
         } footer: {
-            Text("NoType is open-source and transparent — we prioritize your privacy and local data handling.")
+            Text("NoType is open-source and transparent — we prioritize your privacy.")
                 .font(.system(size: 11.5))
                 .lineSpacing(3)
                 .foregroundStyle(DS.Color.textQuaternary)
@@ -54,10 +54,8 @@ struct OnboardingPermissionsStep: View {
             PermissionRow(
                 title: "Microphone",
                 detailParts: [
-                    .plain("So NoType can hear you. Audio is processed "),
-                    .bold("locally"),
-                    .plain(" and discarded immediately after transcription — "),
-                    .bold("nothing is ever written to disk"),
+                    .plain("Your audio is captured only while you hold the key, briefly written to a temporary file to compress it, sent to Google's Gemini API for transcription, then deleted — "),
+                    .bold("never kept"),
                     .plain(".")
                 ],
                 symbol: "mic.fill",
@@ -72,7 +70,7 @@ struct OnboardingPermissionsStep: View {
             PermissionRow(
                 title: "Accessibility",
                 detailParts: [
-                    .plain("Allows NoType to detect your shortcut and read the focused app's accessibility tree for context-aware, accurate transcriptions.")
+                    .plain("Lets NoType detect your shortcut and read on-screen text from your open apps for more accurate transcription.")
                 ],
                 symbol: "figure.stand",
                 isRequired: true,

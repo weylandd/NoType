@@ -79,7 +79,7 @@ struct OnboardingAPIKeyStep: View {
         let model = Text("Gemini 3.1 Flash-Lite")
             .foregroundColor(DS.Color.textPrimary)
             .fontWeight(.semibold)
-        let rest = Text(" for transcription. Paste your API key once — it's stored in your macOS Keychain and never leaves your machine.")
+        let rest = Text(" for transcription. Paste your API key once — it's stored in your macOS Keychain and sent to Google only to authenticate your transcription requests — never to us.")
         return intro + model + rest
     }
 
@@ -277,7 +277,7 @@ struct OnboardingAPIKeyStep: View {
         HStack(spacing: 6) {
             Image(systemName: "lock.fill")
                 .font(.system(size: 9, weight: .semibold))
-            Text("STORED LOCALLY · KEYCHAIN · NEVER LEAVES YOUR MAC")
+            Text("KEYCHAIN · SENT TO GOOGLE ONLY · NEVER TO US")
                 .font(.system(size: 10.5, weight: .medium, design: .monospaced))
                 .tracking(0.04 * 10.5)
         }
