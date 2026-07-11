@@ -22,6 +22,75 @@
     <description>NoType release feed for Sparkle 2 auto-updates.</description>
     <language>en</language>
     <item>
+      <title>Version 0.1.11</title>
+      <pubDate>Sat, 11 Jul 2026 08:38:38 +0000</pubDate>
+      <sparkle:version>13</sparkle:version>
+      <sparkle:shortVersionString>0.1.11</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+### Added
+- **Screen-capture context toggle** (#71). Settings → Recording now has a
+  "Use screen capture for context" switch that turns the OCR/screenshot
+  fallback off independently of the Screen Recording permission — so you
+  can keep the permission granted but stop NoType from screenshotting.
+  Default on; when the permission isn't granted the switch routes you to
+  System Settings.
+
+### Fixed
+- **Gemini API key no longer "disappears"** (#70). The key now lives in
+  the data-protection keychain, scoped by an access group instead of the
+  rotating code-signing identity. Reading it survives re-signing and dev
+  certificate rotation and never pops the login-password prompt. Existing
+  keys migrate automatically on first launch; anyone already stranded by
+  the old bug gets a calm one-time "re-enter your key" note.
+- **Replacements now fire on punctuation-edged pairs** (#77). Auto-
+  replacement pairs whose `from` starts or ends with punctuation
+  (`e.g.`, `.com`, `c#`, `#tag`, `т.е.`) are now matched and applied —
+  previously the word-boundary rule silently skipped them.
+- **Final words of a quick multi-phrase dictation no longer dropped**
+  (#77). Releasing the hotkey right after a fast burst of phrases could
+  occasionally lose the last phrase's text; it's now retained.
+- **Cancelling a finishing transcription leaves nothing behind** (#77).
+  Pressing the cancel key while a transcription is wrapping up no longer
+  pastes or saves a stray transcript.
+- **Revoking Accessibility mid-recording releases the mic** (#77).
+  Turning off the Accessibility permission during a recording now ends
+  the session and stops capture instead of leaving the microphone live.
+- **Your clipboard is left alone during the paste restore delay** (#77).
+  If you copy something while NoType is restoring your clipboard after a
+  paste, your copy is no longer overwritten.
+- **Onboarding no longer jumps forward after you go Back** (#77). When
+  API-key validation finishes after you've navigated to an earlier step,
+  the wizard now stays where you are instead of skipping ahead.
+- **No surprise Screen Recording prompt when capture context is off**
+  (#77). With the screen-capture context toggle off, the first push-to-
+  talk press no longer interrupts you with a Screen Recording prompt.
+- **Blocked or cut-short transcriptions surface a clear message** (#77).
+  A transcription the model blocks or truncates now shows a readable
+  message and a gap marker instead of a silent or garbled result.
+
+### Changed
+- **New app icon** (#69).
+- **Honest onboarding privacy wording** (#77). The onboarding privacy
+  copy now accurately describes how dictation works: your audio and API
+  key go to Google's Gemini for transcription, and nothing is sent to us.
+- Audio compression moved off the main thread; assorted robustness fixes
+  and dead-code cleanup (#77).
+
+### Security
+- **Wider redaction of secrets in the on-screen context** (#77). The
+  context sent for transcription now scrubs more: window and element
+  titles, secrets straddling the text cursor, and standard-base64
+  tokens — and the focused-field skip rules match the full accessibility
+  walker.
+
+---
+      ]]></description>
+      <enclosure url="https://github.com/weylandd/NoType/releases/download/v0.1.11/NoType-0.1.11.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="+syg4ps5rhiBk6qS1SzZNFZ8woXxR2uUNEoqmxhpqglijIY7XWZPQXzxDSxQOkU6mIgnGXUjeHPna33hqzfYCA==" length="4354316" />
+    </item>
+    <item>
       <title>Version 0.1.10</title>
       <pubDate>Fri, 29 May 2026 21:03:10 +0000</pubDate>
       <sparkle:version>12</sparkle:version>
