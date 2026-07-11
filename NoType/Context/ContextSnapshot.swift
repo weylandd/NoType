@@ -471,21 +471,24 @@ struct InsertionTarget: Sendable, Equatable {
     /// they can drive the trimming and surrogate-boundary logic without
     /// going through AX.
     static func slice(value: String, cursor: Int, maxSide: Int = maxSideLength) -> InsertionTarget {
-        let total = value.utf16.count
+        // Scrub the FULL value ONCE, then split — not each half in isolation.
+        // Scrubbing the two sides independently let a secret STRADDLING the
+        // cursor evade the anchored patterns: a JWT / PEM / card split at the
+        // cursor left neither half matching, and a PEM body extending past the
+        // 500-char after-window lost its BEGIN marker. The cursor offset is in
+        // the ORIGINAL value's UTF-16 space; redaction changes the length, so
+        // we re-clamp against the scrubbed length and accept minor cursor
+        // drift — this section is advisory (spacing / capitalization), not a
+        // precise edit position (R10). Skip-rule enforcement still happens
+        // upstream in `captureSync`; here we run only the value-content layer.
+        let scrubbed = SecureFieldMasker.scrubContent(value)
+        let total = scrubbed.utf16.count
         let clampedCursor = max(0, min(cursor, total))
         let beforeStart = max(0, clampedCursor - maxSide)
         let afterEnd    = min(total, clampedCursor + maxSide)
 
-        let rawBefore = utf16Slice(value, from: beforeStart, to: clampedCursor)
-        let rawAfter  = utf16Slice(value, from: clampedCursor, to: afterEnd)
-
-        // Apply the same content-pattern scrubbing the AX walk uses, so a
-        // bearer token / card number sitting at the edge of the focused
-        // field doesn't sneak into the prompt unredacted. Skip-rule
-        // enforcement happens upstream (in `captureSync`, by role check).
-        // Here we run only the value-content layer.
-        let textBefore = SecureFieldMasker.scrubContent(rawBefore)
-        let textAfter  = SecureFieldMasker.scrubContent(rawAfter)
+        let textBefore = utf16Slice(scrubbed, from: beforeStart, to: clampedCursor)
+        let textAfter  = utf16Slice(scrubbed, from: clampedCursor, to: afterEnd)
 
         return InsertionTarget(textBefore: textBefore, textAfter: textAfter, isKnown: true)
     }

@@ -600,6 +600,55 @@ final class SecureFieldMaskerTests: XCTestCase {
         XCTAssertEqual(scrubbed, line, "innocuous OCR text must pass through unchanged")
     }
 
+    // MARK: - Insertion-target split-cursor scrub (U10 / R10)
+    //
+    // `InsertionTarget.slice` now scrubs the FULL focused value once before
+    // splitting into before/after, so a secret straddling the cursor can't
+    // evade the anchored patterns by being cut in half.
+
+    func test_slice_tokenStraddlingCursor_redacted() {
+        // 42-char mixed letter+digit token; cursor lands INSIDE it.
+        // Split-then-scrub would leave two sub-40 halves that neither the
+        // opaque nor base64 rule matches. Scrub-then-split catches the whole
+        // token. (Repetitive fixture keeps entropy below the gitleaks
+        // pre-commit hook; runtime shape — ≥40, letter+digit — is what
+        // matters for the opaque-token rule.)
+        let token = String(repeating: "aB3", count: 14)  // 42 chars
+        let value = "note " + token + " end"
+        let cursor = "note ".utf16.count + 20  // mid-token
+        let target = InsertionTarget.slice(value: value, cursor: cursor)
+        let combined = target.textBefore + target.textAfter
+        XCTAssertTrue(combined.contains("[REDACTED — likely token]"), combined)
+        XCTAssertFalse(combined.contains(token), combined)
+    }
+
+    func test_slice_pemBodyStraddlingCursor_redacted() {
+        // A PEM private key with the cursor in the middle of the body. The
+        // after-window alone would lack the BEGIN marker; full-value scrub
+        // still redacts the whole block. (BEGIN/END markers assembled from
+        // parts, filler body — keeps the gitleaks hook quiet; the PEM regex
+        // matches arbitrary body between the markers.)
+        let begin = "-----BEGIN RSA PRIVATE" + " KEY-----"
+        let end   = "-----END RSA PRIVATE"   + " KEY-----"
+        let bodyMarker = "PEMBODYLINEAAAA"
+        let pem = "\(begin)\n\(bodyMarker)0001\n\(bodyMarker)0002\n\(end)"
+        let cursor = (begin + "\n" + bodyMarker).utf16.count  // mid-body
+        let target = InsertionTarget.slice(value: pem, cursor: cursor)
+        let combined = target.textBefore + target.textAfter
+        XCTAssertTrue(combined.contains("[REDACTED — private key]"), combined)
+        XCTAssertFalse(combined.contains(bodyMarker), combined)
+    }
+
+    func test_slice_normalText_unaffected_cursorUsable() {
+        // No redaction → no drift; the cursor split is exactly where it was,
+        // so the spacing/capitalization signal stays intact.
+        let value = "Hello world foo bar"
+        let cursor = "Hello world".utf16.count  // 11
+        let target = InsertionTarget.slice(value: value, cursor: cursor)
+        XCTAssertEqual(target.textBefore, "Hello world")
+        XCTAssertEqual(target.textAfter, " foo bar")
+    }
+
     func test_ocr_idempotent_underRepeatedScrubbing() {
         // Defence in depth — if the OCR pipeline ever runs scrubContent
         // twice for any reason, the second pass must be a no-op (no
