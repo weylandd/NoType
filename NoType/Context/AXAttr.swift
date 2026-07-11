@@ -24,6 +24,24 @@ enum AXAttr {
         return raw as? String
     }
 
+    /// Read an AX attribute whose value is itself an `AXUIElement`
+    /// (e.g. `kAXParentAttribute`). Returns nil if the attribute is
+    /// missing or not an AXUIElement. Guarded + non-forced cast, per the
+    /// no-force-unwrap convention.
+    static func element(_ element: AXUIElement, _ key: String) -> AXUIElement? {
+        var raw: CFTypeRef?
+        let err = AXUIElementCopyAttributeValue(element, key as CFString, &raw)
+        guard err == .success,
+              let raw,
+              CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
+        // CFGetTypeID above is the real type check. `AnyObject → AXUIElement`
+        // can't use `as?` (a compiler-proven-infallible downcast; warnings-as-
+        // errors rejects it) nor `as` (not convertible), so the guarded,
+        // non-forced `unsafeDowncast` is the idiomatic CF form — no `as!`, and
+        // no trap because the CFTypeID was just verified.
+        return unsafeDowncast(raw, to: AXUIElement.self)
+    }
+
     /// Read an AX attribute that may be a String OR a numeric type,
     /// coercing the latter to its string form. Used by the generic AX
     /// walker so widgets that expose `kAXValueAttribute` as

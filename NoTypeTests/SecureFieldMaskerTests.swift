@@ -118,6 +118,47 @@ final class SecureFieldMaskerTests: XCTestCase {
         XCTAssertEqual(result, .skip(reason: "identifier=credential"))
     }
 
+    // MARK: - captureSync shared skip decision (U9 / R9)
+    //
+    // `InsertionTarget.captureSync` now applies the walker's FULL secure-field
+    // skip set (via the promoted-to-internal `SecureFieldMasker.skipReason`)
+    // instead of its own role-only AXSecureTextField check. `captureSync`
+    // itself reads live system-wide AX and isn't unit-drivable, so these
+    // pin the shared decision function it delegates to — the identifier /
+    // roleDescription / sensitive-sheet cases that previously leaked.
+
+    func test_skipReason_identifierToken_returnsReason() {
+        // Plain AXTextField named "password" — the walker skips it; captureSync
+        // now does too. Was leaking before R9.
+        let reason = SecureFieldMasker.skipReason(
+            for: .init(role: "AXTextField", identifier: "loginPasswordField")
+        )
+        XCTAssertEqual(reason, "identifier=password")
+    }
+
+    func test_skipReason_roleDescriptionSecure_returnsReason() {
+        let reason = SecureFieldMasker.skipReason(
+            for: .init(role: "AXTextField", roleDescription: "Secure text entry")
+        )
+        XCTAssertEqual(reason, "secure role description")
+    }
+
+    func test_skipReason_sensitiveSheetParent_returnsReason() {
+        let reason = SecureFieldMasker.skipReason(
+            for: .init(role: "AXTextField", parentRole: "AXSheet", parentTitle: "Sign in to Acme")
+        )
+        XCTAssertEqual(reason, "sensitive sheet")
+    }
+
+    func test_skipReason_ordinaryTextField_returnsNil() {
+        // The common case: a normal message-composer / search field must NOT
+        // be skipped, so captureSync still captures the cursor neighborhood.
+        let reason = SecureFieldMasker.skipReason(
+            for: .init(role: "AXTextField", identifier: "messageComposer")
+        )
+        XCTAssertNil(reason)
+    }
+
     // MARK: - Value-content patterns
 
     func test_mask_creditCard_validLuhn() {

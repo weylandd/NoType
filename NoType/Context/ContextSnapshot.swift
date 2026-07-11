@@ -260,6 +260,30 @@ struct InsertionTarget: Sendable, Equatable {
             return .empty
         }
 
+        // Widen the refusal above (role/subrole AXSecureTextField) to the AX
+        // walker's FULL secure-field skip set: roleDescription "secure",
+        // identifier tokens (password/passcode/token/…), and the
+        // sensitive-sheet-parent heuristic. Previously captureSync only
+        // refused the two AXSecureTextField cases, so a plain AXTextField
+        // named "password" — or a field inside a "Sign in" sheet — leaked its
+        // value into the Insertion-target prompt section. Sharing
+        // SecureFieldMasker.skipReason with the walker keeps the two paths
+        // from drifting (R9). Parent role/title are read for the sheet
+        // heuristic; they are used only to DECIDE the skip, never emitted.
+        let parent = AXAttr.element(element, kAXParentAttribute as String)
+        let secureMetadata = SecureFieldMasker.NodeMetadata(
+            role: AXAttr.string(element, kAXRoleAttribute as String),
+            subrole: AXAttr.string(element, kAXSubroleAttribute as String),
+            roleDescription: AXAttr.string(element, kAXRoleDescriptionAttribute as String),
+            identifier: AXAttr.string(element, kAXIdentifierAttribute as String),
+            parentRole: parent.flatMap { AXAttr.string($0, kAXRoleAttribute as String) },
+            parentTitle: parent.flatMap { AXAttr.string($0, kAXTitleAttribute as String) }
+        )
+        if let reason = SecureFieldMasker.skipReason(for: secureMetadata) {
+            log.info("ax capture: focused element matches secure-field skip (\(reason, privacy: .public)) — returning .empty")
+            return .empty
+        }
+
         let role = AXAttr.string(element, kAXRoleAttribute as String) ?? "?"
 
         // Terminal emulators (Ghostty, iTerm, Apple Terminal, Warp, kitty,

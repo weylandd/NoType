@@ -95,7 +95,12 @@ enum SecureFieldMasker {
         options: .caseInsensitive
     )
 
-    private static func skipReason(for m: NodeMetadata) -> String? {
+    /// The shared secure-field skip decision. `internal` (not `private`) so
+    /// `InsertionTarget.captureSync` can apply the SAME rule set the AX walker
+    /// uses instead of its own narrower role-only check — keeping the two
+    /// paths from drifting (R9). Returns a non-nil reason string when the node
+    /// must be dropped entirely.
+    static func skipReason(for m: NodeMetadata) -> String? {
         if let role = m.role, secureRoleSet.contains(role) {
             return "secure role"
         }
