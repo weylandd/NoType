@@ -68,6 +68,68 @@ final class AccessibilityTreeTests: XCTestCase {
         XCTAssertEqual(decision, .skipSubtree)
     }
 
+    // MARK: - decideForNode — title scrubbing (R8 security boundary)
+
+    func test_decide_nodeTitleWithURLCreds_scrubbedInRenderedLine() {
+        // A node whose TITLE (not value) carries embedded URL credentials
+        // must render with the creds redacted. Before R8 the title reached
+        // the prompt with only quote-swapping.
+        let metadata = SecureFieldMasker.NodeMetadata(role: "AXButton")
+        let decision = AccessibilityTree.decideForNode(
+            role: "AXButton",
+            subrole: nil,
+            title: "https://alice:p4ssw0rd@github.com/acme",
+            value: nil,
+            metadata: metadata,
+            containingBundleID: "com.apple.Safari",
+            depth: 1
+        )
+        guard case let .render(line) = decision else {
+            XCTFail("expected render, got \(decision)"); return
+        }
+        XCTAssertTrue(line.contains("[REDACTED — url creds]"), line)
+        XCTAssertFalse(line.contains("alice"), line)
+        XCTAssertFalse(line.contains("p4ssw0rd"), line)
+    }
+
+    func test_decide_nodeTitleWithTokenShapedLabel_scrubbed() {
+        // A token-shaped string in a node title (e.g. an AX label that leaked
+        // an AWS access key) must be redacted in the rendered line.
+        let metadata = SecureFieldMasker.NodeMetadata(role: "AXStaticText")
+        let decision = AccessibilityTree.decideForNode(
+            role: "AXStaticText",
+            subrole: nil,
+            title: "AKIAIOSFODNN7EXAMPLE",
+            value: nil,
+            metadata: metadata,
+            containingBundleID: "com.apple.Notes",
+            depth: 1
+        )
+        guard case let .render(line) = decision else {
+            XCTFail("expected render, got \(decision)"); return
+        }
+        XCTAssertTrue(line.contains("[REDACTED — AWS key]"), line)
+        XCTAssertFalse(line.contains("AKIAIOSFODNN7EXAMPLE"), line)
+    }
+
+    func test_decide_secureNodeWithTokenTitle_stillSkipsEntirely() {
+        // Regression: a secure-field node still drops its whole subtree
+        // BEFORE formatLine runs, so its title (token-shaped or not) never
+        // reaches the prompt. The masker's .skip wins over the new title
+        // scrubbing path.
+        let metadata = SecureFieldMasker.NodeMetadata(role: "AXSecureTextField")
+        let decision = AccessibilityTree.decideForNode(
+            role: "AXSecureTextField",
+            subrole: nil,
+            title: "AKIAIOSFODNN7EXAMPLE",
+            value: "hunter2",
+            metadata: metadata,
+            containingBundleID: "com.apple.Safari",
+            depth: 1
+        )
+        XCTAssertEqual(decision, .skipSubtree)
+    }
+
     // MARK: - decideForNode — drops via AXNoiseFilter
 
     func test_decide_structuralChromeDrops() {

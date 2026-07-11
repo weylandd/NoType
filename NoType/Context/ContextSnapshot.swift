@@ -244,7 +244,10 @@ struct InsertionTarget: Sendable, Equatable {
             log.info("ax capture: no focused element (err=\(focusErr.rawValue, privacy: .public))")
             return .unknown
         }
-        let element = focused as! AXUIElement
+        // CFGetTypeID above is the real type check; `AnyObject → AXUIElement`
+        // has no `as?`/`as` form (see AXAttr.element), so the guarded,
+        // non-forced `unsafeDowncast` replaces the old `as!` — no trap (R12).
+        let element = unsafeDowncast(focused, to: AXUIElement.self)
 
         // Refuse to read password fields outright — mirrors the
         // SecureFieldMasker skip rule used by the AX walker. The
@@ -257,6 +260,30 @@ struct InsertionTarget: Sendable, Equatable {
         if let subrole = AXAttr.string(element, kAXSubroleAttribute as String),
            subrole == "AXSecureTextField" {
             log.info("ax capture: focused subrole is AXSecureTextField, skipping")
+            return .empty
+        }
+
+        // Widen the refusal above (role/subrole AXSecureTextField) to the AX
+        // walker's FULL secure-field skip set: roleDescription "secure",
+        // identifier tokens (password/passcode/token/…), and the
+        // sensitive-sheet-parent heuristic. Previously captureSync only
+        // refused the two AXSecureTextField cases, so a plain AXTextField
+        // named "password" — or a field inside a "Sign in" sheet — leaked its
+        // value into the Insertion-target prompt section. Sharing
+        // SecureFieldMasker.skipReason with the walker keeps the two paths
+        // from drifting (R9). Parent role/title are read for the sheet
+        // heuristic; they are used only to DECIDE the skip, never emitted.
+        let parent = AXAttr.element(element, kAXParentAttribute as String)
+        let secureMetadata = SecureFieldMasker.NodeMetadata(
+            role: AXAttr.string(element, kAXRoleAttribute as String),
+            subrole: AXAttr.string(element, kAXSubroleAttribute as String),
+            roleDescription: AXAttr.string(element, kAXRoleDescriptionAttribute as String),
+            identifier: AXAttr.string(element, kAXIdentifierAttribute as String),
+            parentRole: parent.flatMap { AXAttr.string($0, kAXRoleAttribute as String) },
+            parentTitle: parent.flatMap { AXAttr.string($0, kAXTitleAttribute as String) }
+        )
+        if let reason = SecureFieldMasker.skipReason(for: secureMetadata) {
+            log.info("ax capture: focused element matches secure-field skip (\(reason, privacy: .public)) — returning .empty")
             return .empty
         }
 
@@ -334,7 +361,7 @@ struct InsertionTarget: Sendable, Equatable {
         if rangeErr == .success,
            let raw = rangeRaw,
            CFGetTypeID(raw) == AXValueGetTypeID() {
-            let axValue = raw as! AXValue
+            let axValue = unsafeDowncast(raw, to: AXValue.self)
             if AXValueGetType(axValue) == .cfRange {
                 AXValueGetValue(axValue, .cfRange, &range)
             }
@@ -389,10 +416,9 @@ struct InsertionTarget: Sendable, Equatable {
             &lineRaw
         )
         guard err == .success, let raw = lineRaw else { return nil }
-        var line: Int = 0
-        if CFGetTypeID(raw) == CFNumberGetTypeID() {
-            CFNumberGetValue((raw as! CFNumber), .nsIntegerType, &line)
-        } else { return nil }
+        guard CFGetTypeID(raw) == CFNumberGetTypeID(),
+              let lineNumber = raw as? NSNumber else { return nil }
+        let line = lineNumber.intValue
 
         var lineRangeRaw: CFTypeRef?
         var lineNumberValue = line
@@ -405,7 +431,7 @@ struct InsertionTarget: Sendable, Equatable {
         guard lineRangeErr == .success,
               let lrr = lineRangeRaw,
               CFGetTypeID(lrr) == AXValueGetTypeID() else { return nil }
-        let axValue = lrr as! AXValue
+        let axValue = unsafeDowncast(lrr, to: AXValue.self)
         guard AXValueGetType(axValue) == .cfRange else { return nil }
         var lineRange = CFRange(location: 0, length: 0)
         AXValueGetValue(axValue, .cfRange, &lineRange)
@@ -447,21 +473,24 @@ struct InsertionTarget: Sendable, Equatable {
     /// they can drive the trimming and surrogate-boundary logic without
     /// going through AX.
     static func slice(value: String, cursor: Int, maxSide: Int = maxSideLength) -> InsertionTarget {
-        let total = value.utf16.count
+        // Scrub the FULL value ONCE, then split — not each half in isolation.
+        // Scrubbing the two sides independently let a secret STRADDLING the
+        // cursor evade the anchored patterns: a JWT / PEM / card split at the
+        // cursor left neither half matching, and a PEM body extending past the
+        // 500-char after-window lost its BEGIN marker. The cursor offset is in
+        // the ORIGINAL value's UTF-16 space; redaction changes the length, so
+        // we re-clamp against the scrubbed length and accept minor cursor
+        // drift — this section is advisory (spacing / capitalization), not a
+        // precise edit position (R10). Skip-rule enforcement still happens
+        // upstream in `captureSync`; here we run only the value-content layer.
+        let scrubbed = SecureFieldMasker.scrubContent(value)
+        let total = scrubbed.utf16.count
         let clampedCursor = max(0, min(cursor, total))
         let beforeStart = max(0, clampedCursor - maxSide)
         let afterEnd    = min(total, clampedCursor + maxSide)
 
-        let rawBefore = utf16Slice(value, from: beforeStart, to: clampedCursor)
-        let rawAfter  = utf16Slice(value, from: clampedCursor, to: afterEnd)
-
-        // Apply the same content-pattern scrubbing the AX walk uses, so a
-        // bearer token / card number sitting at the edge of the focused
-        // field doesn't sneak into the prompt unredacted. Skip-rule
-        // enforcement happens upstream (in `captureSync`, by role check).
-        // Here we run only the value-content layer.
-        let textBefore = SecureFieldMasker.scrubContent(rawBefore)
-        let textAfter  = SecureFieldMasker.scrubContent(rawAfter)
+        let textBefore = utf16Slice(scrubbed, from: beforeStart, to: clampedCursor)
+        let textAfter  = utf16Slice(scrubbed, from: clampedCursor, to: afterEnd)
 
         return InsertionTarget(textBefore: textBefore, textAfter: textAfter, isKnown: true)
     }
@@ -472,10 +501,9 @@ struct InsertionTarget: Sendable, Equatable {
         var raw: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(element, key as CFString, &raw)
         guard err == .success, let raw else { return nil }
-        guard CFGetTypeID(raw) == CFNumberGetTypeID() else { return nil }
-        var out: Int = 0
-        guard CFNumberGetValue(raw as! CFNumber, .nsIntegerType, &out) else { return nil }
-        return out
+        guard CFGetTypeID(raw) == CFNumberGetTypeID(),
+              let number = raw as? NSNumber else { return nil }
+        return number.intValue
     }
 
     /// Slice a String on UTF-16 code-unit boundaries. Falls back to a

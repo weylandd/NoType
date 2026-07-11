@@ -67,7 +67,10 @@ enum CategoryResolver {
               CFGetTypeID(focusedRaw) == AXUIElementGetTypeID() else {
             return nil
         }
-        let element = focusedRaw as! AXUIElement
+        // CFGetTypeID above is the real type check; `AnyObject → AXUIElement`
+        // has no `as?`/`as` form, so guarded `unsafeDowncast` replaces the old
+        // `as!` — no force-unwrap, no trap (R12).
+        let element = unsafeDowncast(focusedRaw, to: AXUIElement.self)
         return FocusedFieldSnapshot(
             role:       AXAttr.string(element, kAXRoleAttribute as String),
             subrole:    AXAttr.string(element, kAXSubroleAttribute as String),
