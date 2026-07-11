@@ -155,6 +155,24 @@ enum TextInjector {
         return out
     }
 
+    /// Pure gate: should the user's original clipboard be restored after
+    /// our paste? Extracted so `TextInjectorTests` can pin the contract
+    /// against a real isolated `NSPasteboard`.
+    ///
+    /// Restore iff the pasteboard's `changeCount` is unchanged since our
+    /// own write committed. Posting ⌘V makes the receiving app *read* the
+    /// pasteboard, and a read never bumps `changeCount`; but a genuine
+    /// user copy (⌘C anywhere) calls `clearContents`, which does bump it.
+    /// A moved count during the restore delay therefore means the user
+    /// put something new on the clipboard — blindly restoring our saved
+    /// snapshot would clobber their copy, so we skip restore instead (R18).
+    nonisolated static func shouldRestoreClipboard(
+        writeChangeCount: Int,
+        currentChangeCount: Int
+    ) -> Bool {
+        writeChangeCount == currentChangeCount
+    }
+
     /// Pastes `text` at the current cursor by saving the user's clipboard,
     /// writing our text, synthesizing ⌘V, and restoring the original
     /// clipboard after `restoreDelayMs`. Empty text is a no-op.
@@ -171,13 +189,30 @@ enum TextInjector {
 
         pb.clearContents()
         pb.setString(text, forType: .string)
+        // Snapshot the change count the instant our own write is in place.
+        // Any bump between here and the restore below is a real user copy
+        // during the delay (the ⌘V we post next only reads the pasteboard,
+        // which doesn't bump the count) — see `shouldRestoreClipboard`.
+        let writeChangeCount = pb.changeCount
 
         postCommandV()
         let delay = restoreDelayMs ?? PasteSettings.restoreDelayMs
         log.info("paste posted ⌘V (\(text.count) chars, restore in \(delay)ms)")
 
+        // `try?` swallows the cancellation error so restore still runs
+        // (early, on cancel) rather than stranding our transcript on the
+        // clipboard. Either way the restore is gated on the change-count
+        // check, so a user copy that landed during the delay is never
+        // clobbered.
         try? await Task.sleep(for: .milliseconds(delay))
-        snapshot.restore(to: pb)
+        if shouldRestoreClipboard(
+            writeChangeCount: writeChangeCount,
+            currentChangeCount: pb.changeCount
+        ) {
+            snapshot.restore(to: pb)
+        } else {
+            log.info("clipboard changed during restore delay — skipping restore to preserve the user's copy")
+        }
     }
 
     private static func postCommandV() {

@@ -1,6 +1,7 @@
 ---
 title: Partial recovery — gap markers instead of all-or-nothing on Gemini failure
 date: 2026-05-16
+last_updated: 2026-07-11
 category: architecture-patterns
 module: Recording
 problem_type: architecture_pattern
@@ -33,7 +34,7 @@ Classify errors via the pure static `RecordingSession.isTerminal(_:)`:
 |---|---|---|
 | `CancellationError` | terminal | abort, no paste |
 | `GeminiError.missingKey` | terminal | abort, surface "add API key" |
-| `GeminiError.blocked(_)` | terminal | abort, surface block reason |
+| `GeminiError.blocked(_)` (prompt-level `blockReason` **or** candidate-level `finishReason` = SAFETY/RECITATION/PROHIBITED_CONTENT/BLOCKLIST/SPII/IMAGE_SAFETY) | terminal | abort, surface block reason |
 | `GeminiError.http(401, _)` / `.http(403, _)` | terminal | abort, surface "API key rejected" — splitting won't help a revoked key |
 | Any other `Error` (encoder, AVFAudio, etc) | terminal | abort, surface as-is |
 | `GeminiError.http(0, _)` (network — wrapped URLError) | recoverable | marker, continue |
@@ -41,6 +42,9 @@ Classify errors via the pure static `RecordingSession.isTerminal(_:)`:
 | `GeminiError.http(5xx, _)` | recoverable | marker, continue |
 | `GeminiError.empty` | recoverable | marker, continue |
 | `GeminiError.decoding(_)` | recoverable | marker, continue |
+| `GeminiError.truncated` (`finishReason` = MAX_TOKENS) | recoverable | marker, continue |
+
+`.truncated` and the candidate-level `.blocked` path both come from inspecting the response's `finishReason` (a response-parsing change only — the request shape and cache prefix are untouched). `.truncated` is a silently-cut partial: because NoType never sets `maxOutputTokens`, hitting the output cap on a dictation chunk means the model ran away (a hallucinated wall of text), not that the user genuinely spoke past the limit — so discarding the partial and gap-marking it is the correct recovery, and it gets no HTTP-level retry (an identical re-issue truncates identically). A candidate-level content block (`finishReason` = SAFETY/RECITATION/…) maps to `GeminiError.blocked` and is terminal, matching how a prompt-level `promptFeedback.blockReason` was already handled.
 
 A batched call (`transcribeBatch`) failing recoverably triggers `splitRetry` — each chunk re-issued as an independent `transcribe`. Successful sub-calls become priors for the rest, so a network blip that resolved mid-batch lets later chunks recover with full context. A 250 ms inter-iteration backoff (`splitRetryBackoff`) caps burst rate at 4 sub-calls per second so sustained 429 / 5xx doesn't fire N×3 requests back-to-back.
 

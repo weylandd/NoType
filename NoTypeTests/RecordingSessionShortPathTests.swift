@@ -13,6 +13,9 @@ import XCTest
 ///      yet in this session.
 ///   3. `totalBatchSamples < shortSessionMaxSamples` — audio fits under
 ///      2 s at 16 kHz.
+///   4. `batchChunkCount == 1` — the batch encodes to exactly one audio
+///      chunk. The lite dispatch ships `encoded[0]` only, so a ≥2-chunk
+///      batch would silently drop every chunk after the first (R1).
 ///
 /// See `merry-percolating-hare.md` plan + `NoType/Recording/CLAUDE.md`
 /// "Short final-only path (lite context)" subsection.
@@ -24,7 +27,8 @@ final class RecordingSessionShortPathTests: XCTestCase {
         XCTAssertTrue(RecordingSession.shouldUseLitePath(
             isFinalBatch: true,
             priorTranscriptCount: 0,
-            totalBatchSamples: 16_000        // 1.0 s
+            totalBatchSamples: 16_000,       // 1.0 s
+            batchChunkCount: 1
         ))
     }
 
@@ -32,7 +36,8 @@ final class RecordingSessionShortPathTests: XCTestCase {
         XCTAssertTrue(RecordingSession.shouldUseLitePath(
             isFinalBatch: true,
             priorTranscriptCount: 0,
-            totalBatchSamples: 31_999        // just under 2.0 s
+            totalBatchSamples: 31_999,       // just under 2.0 s
+            batchChunkCount: 1
         ))
     }
 
@@ -43,7 +48,8 @@ final class RecordingSessionShortPathTests: XCTestCase {
         XCTAssertFalse(RecordingSession.shouldUseLitePath(
             isFinalBatch: true,
             priorTranscriptCount: 0,
-            totalBatchSamples: 32_000
+            totalBatchSamples: 32_000,
+            batchChunkCount: 1
         ))
     }
 
@@ -51,7 +57,8 @@ final class RecordingSessionShortPathTests: XCTestCase {
         XCTAssertFalse(RecordingSession.shouldUseLitePath(
             isFinalBatch: true,
             priorTranscriptCount: 0,
-            totalBatchSamples: 48_000        // 3 s
+            totalBatchSamples: 48_000,       // 3 s
+            batchChunkCount: 1
         ))
     }
 
@@ -63,7 +70,8 @@ final class RecordingSessionShortPathTests: XCTestCase {
         XCTAssertFalse(RecordingSession.shouldUseLitePath(
             isFinalBatch: false,
             priorTranscriptCount: 0,
-            totalBatchSamples: 16_000
+            totalBatchSamples: 16_000,
+            batchChunkCount: 1
         ))
     }
 
@@ -76,7 +84,8 @@ final class RecordingSessionShortPathTests: XCTestCase {
         XCTAssertFalse(RecordingSession.shouldUseLitePath(
             isFinalBatch: true,
             priorTranscriptCount: 2,
-            totalBatchSamples: 16_000
+            totalBatchSamples: 16_000,
+            batchChunkCount: 1
         ))
     }
 
@@ -84,7 +93,56 @@ final class RecordingSessionShortPathTests: XCTestCase {
         XCTAssertFalse(RecordingSession.shouldUseLitePath(
             isFinalBatch: true,
             priorTranscriptCount: 1,
-            totalBatchSamples: 8_000
+            totalBatchSamples: 8_000,
+            batchChunkCount: 1
+        ))
+    }
+
+    // MARK: - Batch cardinality (R1 — the drop-later-chunks fix)
+
+    func test_finalShort_twoEncodedChunks_isNotLite() {
+        // A queued multi-chunk final batch (e.g. a mid-session VAD split
+        // whose sender was busy, then the final chunk piles on behind it)
+        // that still totals under 2 s. The lite dispatch would ship only
+        // `encoded[0]` yet record every chunk as covered → the user's
+        // later words vanish. Cardinality > 1 must force the batched path.
+        XCTAssertFalse(RecordingSession.shouldUseLitePath(
+            isFinalBatch: true,
+            priorTranscriptCount: 0,
+            totalBatchSamples: 16_000,       // 1.0 s total, but two chunks
+            batchChunkCount: 2
+        ))
+    }
+
+    func test_finalShort_oneEncodedChunk_isLite() {
+        // The complement of the case above: a single encoded chunk under
+        // 2 s with no priors on release is exactly the lite path's home.
+        XCTAssertTrue(RecordingSession.shouldUseLitePath(
+            isFinalBatch: true,
+            priorTranscriptCount: 0,
+            totalBatchSamples: 16_000,
+            batchChunkCount: 1
+        ))
+    }
+
+    func test_finalShort_threeEncodedChunks_isNotLite() {
+        XCTAssertFalse(RecordingSession.shouldUseLitePath(
+            isFinalBatch: true,
+            priorTranscriptCount: 0,
+            totalBatchSamples: 24_000,
+            batchChunkCount: 3
+        ))
+    }
+
+    func test_finalShort_zeroEncodedChunks_isNotLite() {
+        // Degenerate — an all-dropped batch never reaches the dispatch
+        // (the caller returns on `encoded.isEmpty` first), but the pure
+        // contract still must not report lite for a non-1 count.
+        XCTAssertFalse(RecordingSession.shouldUseLitePath(
+            isFinalBatch: true,
+            priorTranscriptCount: 0,
+            totalBatchSamples: 0,
+            batchChunkCount: 0
         ))
     }
 
@@ -98,7 +156,8 @@ final class RecordingSessionShortPathTests: XCTestCase {
         XCTAssertTrue(RecordingSession.shouldUseLitePath(
             isFinalBatch: true,
             priorTranscriptCount: 0,
-            totalBatchSamples: 0
+            totalBatchSamples: 0,
+            batchChunkCount: 1
         ))
     }
 

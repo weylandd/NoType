@@ -329,6 +329,13 @@ struct OnboardingAPIKeyStep: View {
                 try await appState.validateGeminiKey(candidate)
                 try appState.updateAPIKey(candidate)
                 validating = false
+                // This Task is unstored and outlives the step if the user
+                // navigates Back while the network validation is in flight.
+                // Persisting the validated key above is still correct, but
+                // `goNext()` must not yank the wizard forward from whatever
+                // step the user is now on — only advance while we're still
+                // the API-key step (R19).
+                guard onboarding.currentStep == .apiKey else { return }
                 onboarding.goNext()
             } catch let g as GeminiClient.GeminiError {
                 validating = false
@@ -341,7 +348,7 @@ struct OnboardingAPIKeyStep: View {
                     )
                 case .missingKey:
                     errorMessage = "Paste a key first."
-                case .decoding, .empty, .blocked:
+                case .decoding, .empty, .blocked, .truncated:
                     errorMessage = g.errorDescription ?? "Couldn't validate key."
                 }
             } catch let urlError as URLError {

@@ -60,14 +60,25 @@ final class RecordingSession {
     ///      and the lite shape no longer fits.
     ///   3. `totalBatchSamples < shortSessionMaxSamples` — audio fits
     ///      under the 2 s short-utterance threshold.
+    ///   4. `batchChunkCount == 1` — the batch encodes to exactly one
+    ///      audio chunk. The lite dispatch ships `encoded[0]` only
+    ///      (`GeminiClient.transcribeShort` is single-audio by
+    ///      construction), so a ≥2-chunk batch routed through the lite
+    ///      path would silently drop every chunk after the first while
+    ///      still recording all of them as covered. Gating on the
+    ///      post-encode count keeps a short-but-multi-chunk final batch
+    ///      on the normal batched path. See `NoType/Recording/CLAUDE.md`
+    ///      invariant 11.
     nonisolated static func shouldUseLitePath(
         isFinalBatch: Bool,
         priorTranscriptCount: Int,
-        totalBatchSamples: Int
+        totalBatchSamples: Int,
+        batchChunkCount: Int
     ) -> Bool {
         isFinalBatch
             && priorTranscriptCount == 0
             && totalBatchSamples < shortSessionMaxSamples
+            && batchChunkCount == 1
     }
 
     /// Pure-function gate for the screenshot + OCR context fallback.
@@ -88,6 +99,26 @@ final class RecordingSession {
         pid: pid_t
     ) -> Bool {
         fallbackEnabled && permissionGranted && pid > 0
+    }
+
+    /// Pure gate: should `stop()` abort immediately before committing the
+    /// paste? Extracted so `RecordingSessionCancellationTests` can pin the
+    /// paste-abort contract without standing up a full session.
+    ///
+    /// Returns `true` when either:
+    ///   1. `failureIsSet` — the cancellation latch is installed
+    ///      (`cancel()` sets `failure = CancellationError()` as its first
+    ///      statement, but a terminal Gemini error also sets it), or
+    ///   2. `taskIsCancelled` — the enclosing task was cancelled.
+    ///
+    /// `stop()` calls this synchronously right before `TextInjector.paste`,
+    /// after its drain-loop suspension point, so a cancel that lands while
+    /// `stop()` was suspended is honoured: no paste, no history write.
+    nonisolated static func shouldAbortBeforePaste(
+        failureIsSet: Bool,
+        taskIsCancelled: Bool
+    ) -> Bool {
+        failureIsSet || taskIsCancelled
     }
 
     enum SessionError: Error, LocalizedError {
@@ -150,8 +181,8 @@ final class RecordingSession {
     /// prompt won't unblock; an encode failure means PCM is corrupt
     /// or AVFAudio is wedged; a user cancellation is, well, user-
     /// initiated. Everything else (HTTP 4xx/5xx/network/decoding/
-    /// empty) is treated as a transient gap — paste what we have,
-    /// mark the gap, let the user decide whether to re-dictate.
+    /// empty/truncated) is treated as a transient gap — paste what we
+    /// have, mark the gap, let the user decide whether to re-dictate.
     nonisolated static func isTerminal(_ error: Error) -> Bool {
         if error is CancellationError { return true }
         if let gerr = error as? GeminiClient.GeminiError {
@@ -166,7 +197,10 @@ final class RecordingSession {
                 // Settings. Other 4xx / 5xx / network (status=0) stay
                 // recoverable: gap marker, continue draining.
                 return status == 401 || status == 403
-            case .empty, .decoding:
+            case .empty, .decoding, .truncated:
+                // `.truncated` (finishReason == MAX_TOKENS) is a cut
+                // response, not a broken session — recover it as a `[…]`
+                // gap marker so the rest of the session still pastes.
                 return false
             }
         }
@@ -498,6 +532,19 @@ final class RecordingSession {
     /// Best-effort cancel: stop capturing, drop any in-flight sender,
     /// and discard accumulated responses. Pasting is skipped.
     func cancel() async {
+        // Set the cancellation latch FIRST — synchronously, before
+        // `recorder.stop()` and both `await` points below. A racing
+        // `stop()` re-checks `failure` right before it pastes (see
+        // `shouldAbortBeforePaste`), so latching here guarantees that a
+        // `stop()` suspended in its sender drain-loop observes the
+        // cancelled state the moment it resumes and bails without
+        // pasting or writing history. Deferring the latch until after
+        // the two awaits (the previous ordering) left a window where a
+        // resuming `stop()` slipped past its `failure` guard while this
+        // task was still suspended on `await senderTask?.value`.
+        if failure == nil {
+            failure = CancellationError()
+        }
         recorder.stop()
         senderTask?.cancel()
         vadTask?.cancel()
@@ -512,11 +559,6 @@ final class RecordingSession {
         // prevents a future refactor from introducing a subtle stale-
         // state bug).
         lastRecoverableError = nil
-        // Mark a synthetic failure so `stop()` (if it's racing this
-        // call) sees a cancelled state rather than trying to paste.
-        if failure == nil {
-            failure = CancellationError()
-        }
     }
 
     /// Post-session diagnostics — read by `AppState.finalizeRecording`
@@ -644,6 +686,25 @@ final class RecordingSession {
         // session doesn't perturb the result.
         let final = TextReplacementEngine.apply(finalRaw, replacements: replacementsFrozen)
 
+        // Re-check the cancellation latch immediately before committing
+        // the paste. `cancel()` installs `failure` as its first statement,
+        // but it may have fired while we were suspended in the sender
+        // drain-loop above — after the early `if let err = failure` guard
+        // near the top of `stop()`. Everything between that guard and this
+        // point runs synchronously on the main actor, so this is the last
+        // safe place to bail: without it, a cancel landing during the
+        // drain would still paste and write history. Throwing here routes
+        // into `finalizeRecording`'s `catch is CancellationError` arm
+        // (no paste, no history, no double sleep-assertion release). A
+        // cancel that lands *after* `TextInjector.paste` begins is
+        // genuinely late and acceptable — the text is already in flight.
+        if Self.shouldAbortBeforePaste(
+            failureIsSet: failure != nil,
+            taskIsCancelled: Task.isCancelled
+        ) {
+            throw failure ?? CancellationError()
+        }
+
         await TextInjector.paste(final)
         let tPaste = Date()
 
@@ -698,6 +759,14 @@ final class RecordingSession {
             var slowInferences = 0
             var totalInferences = 0
             for await frame in stream {
+                // Stop submitting to the app-shared `SileroVAD` actor the
+                // moment this session is cancelled. Without this, a
+                // cancelled session A keeps feeding `vad.probability(...)`
+                // to the shared actor while session B's `vad.reset()`
+                // interleaves — corrupting B's hidden/cell state (R3).
+                // `cancel()` calls `vadTask?.cancel()`, so the flag is set
+                // by the time the next frame arrives.
+                if Task.isCancelled { break }
                 let frameEnd = frameStart + frame.count
                 let inferenceStart = ContinuousClock.now
                 let prob: Float
@@ -832,38 +901,6 @@ final class RecordingSession {
     /// terminal errors (auth, blocked, encode); recoverable failures
     /// leave gaps and continue draining.
     private func processBatch(_ batch: [PendingChunk]) async {
-        // Batches containing the **final** chunk come from a user release.
-        // For those we don't wait on the context task — if AX / OCR
-        // happened to finish already we use the cached value; otherwise
-        // we fall back to a minimal snapshot. Rationale: a fast tap-and-
-        // release session shouldn't sit blocked behind the 2.5 s OCR cap.
-        // Mid-session batches (pause-triggered) keep the awaiting path
-        // since the user is clearly speaking and we have time to spare.
-        //
-        // Additionally: when the final batch is short (<2 s) AND this is
-        // the only batch of the session, route through the lite path —
-        // a synchronous trimmed snapshot (no AX, no OCR) + a smaller
-        // system prompt at the Gemini layer. Reduces prompt by ~70% on
-        // single-word sessions where context never helps anyway.
-        let isFinalBatch = batch.contains { $0.isFinal }
-        let totalBatchSamples = batch.reduce(0) { $0 + ($1.pcmEnd - $1.pcmStart) }
-        // Lite path requires no prior transcript text to ship in the
-        // `Prior chunks (this session):` section. Recoverable failures
-        // (markers) don't produce text, so they don't disqualify the
-        // lite path — if every prior call failed, the prompt's prior
-        // section would be `(none yet)` anyway and the trimmed shape
-        // still fits. Use `currentPriors().count` rather than
-        // `responses.count` for this reason.
-        let isShortFinalOnly = Self.shouldUseLitePath(
-            isFinalBatch: isFinalBatch,
-            priorTranscriptCount: currentPriors().count,
-            totalBatchSamples: totalBatchSamples
-        )
-        guard let snap = await snapshotForChunk(
-            allowMinimalFallback: isFinalBatch,
-            forceLite: isShortFinalOnly
-        ) else { return }
-
         let recorder = self.recorder
         let gemini = self.gemini
 
@@ -871,6 +908,22 @@ final class RecordingSession {
         // / lip clicks would otherwise produce empty Gemini calls).
         // `samples` carries the PCM sample count for the downstream
         // `HallucinationLengthGate` (audio duration = samples / 16 kHz).
+        //
+        // Encoding runs BEFORE the lite-path discriminator below so the
+        // gate can key on the post-drop chunk count (`encoded.count`):
+        // the lite dispatch ships a single audio, so a batch that encodes
+        // to ≥2 chunks must never take that path (R1).
+        //
+        // `ChunkBuilder.encodeAAC` round-trips PCM through a temp m4a file
+        // (write + flush + read-back). That blocking file IO must not run
+        // on the @MainActor — it would hitch the menu-bar UI / spectrum
+        // meter once per chunk. Offload each encode onto a detached task
+        // and `await` its `Data` result; only the PCM read (`recorder.samples`)
+        // and the `encoded` bookkeeping + `markFailure` stay on the main
+        // actor. `pcm` is a `Sendable [Float]` captured by value, so the
+        // detached closure is race-free (R17 / KTD-8). Order is preserved:
+        // each encode is awaited in turn and appended in loop order, so
+        // `encoded.count` still feeds the gate unchanged.
         var encoded: [EncodedChunk] = []
         for pc in batch {
             let pcm = recorder.samples(from: pc.pcmStart, to: pc.pcmEnd)
@@ -879,7 +932,7 @@ final class RecordingSession {
                 continue
             }
             do {
-                let aac = try ChunkBuilder.encodeAAC(pcm)
+                let aac = try await Task.detached { try ChunkBuilder.encodeAAC(pcm) }.value
                 encoded.append(EncodedChunk(idx: pc.index, isFinal: pc.isFinal, audio: aac, samples: pcm.count))
             } catch {
                 Self.log.error("encode chunk_\(pc.index) failed: \(error.localizedDescription, privacy: .public)")
@@ -894,13 +947,51 @@ final class RecordingSession {
             ? "chunk_\(encoded[0].idx)"
             : "chunks_\(encoded.first?.idx ?? -1)..\(encoded.last?.idx ?? -1)"
 
+        // Batches containing the **final** chunk come from a user release.
+        // For those we don't wait on the context task — if AX / OCR
+        // happened to finish already we use the cached value; otherwise
+        // we fall back to a minimal snapshot. Rationale: a fast tap-and-
+        // release session shouldn't sit blocked behind the 2.5 s OCR cap.
+        // Mid-session batches (pause-triggered) keep the awaiting path
+        // since the user is clearly speaking and we have time to spare.
+        //
+        // Additionally: when the final batch is short (<2 s) AND this is
+        // the only batch of the session AND it encoded to a single chunk,
+        // route through the lite path — a synchronous trimmed snapshot
+        // (no AX, no OCR) + a smaller system prompt at the Gemini layer.
+        // Reduces prompt by ~70% on single-word sessions where context
+        // never helps anyway.
+        let isFinalBatch = batch.contains { $0.isFinal }
+        let totalBatchSamples = batch.reduce(0) { $0 + ($1.pcmEnd - $1.pcmStart) }
+        // Lite path requires no prior transcript text to ship in the
+        // `Prior chunks (this session):` section. Recoverable failures
+        // (markers) don't produce text, so they don't disqualify the
+        // lite path — if every prior call failed, the prompt's prior
+        // section would be `(none yet)` anyway and the trimmed shape
+        // still fits. Use `currentPriors().count` rather than
+        // `responses.count` for this reason. `batchChunkCount` is the
+        // post-encode chunk count so a short-but-multi-chunk final batch
+        // stays on the batched path (see invariant 11 / R1).
+        let isShortFinalOnly = Self.shouldUseLitePath(
+            isFinalBatch: isFinalBatch,
+            priorTranscriptCount: currentPriors().count,
+            totalBatchSamples: totalBatchSamples,
+            batchChunkCount: encoded.count
+        )
+        guard let snap = await snapshotForChunk(
+            allowMinimalFallback: isFinalBatch,
+            forceLite: isShortFinalOnly
+        ) else { return }
+
         do {
             let result: (text: String, tokens: TokenUsage)
             if snap.isLite {
                 // Lite path is reachable only via the discriminator in
-                // `processBatch` — guaranteed `encoded.count == 1` and
-                // `containsFinal == true` by construction (final-only
-                // batch, no successful priors, audio < 2 s).
+                // `processBatch`, which gates on `batchChunkCount == 1`
+                // — so `encoded.count == 1` is enforced (not merely
+                // implied by the <2 s threshold) and `containsFinal` is
+                // true (final-only batch, no successful priors). Shipping
+                // `encoded[0]` therefore covers the whole batch (R1).
                 let one = encoded[0]
                 result = try await gemini.transcribeShortWithUsage(
                     audio: one.audio,

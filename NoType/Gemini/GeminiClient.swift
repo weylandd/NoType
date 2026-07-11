@@ -37,6 +37,13 @@ actor GeminiClient {
         case decoding(Error)
         case empty
         case blocked(String)
+        /// Gemini stopped generating because it hit the output-token cap
+        /// (`finishReason == "MAX_TOKENS"`) — the returned text is a
+        /// partial, silently-cut transcript. Recoverable (not terminal):
+        /// classified as a gap so the user sees a `[…]` marker instead of
+        /// a sentence that looks complete but isn't. See
+        /// `finishReasonError(_:)` and `RecordingSession.isTerminal(_:)`.
+        case truncated
 
         var errorDescription: String? {
             switch self {
@@ -50,6 +57,7 @@ actor GeminiClient {
             case .decoding:                         "Couldn't read Gemini's response."
             case .empty:                            "Gemini returned an empty transcription."
             case .blocked(let reason):              "Gemini blocked the request: \(reason)."
+            case .truncated:                        "Gemini cut the transcription short."
             }
         }
 
@@ -307,6 +315,41 @@ actor GeminiClient {
         let category = AppCategory.parseClassifierResponse(raw.category ?? "")
         let confidence = AppCategoryAssignment.Confidence(rawClassifierValue: raw.confidence ?? "") ?? .low
         return AppCategoryClassification(category: category, confidence: confidence)
+    }
+
+    /// Maps a candidate's `finishReason` to a `GeminiError`, or `nil` to
+    /// keep the returned text. A clean transcription ends with `STOP`;
+    /// anything else is worth a log at the call site. Two classes get
+    /// mapped to errors:
+    ///
+    /// - **Content blocks** (`SAFETY` / `RECITATION` / `PROHIBITED_CONTENT`
+    ///   / `BLOCKLIST` / `SPII` / `IMAGE_SAFETY`) → `.blocked` — same
+    ///   terminal treatment as a prompt-level `promptFeedback.blockReason`,
+    ///   surfacing the reason to the user rather than silently pasting the
+    ///   empty/partial candidate.
+    /// - **`MAX_TOKENS`** → `.truncated` — the text is a silently-cut
+    ///   partial; recoverable so it becomes a `[…]` gap marker instead of
+    ///   looking like a complete sentence.
+    ///
+    /// Unknown / future reasons (`OTHER`, `LANGUAGE`, unspecified, …) return
+    /// `nil`: we don't reject a usable transcript over a reason we don't
+    /// recognise — the caller just logs it. Pinned by
+    /// `GeminiFinishReasonTests`.
+    static func finishReasonError(_ finishReason: String?) -> GeminiError? {
+        guard let reason = finishReason?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !reason.isEmpty else {
+            return nil
+        }
+        switch reason.uppercased() {
+        case "STOP":
+            return nil
+        case "MAX_TOKENS":
+            return .truncated
+        case "SAFETY", "RECITATION", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "IMAGE_SAFETY":
+            return .blocked(reason)
+        default:
+            return nil
+        }
     }
 
     /// Escape display name / bundle id for embedding inside a quoted
@@ -809,6 +852,20 @@ actor GeminiClient {
             throw GeminiError.blocked(block)
         }
 
+        // Inspect the candidate's finishReason. A clean transcription ends
+        // with STOP; a content block (SAFETY/RECITATION/…) surfaces here as
+        // a candidate-level reason even when promptFeedback carries none,
+        // and MAX_TOKENS means the text is a silently-cut partial. Map both
+        // to errors (blocked → terminal, truncated → recoverable `[…]`
+        // marker); log any other non-STOP reason but keep the text.
+        let finishReason = parsed.candidates?.first?.finishReason
+        if let reasonError = Self.finishReasonError(finishReason) {
+            Self.log.error("\(logID) non-STOP finishReason=\(finishReason ?? "nil", privacy: .public)")
+            throw reasonError
+        } else if let reason = finishReason, reason.uppercased() != "STOP" {
+            Self.log.notice("\(logID) unhandled finishReason=\(reason, privacy: .public) — keeping text")
+        }
+
         // Capture usage metadata before any further can-throw paths.
         // Production code ignores this; the prompt-eval harness reads
         // `lastUsage` after a successful call. Set on every parsed
@@ -856,7 +913,10 @@ actor GeminiClient {
 
     private func retryDecision(for error: GeminiError, attempt: Int) -> RetryDecision {
         switch error {
-        case .missingKey, .blocked, .empty, .decoding:
+        case .missingKey, .blocked, .empty, .decoding, .truncated:
+            // `.truncated` re-issues identically → same cap hit; no point
+            // burning HTTP-level retries. Recovery happens one layer up as
+            // a gap marker (see `RecordingSession.isTerminal`).
             return RetryDecision(delayMs: nil)
 
         case .http(let status, _):
