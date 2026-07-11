@@ -1684,11 +1684,19 @@ final class AppState {
         }
     }
 
-    /// Update both sides of an existing replacement by id.
+    /// Update both sides of an existing replacement by id. Rejects an
+    /// edit whose `from` (case-insensitively) collides with a *different*
+    /// pair — mirrors `DictionaryStore.updateReplacement` so the
+    /// main-actor mirror and the persisted store never diverge into two
+    /// rows with case-insensitively-equal `from`.
     func updateReplacement(id: UUID, from: String, to: String) {
         let cleanedFrom = from.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedTo = to.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanedFrom.isEmpty, !cleanedTo.isEmpty else { return }
+        let lower = cleanedFrom.lowercased()
+        guard !dictionaryReplacements.contains(where: { $0.from.lowercased() == lower && $0.id != id }) else {
+            return
+        }
         if let idx = dictionaryReplacements.firstIndex(where: { $0.id == id }) {
             let existing = dictionaryReplacements[idx]
             dictionaryReplacements[idx] = DictionaryReplacement(
