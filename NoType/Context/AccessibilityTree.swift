@@ -479,11 +479,11 @@ enum AccessibilityTree {
         guard let cfArray = raw as? [AnyObject] else { return [] }
         return cfArray.compactMap { obj -> AXUIElement? in
             // AXUIElement bridges as CFType, and Swift treats it as AnyObject
-            // when stored in a CFArray. The unsafeBitCast through the AXUIElement
-            // type is the canonical way to cast an AnyObject element back when
-            // we know the array's element type.
+            // when stored in a CFArray. Guard on the CFTypeID, then a
+            // non-forced cast (no `as!`, per the no-force-unwrap convention) —
+            // a stray non-AXUIElement element is dropped rather than trapping.
             guard CFGetTypeID(obj) == AXUIElementGetTypeID() else { return nil }
-            return (obj as! AXUIElement)
+            return unsafeDowncast(obj, to: AXUIElement.self)
         }
     }
 }

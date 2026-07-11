@@ -244,7 +244,10 @@ struct InsertionTarget: Sendable, Equatable {
             log.info("ax capture: no focused element (err=\(focusErr.rawValue, privacy: .public))")
             return .unknown
         }
-        let element = focused as! AXUIElement
+        // CFGetTypeID above is the real type check; `AnyObject → AXUIElement`
+        // has no `as?`/`as` form (see AXAttr.element), so the guarded,
+        // non-forced `unsafeDowncast` replaces the old `as!` — no trap (R12).
+        let element = unsafeDowncast(focused, to: AXUIElement.self)
 
         // Refuse to read password fields outright — mirrors the
         // SecureFieldMasker skip rule used by the AX walker. The
@@ -358,7 +361,7 @@ struct InsertionTarget: Sendable, Equatable {
         if rangeErr == .success,
            let raw = rangeRaw,
            CFGetTypeID(raw) == AXValueGetTypeID() {
-            let axValue = raw as! AXValue
+            let axValue = unsafeDowncast(raw, to: AXValue.self)
             if AXValueGetType(axValue) == .cfRange {
                 AXValueGetValue(axValue, .cfRange, &range)
             }
@@ -413,10 +416,9 @@ struct InsertionTarget: Sendable, Equatable {
             &lineRaw
         )
         guard err == .success, let raw = lineRaw else { return nil }
-        var line: Int = 0
-        if CFGetTypeID(raw) == CFNumberGetTypeID() {
-            CFNumberGetValue((raw as! CFNumber), .nsIntegerType, &line)
-        } else { return nil }
+        guard CFGetTypeID(raw) == CFNumberGetTypeID(),
+              let lineNumber = raw as? NSNumber else { return nil }
+        let line = lineNumber.intValue
 
         var lineRangeRaw: CFTypeRef?
         var lineNumberValue = line
@@ -429,7 +431,7 @@ struct InsertionTarget: Sendable, Equatable {
         guard lineRangeErr == .success,
               let lrr = lineRangeRaw,
               CFGetTypeID(lrr) == AXValueGetTypeID() else { return nil }
-        let axValue = lrr as! AXValue
+        let axValue = unsafeDowncast(lrr, to: AXValue.self)
         guard AXValueGetType(axValue) == .cfRange else { return nil }
         var lineRange = CFRange(location: 0, length: 0)
         AXValueGetValue(axValue, .cfRange, &lineRange)
@@ -499,10 +501,9 @@ struct InsertionTarget: Sendable, Equatable {
         var raw: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(element, key as CFString, &raw)
         guard err == .success, let raw else { return nil }
-        guard CFGetTypeID(raw) == CFNumberGetTypeID() else { return nil }
-        var out: Int = 0
-        guard CFNumberGetValue(raw as! CFNumber, .nsIntegerType, &out) else { return nil }
-        return out
+        guard CFGetTypeID(raw) == CFNumberGetTypeID(),
+              let number = raw as? NSNumber else { return nil }
+        return number.intValue
     }
 
     /// Slice a String on UTF-16 code-unit boundaries. Falls back to a
