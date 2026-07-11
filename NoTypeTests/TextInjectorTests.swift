@@ -567,4 +567,88 @@ final class TextInjectorTests: XCTestCase {
         let stitched = TextInjector.stitchChunks(pieces)
         XCTAssertEqual(stitched, "Hello world \(RecordingSession.failureMarker)")
     }
+
+    // MARK: - U19: clipboard-restore change-count gate (R18)
+    //
+    // After NoType writes the transcript to the pasteboard it posts ⌘V and
+    // waits `restoreDelayMs` before putting the user's original clipboard
+    // back. If the user hits ⌘C during that window, restoring would clobber
+    // their fresh copy. `shouldRestoreClipboard` gates restore on the
+    // pasteboard's `changeCount`: ⌘V is a read (no bump), a user copy calls
+    // `clearContents` (bump), so a moved count means "skip restore".
+
+    func test_restoreGate_countUnchanged_restores() {
+        // No intervening copy: the count our write left behind is still
+        // current → restore the user's original clipboard.
+        XCTAssertTrue(TextInjector.shouldRestoreClipboard(
+            writeChangeCount: 7,
+            currentChangeCount: 7
+        ))
+    }
+
+    func test_restoreGate_countMoved_skipsRestore() {
+        // A real ⌘C during the restore delay bumps the count → skip
+        // restore so the user's fresh copy survives.
+        XCTAssertFalse(TextInjector.shouldRestoreClipboard(
+            writeChangeCount: 7,
+            currentChangeCount: 8
+        ))
+    }
+
+    @MainActor
+    func test_restoreGate_realPasteboard_userCopyDuringDelay_isPreserved() {
+        // Drives the gate against a real *isolated* NSPasteboard (never the
+        // system `.general` one) to pin the actual `changeCount` semantics
+        // the fix rests on: our clear+setString commits a count; a
+        // subsequent user copy (clearContents) exceeds it. The ⌘V NoType
+        // posts is a read and never reaches this pasteboard in the test.
+        let pb = NSPasteboard(name: NSPasteboard.Name("app.notype.tests.\(UUID().uuidString)"))
+        defer { pb.releaseGlobally() }
+
+        // The user's original clipboard, snapshotted before our paste.
+        pb.clearContents()
+        pb.setString("USER ORIGINAL", forType: .string)
+        _ = PasteboardSnapshot.capture(pb)
+
+        // Our paste writes the transcript; record the post-write count.
+        pb.clearContents()
+        pb.setString("NoType transcript", forType: .string)
+        let writeChangeCount = pb.changeCount
+
+        // User hits ⌘C during the restore delay → a new copy lands.
+        pb.clearContents()
+        pb.setString("USER COPIED DURING DELAY", forType: .string)
+
+        XCTAssertFalse(
+            TextInjector.shouldRestoreClipboard(
+                writeChangeCount: writeChangeCount,
+                currentChangeCount: pb.changeCount
+            ),
+            "a user copy during the delay must skip restore"
+        )
+        // Because restore is skipped, the user's fresh copy survives.
+        XCTAssertEqual(pb.string(forType: .string), "USER COPIED DURING DELAY")
+    }
+
+    @MainActor
+    func test_restoreGate_realPasteboard_noIntervening_restoresOriginal() {
+        let pb = NSPasteboard(name: NSPasteboard.Name("app.notype.tests.\(UUID().uuidString)"))
+        defer { pb.releaseGlobally() }
+
+        pb.clearContents()
+        pb.setString("USER ORIGINAL", forType: .string)
+        let snapshot = PasteboardSnapshot.capture(pb)
+
+        pb.clearContents()
+        pb.setString("NoType transcript", forType: .string)
+        let writeChangeCount = pb.changeCount
+
+        // No user copy during the delay — the ⌘V NoType posts is read-only.
+        XCTAssertTrue(TextInjector.shouldRestoreClipboard(
+            writeChangeCount: writeChangeCount,
+            currentChangeCount: pb.changeCount
+        ))
+        snapshot.restore(to: pb)
+        XCTAssertEqual(pb.string(forType: .string), "USER ORIGINAL")
+    }
 }
