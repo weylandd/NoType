@@ -910,6 +910,17 @@ final class RecordingSession {
         // gate can key on the post-drop chunk count (`encoded.count`):
         // the lite dispatch ships a single audio, so a batch that encodes
         // to ≥2 chunks must never take that path (R1).
+        //
+        // `ChunkBuilder.encodeAAC` round-trips PCM through a temp m4a file
+        // (write + flush + read-back). That blocking file IO must not run
+        // on the @MainActor — it would hitch the menu-bar UI / spectrum
+        // meter once per chunk. Offload each encode onto a detached task
+        // and `await` its `Data` result; only the PCM read (`recorder.samples`)
+        // and the `encoded` bookkeeping + `markFailure` stay on the main
+        // actor. `pcm` is a `Sendable [Float]` captured by value, so the
+        // detached closure is race-free (R17 / KTD-8). Order is preserved:
+        // each encode is awaited in turn and appended in loop order, so
+        // `encoded.count` still feeds the gate unchanged.
         var encoded: [EncodedChunk] = []
         for pc in batch {
             let pcm = recorder.samples(from: pc.pcmStart, to: pc.pcmEnd)
@@ -918,7 +929,7 @@ final class RecordingSession {
                 continue
             }
             do {
-                let aac = try ChunkBuilder.encodeAAC(pcm)
+                let aac = try await Task.detached { try ChunkBuilder.encodeAAC(pcm) }.value
                 encoded.append(EncodedChunk(idx: pc.index, isFinal: pc.isFinal, audio: aac, samples: pcm.count))
             } catch {
                 Self.log.error("encode chunk_\(pc.index) failed: \(error.localizedDescription, privacy: .public)")
