@@ -127,6 +127,40 @@ final class MicProbe: @unchecked Sendable {
         lock.lock(); pcm = []; lock.unlock()
     }
 
+    /// Safety net for the mic (R20). The normal teardown is `.onDisappear`
+    /// → `stop()`, but if that never fires — window torn down out of order,
+    /// SwiftUI view reuse, an early-return error path — the probe can be
+    /// released with the engine still running, leaving the input light on.
+    /// Mirror `stop()`'s teardown here so the mic is always released once
+    /// the probe deallocs.
+    ///
+    /// `deinit` runs nonisolated (MicProbe is `@unchecked Sendable`, not
+    /// `@MainActor`), so it can't call the `@MainActor stop()`; it repeats
+    /// the same steps inline against this now-unreferenced instance. All
+    /// calls are deinit-safe: `Task.cancel()` and
+    /// `NotificationCenter.removeObserver` are thread-safe, and the engine
+    /// teardown touches only `self` (no concurrent access at dealloc).
+    /// Idempotent after `stop()` — every field is already cleared, so each
+    /// branch is a no-op on the normal path.
+    ///
+    /// We deliberately do NOT resume the device-observation continuation
+    /// from here: the `Task` captures `self` weakly and holds no mic, so a
+    /// still-parked continuation is a benign leak that resolves on the next
+    /// `selectedUID` change — cheaper than the double-resume guard a
+    /// `withTaskCancellationHandler` would need.
+    deinit {
+        deviceObservationTask?.cancel()
+        if let observer = configChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if tapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+        }
+        if engine.isRunning {
+            engine.stop()
+        }
+    }
+
     /// Trailing PCM samples for `AudioSpectrum.bands(from:bandCount:)`.
     /// Returns an empty array if fewer than `count` samples have arrived.
     /// Safe to call from any thread — guarded by `lock`.

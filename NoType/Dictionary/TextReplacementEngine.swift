@@ -18,26 +18,29 @@ import Foundation
 /// in the user's input only generates one extra variant, not the full
 /// stress-test set. The user can add an explicit pair if they need it.
 ///
-/// Word boundaries are ICU-aware (`NSRegularExpression`'s `\b` uses
-/// Unicode word-character classes), so Cyrillic and other non-ASCII
-/// alphabets work as expected — `то есть` won't match inside `кто
-/// есть`.
+/// Word boundaries use a Unicode look-around against `[\p{L}\p{N}]`
+/// (not `\b`), so Cyrillic and other non-ASCII alphabets work as
+/// expected — `то есть` won't match inside `кто есть` — AND pairs whose
+/// `from` starts or ends with punctuation (`т.е.`, `e.g.`, `.com`,
+/// `c#`, `#tag`) still match at real boundaries. `\b` would mis-anchor
+/// those because ICU treats leading / trailing punctuation as non-word.
 ///
-/// Each pair is applied to the **input** independently (no cascading) —
-/// avoids loops when the user enters two pairs that chain (`ML → machine
-/// learning` plus `learning → studying` would otherwise produce `machine
-/// studying`). The price is that overlapping pairs can produce
-/// surprising outcomes; trade-off chosen for predictability over
-/// "smart" sequential application.
+/// Each pair is applied **sequentially to the running result**, so later
+/// pairs see the output of earlier ones — they cascade. `ML → machine
+/// learning` followed by `learning → studying` therefore produces
+/// `machine studying`, because the second pair's regex runs against the
+/// text the first pair already rewrote. This is deliberate: pairs apply
+/// in creation order and the user controls that order. The trade-off is
+/// that overlapping pairs can chain in surprising ways — predictable
+/// ordering was chosen over trying to detect and block cascades.
 enum TextReplacementEngine {
 
-    /// Apply `replacements` to `text` and return the result. Order of
-    /// pairs follows `replacements` (creation order); each pair is
-    /// applied to the original text and the results are merged into one
-    /// final output via sequential string mutation, but each `from`
-    /// pattern is matched against the **pre-replacement** snapshot for
-    /// that pair — so a `to` containing another pair's `from` won't
-    /// trigger a second replacement.
+    /// Apply `replacements` to `text` and return the result. Pairs run in
+    /// `replacements` order (creation order), each as a single regex pass
+    /// over the **running** result. A pair never re-scans its own output,
+    /// but a *later* pair whose `from` appears in an *earlier* pair's `to`
+    /// WILL match — the pairs cascade in creation order. Ordering is the
+    /// user's control.
     static func apply(_ text: String, replacements: [DictionaryReplacement]) -> String {
         guard !text.isEmpty, !replacements.isEmpty else { return text }
 
@@ -88,13 +91,22 @@ enum TextReplacementEngine {
     }
 
     /// Word-boundary replacement using `NSRegularExpression`. The
-    /// pattern is `\b<escaped find>\b`; ICU's `\b` covers Unicode word
-    /// characters, so Cyrillic / Greek / etc. work without extra
-    /// plumbing. `find` is escaped, so dots, plus signs, brackets etc.
-    /// are treated literally. The replacement template needs separate
-    /// escaping because regex replacement honours `$0..$9` and `\$`.
+    /// pattern wraps the escaped `find` in a Unicode look-around —
+    /// `(?<![\p{L}\p{N}]) … (?![\p{L}\p{N}])` — instead of `\b`. ICU's
+    /// `\b` treats leading / trailing punctuation in `find` (`т.е.`,
+    /// `e.g.`, `.com`, `c#`, `#tag`) as non-word, so a `\b` anchored
+    /// against a punctuation edge either fails to match or matches
+    /// inside a larger token. The look-around instead asserts only that
+    /// the characters immediately outside the match are not
+    /// letters/digits, which handles both alphabetic and
+    /// punctuation-bounded `from` values. Mirrors
+    /// `DictionaryHarvester.findInContext` so the module shares one
+    /// boundary idiom. `find` is escaped, so dots, plus signs, brackets
+    /// etc. are treated literally. The replacement template needs
+    /// separate escaping because regex replacement honours `$0..$9` and
+    /// `\$`.
     private static func replaceWordBoundary(in text: String, find: String, with replacement: String) -> String {
-        let pattern = "\\b" + NSRegularExpression.escapedPattern(for: find) + "\\b"
+        let pattern = "(?<![\\p{L}\\p{N}])" + NSRegularExpression.escapedPattern(for: find) + "(?![\\p{L}\\p{N}])"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
             return text
         }

@@ -1,6 +1,7 @@
 ---
 title: Optional screenshot + OCR fallback for AX-poor apps
 date: 2026-05-15
+last_updated: 2026-07-11
 category: architecture-patterns
 module: Context
 problem_type: architecture_pattern
@@ -57,6 +58,7 @@ The feature is **opt-in via the Screen Recording TCC permission**, with an in-ap
 
 **Decisions inside the decision:**
 
+- **First-press permission prompt is gated on the OCR toggle (OQ2 / R22).** On the very first hotkey press with Screen Recording still `.notDetermined`, NoType defers the session to surface the ScreenCaptureKit TCC prompt — **but only when the OCR fallback is enabled**. The pure gate `AppState.shouldDeferForScreenRecordingPrompt(fallbackEnabled:screenRecordingNotDetermined:)` returns `fallbackEnabled && screenRecordingNotDetermined`. @kopachev decided (OQ2) to **keep** the first-press prompt when OCR is ON — so the system prompt surfaces up front rather than interrupting the user mid-recording — and to **skip** it (record immediately) when OCR is OFF, since a user who turned screen-capture context off is never interrupted for a permission the OCR limb will never touch. This is an intentional product decision, not an oversight. Pinned by `AppStateScreenRecordingGateTests`.
 - **Active window only.** Full-screen OCR would be ~2× the cost and dramatically widen the privacy surface.
 - **OCR is on the critical path of the first chunk** (but masked by VAD timing). The first audio chunk can't be produced until VAD detects a ≥1 s pause OR the user releases, so for any session > 1 s the OCR latency is masked by speech time.
 - **Type-level guarantee preserved.** `ScreenCaptureContext.capture(...)` returns `RedactedScreenText?` with a module-internal initializer — same shape as `RedactedAXSnapshot`. There is no public path from raw `CGImage` text to the network.

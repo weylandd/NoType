@@ -179,10 +179,12 @@ enum DictionaryHarvester {
                 // All sub-phrases [a..b] containing the trigger position.
                 // Sort longest-first; ties keep stable order so left-anchored
                 // phrases tend to come before right-anchored at same length.
-                var triggerCandidates: [[String]] = []
+                // Kept as `[Token]` (not `[String]`) so `processCandidate`
+                // can inspect the head token's sentence-start flag.
+                var triggerCandidates: [[Token]] = []
                 for a in leftWin...triggerIdx {
                     for b in triggerIdx...rightWin {
-                        triggerCandidates.append((a...b).map { sentenceTokens[$0].text })
+                        triggerCandidates.append((a...b).map { sentenceTokens[$0] })
                     }
                 }
                 triggerCandidates.sort { lhs, rhs in lhs.count > rhs.count }
@@ -211,7 +213,7 @@ enum DictionaryHarvester {
     /// by a per-candidate filter (boundary fail, length, context miss);
     /// the caller should try the next, shorter candidate.
     private static func processCandidate(
-        tokens: [String],
+        tokens: [Token],
         context: String,
         existingSequences: [[String]],
         savedSequences: inout [[String]],
@@ -222,19 +224,38 @@ enum DictionaryHarvester {
         // Boundary filter: phrase endpoints must look non-prose. Filters
         // `на Actions artifacts` (first `на` lowercase prose),
         // `Actions artifacts` (last `artifacts` lowercase prose).
-        guard hasInterestingSignal(first), hasInterestingSignal(last) else { return false }
+        guard hasInterestingSignal(first.text), hasInterestingSignal(last.text) else { return false }
+
+        // Chrome-head guard: `hasInterestingSignal` accepts any token
+        // carrying a capital letter, so a sentence-start chrome word
+        // (`Вот`, `The`, `Так`) qualifies as a phrase head and
+        // longest-first then prefers the chrome-led n-gram (`Вот
+        // Anthropic`) over the clean term (`Anthropic`). A first-cap-
+        // plain word at sentence-start is chrome, not signal — reject it
+        // as a head so the loop falls back to a shorter candidate whose
+        // head carries real signal. Heads that pass the strict shape
+        // filter (`iPhone`, `h264`, `bin/`) keep their signal even at
+        // sentence-start, so they are exempt. Mirrors the head check in
+        // the (otherwise-unreachable) `shouldSave`.
+        if first.isSentenceStart,
+           !passesShape(first.text),
+           isFirstCapPlainShape(first.text) {
+            return false
+        }
+
+        let textTokens = tokens.map { $0.text }
 
         // Single-token minimum length (filters `UI` and other 2-char generics).
-        if tokens.count == 1, tokens[0].count < minSingleTokenLength { return false }
+        if textTokens.count == 1, textTokens[0].count < minSingleTokenLength { return false }
 
         // Sanity cap on phrase length.
-        let joined = tokens.joined(separator: " ")
+        let joined = textTokens.joined(separator: " ")
         if joined.count > sanityMaxLength { return false }
 
         // Context verbatim match.
-        guard findInContext(phrase: tokens, context: context) != nil else { return false }
+        guard findInContext(phrase: textTokens, context: context) != nil else { return false }
 
-        let candidateSeq = tokens.map { $0.lowercased() }
+        let candidateSeq = textTokens.map { $0.lowercased() }
 
         // Substring dedup against saves already made this session.
         // Stops descending to shorter phrases — they'd be even more

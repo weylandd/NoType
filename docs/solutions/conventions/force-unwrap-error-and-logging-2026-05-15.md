@@ -10,7 +10,7 @@ applies_when:
   - Writing any new Swift code path with optionals
   - Adding a new error type or `throw` site
   - Adding a new `os.Logger` callsite
-tags: [force-unwrap, error-handling, logging, os-logger, privacy, swift]
+tags: [force-unwrap, error-handling, logging, os-logger, privacy, swift, cf-cast, ax, unsafe-downcast]
 ---
 
 # Force-unwrap, error handling, and logging conventions
@@ -34,6 +34,17 @@ Allowed only in:
 - **Compiled-once regex literals at file scope** (`try!` on a constant `NSRegularExpression` whose pattern is a string literal — a malformed pattern is a programming error, not a runtime condition).
 
 Prefer `guard let … else { throw … }` or `guard let … else { return }` with an `os_log` if applicable.
+
+#### CF / AX bridge casts — the guarded `unsafeDowncast` idiom
+
+Casting `AnyObject` / `CFTypeRef` to a CF or AX type (`AXUIElement`, `AXValue`) is where `as!` sneaks back into "no-force-unwrap" code, because Swift rejects both safe forms: `as?` is a **compile error** ("conditional downcast always succeeds" — fatal under warnings-as-errors) and plain `as` is "not convertible". The compliant, non-trapping idiom is a `CFGetTypeID` guard immediately dominating a `unsafeDowncast` (the typed sibling of the codebase's `unsafeBitCast`):
+
+```swift
+guard CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
+return unsafeDowncast(raw, to: AXUIElement.self)   // NOT `raw as! AXUIElement`
+```
+
+The `CFGetTypeID` check is the real type test, so `unsafeDowncast` can't trap. For a toll-free-bridged `CFNumber`, prefer `raw as? NSNumber` + `.intValue` over `CFNumberGetValue`. Never a bare `as!` on these types. Reference: `NoType/Context/AXAttr.swift` (`element(_:_:)`), `ContextSnapshot.swift`, `CategoryResolver.swift`.
 
 ### Error handling
 

@@ -15,7 +15,8 @@ See `docs/solutions/README.md` for the frontmatter contract and body structure.
 - [Positive-spelling AX fixture for prompt-eval](solutions/documentation-gaps/positive-spelling-ax-fixture-2026-05-18.md) — **S**; recorded fixture missing, test removed in PR #47.
 - [Dynamic terminal-app detection via AppCategorizer](solutions/documentation-gaps/dynamic-terminal-detection-2026-05-18.md) — **M**; R5 gate bypassed for terminals outside the hardcoded 8-entry set.
 - [Token usage deltas + cache-hits indicator](solutions/documentation-gaps/token-usage-deltas-and-cache-hits-2026-05-18.md) — **M**; Settings → API & Usage panel ships v1 without per-period deltas or cache-hit %.
-- [Move Gemini key to the data-protection keychain](solutions/documentation-gaps/keychain-data-protection-migration-2026-05-30.md) — **L**; legacy file-keychain ACL is pinned to the rotating Apple Development cert → key "disappears" (`errSecAuthFailed`) or pops the login-password prompt. Migrate to access-group-scoped storage.
+- [Mid-session device-swap rebuild could orphan an IOProc in a narrow race](solutions/documentation-gaps/device-swap-rebuild-orphan-2026-07-10.md) — **S**; existing `stopped`-latch + queue drain cover the known windows; add a rebuild-generation token only if a repro appears.
+- [ContextSnapshot.minimal drops instruction/dictionary parts on a fast utterance](solutions/documentation-gaps/context-minimal-part-count-2026-07-10.md) — **S**; the non-lite quick-release fallback ships without per-app instructions/dictionary; thread them in if it ever matters.
 
 ## Closing an entry
 

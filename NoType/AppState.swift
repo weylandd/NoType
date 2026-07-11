@@ -8,7 +8,6 @@ enum RecordingState: Equatable, Sendable {
     case idle
     case recording(startedAt: Date)
     case sending
-    case error(String)
 }
 
 @MainActor
@@ -424,6 +423,21 @@ final class AppState {
 
     // MARK: - Observation of PermissionsViewModel
 
+    /// Pure gate: when Accessibility is revoked, should an active session
+    /// be cancelled (not just have its hotkey tap torn down)? True while
+    /// the session is live — `.recording` or `.sending`. Extracted so
+    /// `AppStateAxRevokeTests` can pin the contract without standing up a
+    /// full `AppState`. Mirrors `cancelRecording()`'s own actionable-state
+    /// guard so the two never drift.
+    nonisolated static func shouldCancelActiveSessionOnAxRevoke(
+        recordingState: RecordingState
+    ) -> Bool {
+        switch recordingState {
+        case .recording, .sending: return true
+        case .idle:                return false
+        }
+    }
+
     /// Synchronous accessibility-state application — install or uninstall
     /// the hotkey to match the current permission. Called once at init
     /// and once after every change observed by `observePermissions()`.
@@ -431,6 +445,19 @@ final class AppState {
         if permissions.accessibility.isGranted {
             installHotkeyIfPossible()
         } else {
+            // Accessibility was revoked. If a session is live, unwind it
+            // fully — mic, HUD, sleep assertion, and any in-flight Gemini
+            // call — before tearing down the tap. Without the tap the
+            // release / Esc events can never arrive, so tearing down only
+            // the tap (the previous behaviour) would strand the session
+            // with the mic hot until the process dies (R4).
+            // `cancelRecording()` self-guards on state and releases the
+            // sleep assertion exactly once (both it and
+            // `releaseSleepAssertion()` are idempotent), so there is no
+            // double-release with the normal session-end paths.
+            if Self.shouldCancelActiveSessionOnAxRevoke(recordingState: recordingState) {
+                cancelRecording()
+            }
             uninstallHotkey()
         }
     }
@@ -749,6 +776,21 @@ final class AppState {
         return .applied
     }
 
+    /// Pure gate: on a first hotkey press with Screen Recording still
+    /// undecided, should the session be deferred to surface the TCC prompt?
+    /// True only when the OCR fallback is enabled — a user who disabled it
+    /// (Settings → Recording) is never interrupted for a permission the OCR
+    /// limb won't use (R22 / OQ2). Extracted so
+    /// `AppStateScreenRecordingGateTests` can pin the contract without
+    /// standing up a full `AppState`, mirroring
+    /// `shouldCancelActiveSessionOnAxRevoke`.
+    nonisolated static func shouldDeferForScreenRecordingPrompt(
+        fallbackEnabled: Bool,
+        screenRecordingNotDetermined: Bool
+    ) -> Bool {
+        fallbackEnabled && screenRecordingNotDetermined
+    }
+
     private func handleHotkeyPress() {
         // Onboarding step 4 (hotkey check) intercepts presses to drive
         // its own UI without starting a recording session. The CGEventTap
@@ -806,7 +848,16 @@ final class AppState {
         // before any audio capture, and let the user decide. The next
         // press proceeds normally — at that point the status is granted
         // or denied, and the OCR limb behaves accordingly.
-        if ScreenRecordingPermission.current() == .notDetermined {
+        //
+        // Gated on the OCR toggle (R22 / OQ2): only defer when the
+        // screen-capture fallback is ON. A user who turned OCR off will
+        // never hit the ScreenCaptureKit path, so interrupting their first
+        // dictation for a permission it won't use is pure friction — fall
+        // through and record immediately in that case.
+        if Self.shouldDeferForScreenRecordingPrompt(
+            fallbackEnabled: screenCaptureFallbackEnabled,
+            screenRecordingNotDetermined: ScreenRecordingPermission.current() == .notDetermined
+        ) {
             Self.log.info("hotkey: screen-recording not yet asked; deferring session to surface prompt")
             Task { await permissions.requestScreenRecording() }
             return
@@ -1063,10 +1114,10 @@ final class AppState {
     /// installs a synthetic `CancellationError` so a racing `stop()`
     /// path bails cleanly without trying to paste a partial transcript.
     private func cancelRecording() {
-        // Stray Escape when idle/error is a harmless no-op (the CGEventTap
+        // Stray Escape when idle is a harmless no-op (the CGEventTap
         // fires for every keystroke globally, we just filter here).
         switch recordingState {
-        case .idle, .error: return
+        case .idle: return
         case .recording, .sending: break
         }
         guard let session = currentSession else { return }
@@ -1633,11 +1684,19 @@ final class AppState {
         }
     }
 
-    /// Update both sides of an existing replacement by id.
+    /// Update both sides of an existing replacement by id. Rejects an
+    /// edit whose `from` (case-insensitively) collides with a *different*
+    /// pair — mirrors `DictionaryStore.updateReplacement` so the
+    /// main-actor mirror and the persisted store never diverge into two
+    /// rows with case-insensitively-equal `from`.
     func updateReplacement(id: UUID, from: String, to: String) {
         let cleanedFrom = from.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedTo = to.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanedFrom.isEmpty, !cleanedTo.isEmpty else { return }
+        let lower = cleanedFrom.lowercased()
+        guard !dictionaryReplacements.contains(where: { $0.from.lowercased() == lower && $0.id != id }) else {
+            return
+        }
         if let idx = dictionaryReplacements.firstIndex(where: { $0.id == id }) {
             let existing = dictionaryReplacements[idx]
             dictionaryReplacements[idx] = DictionaryReplacement(
@@ -1915,6 +1974,18 @@ enum NoTypeErrorKind {
                     code: "ERR_DECODE",
                     severity: .danger,
                     iconSymbol: "exclamationmark.triangle.fill"
+                )
+            case .truncated:
+                // Only reached when a whole session's transcription was cut
+                // short (single chunk, or every chunk hit the output cap).
+                // In multi-chunk sessions a truncated chunk becomes a `[…]`
+                // gap and never surfaces here.
+                return ErrorPayload(
+                    title: "Transcription cut short",
+                    description: "Gemini stopped before finishing. Try dictating in shorter bursts.",
+                    code: "ERR_TRUNCATED",
+                    severity: .neutral,
+                    iconSymbol: "text.badge.xmark"
                 )
             }
         }

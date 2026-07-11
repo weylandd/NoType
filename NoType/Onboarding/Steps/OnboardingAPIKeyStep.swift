@@ -79,7 +79,7 @@ struct OnboardingAPIKeyStep: View {
         let model = Text("Gemini 3.1 Flash-Lite")
             .foregroundColor(DS.Color.textPrimary)
             .fontWeight(.semibold)
-        let rest = Text(" for transcription. Paste your API key once — it's stored in your macOS Keychain and never leaves your machine.")
+        let rest = Text(" for transcription. Paste your API key once — it's stored in your macOS Keychain and sent to Google only to authenticate your transcription requests — never to us.")
         return intro + model + rest
     }
 
@@ -277,7 +277,7 @@ struct OnboardingAPIKeyStep: View {
         HStack(spacing: 6) {
             Image(systemName: "lock.fill")
                 .font(.system(size: 9, weight: .semibold))
-            Text("STORED LOCALLY · KEYCHAIN · NEVER LEAVES YOUR MAC")
+            Text("KEYCHAIN · SENT TO GOOGLE ONLY · NEVER TO US")
                 .font(.system(size: 10.5, weight: .medium, design: .monospaced))
                 .tracking(0.04 * 10.5)
         }
@@ -329,6 +329,13 @@ struct OnboardingAPIKeyStep: View {
                 try await appState.validateGeminiKey(candidate)
                 try appState.updateAPIKey(candidate)
                 validating = false
+                // This Task is unstored and outlives the step if the user
+                // navigates Back while the network validation is in flight.
+                // Persisting the validated key above is still correct, but
+                // `goNext()` must not yank the wizard forward from whatever
+                // step the user is now on — only advance while we're still
+                // the API-key step (R19).
+                guard onboarding.currentStep == .apiKey else { return }
                 onboarding.goNext()
             } catch let g as GeminiClient.GeminiError {
                 validating = false
@@ -341,7 +348,7 @@ struct OnboardingAPIKeyStep: View {
                     )
                 case .missingKey:
                     errorMessage = "Paste a key first."
-                case .decoding, .empty, .blocked:
+                case .decoding, .empty, .blocked, .truncated:
                     errorMessage = g.errorDescription ?? "Couldn't validate key."
                 }
             } catch let urlError as URLError {

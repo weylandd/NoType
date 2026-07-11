@@ -93,8 +93,6 @@ private struct SpinnerGlyph: View {
 
 /// "Transcribing" + period count cycling 0→1→2→3 every ~350 ms.
 private struct AnimatedEllipsisLabel: View {
-    @State private var dotCount: Int = 0
-
     var body: some View {
         TimelineView(.periodic(from: .now, by: 0.35)) { ctx in
             let n = (Int(ctx.date.timeIntervalSinceReferenceDate * (1.0 / 0.35))) % 4
@@ -107,7 +105,6 @@ private struct AnimatedEllipsisLabel: View {
             }
             .font(.system(size: 12, weight: .medium))
             .foregroundStyle(DS.Color.textPrimary)
-            .onAppear { dotCount = n }
         }
     }
 }

@@ -216,7 +216,12 @@ actor DictionaryStore {
     }
 
     /// Update an existing replacement by id (both sides). Rejects empty
-    /// `from`/`to`. No-op if id is missing.
+    /// `from`/`to`. No-op if id is missing. **Rejects** an edit whose
+    /// `from` (case-insensitively) collides with a *different* pair —
+    /// mirrors `addReplacement`'s dedup so an edit can never produce two
+    /// rows with case-insensitively-equal `from` (which would make the
+    /// apply order ambiguous). Editing a pair's own casing is allowed
+    /// (the collision check excludes the pair being edited).
     @discardableResult
     func updateReplacement(id: UUID, from: String, to: String) -> DictionarySnapshot {
         let cleanedFrom = from.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -224,6 +229,10 @@ actor DictionaryStore {
         guard !cleanedFrom.isEmpty, !cleanedTo.isEmpty else { return snapshot() }
         var snap = snapshot()
         guard let idx = snap.replacements.firstIndex(where: { $0.id == id }) else { return snap }
+        let lower = cleanedFrom.lowercased()
+        guard !snap.replacements.contains(where: { $0.from.lowercased() == lower && $0.id != id }) else {
+            return snap
+        }
         let existing = snap.replacements[idx]
         snap.replacements[idx] = DictionaryReplacement(
             id: existing.id,

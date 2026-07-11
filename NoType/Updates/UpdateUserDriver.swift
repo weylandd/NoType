@@ -43,6 +43,13 @@ final class UpdateUserDriver: NSObject, SPUUserDriver {
         state: SPUUserUpdateState,
         reply: @escaping (SPUUserUpdateChoice) -> Void
     ) {
+        // A prior `showUserInitiatedUpdateCheck` stashed a cancellation
+        // callback for the *check* phase; by the time an update is found
+        // that callback is stale. Clear it so dismissing this update (or the
+        // next check) can't fire a cancellation belonging to a phase that
+        // already completed (R21).
+        controller?.pendingCancellation = nil
+
         let update = UpdateController.AvailableUpdate(
             // Sparkle 2 surfaces displayVersionString as a non-optional String —
             // the human-facing "1.2.3" the banner shows.

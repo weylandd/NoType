@@ -65,7 +65,7 @@ The first-cap mid-sentence tier (rule **(e)**) auto-disables for noun-capitalisi
 
 ## Replacement matching contract
 
-- **Word-boundary `\bfrom\b`** — ICU-aware so Cyrillic / Greek / etc. work.
+- **Unicode look-around boundaries** — the engine wraps `from` in `(?<![\p{L}\p{N}])…(?![\p{L}\p{N}])` (not `\b`; same idiom as `DictionaryHarvester.findInContext`), so Cyrillic / Greek / etc. work AND pairs whose `from` starts/ends with punctuation (`e.g.`, `т.е.`, `.com`, `c#`, `#tag`) now match at real boundaries. Note `_`/underscore is a word char under `\b` but NOT under `[\p{L}\p{N}]` — deliberate, mirrors the harvester.
 - **Auto-capitalised variant** when `from` starts lowercase. All-caps NOT auto-matched.
 - **Regex special chars in `from`** escaped via `NSRegularExpression.escapedPattern`. **In `to`** escaped via `escapedTemplate` (so `$0..$9` and `\$` are NOT interpreted as capture refs).
 

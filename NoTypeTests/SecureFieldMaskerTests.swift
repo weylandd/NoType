@@ -118,6 +118,47 @@ final class SecureFieldMaskerTests: XCTestCase {
         XCTAssertEqual(result, .skip(reason: "identifier=credential"))
     }
 
+    // MARK: - captureSync shared skip decision (U9 / R9)
+    //
+    // `InsertionTarget.captureSync` now applies the walker's FULL secure-field
+    // skip set (via the promoted-to-internal `SecureFieldMasker.skipReason`)
+    // instead of its own role-only AXSecureTextField check. `captureSync`
+    // itself reads live system-wide AX and isn't unit-drivable, so these
+    // pin the shared decision function it delegates to — the identifier /
+    // roleDescription / sensitive-sheet cases that previously leaked.
+
+    func test_skipReason_identifierToken_returnsReason() {
+        // Plain AXTextField named "password" — the walker skips it; captureSync
+        // now does too. Was leaking before R9.
+        let reason = SecureFieldMasker.skipReason(
+            for: .init(role: "AXTextField", identifier: "loginPasswordField")
+        )
+        XCTAssertEqual(reason, "identifier=password")
+    }
+
+    func test_skipReason_roleDescriptionSecure_returnsReason() {
+        let reason = SecureFieldMasker.skipReason(
+            for: .init(role: "AXTextField", roleDescription: "Secure text entry")
+        )
+        XCTAssertEqual(reason, "secure role description")
+    }
+
+    func test_skipReason_sensitiveSheetParent_returnsReason() {
+        let reason = SecureFieldMasker.skipReason(
+            for: .init(role: "AXTextField", parentRole: "AXSheet", parentTitle: "Sign in to Acme")
+        )
+        XCTAssertEqual(reason, "sensitive sheet")
+    }
+
+    func test_skipReason_ordinaryTextField_returnsNil() {
+        // The common case: a normal message-composer / search field must NOT
+        // be skipped, so captureSync still captures the cursor neighborhood.
+        let reason = SecureFieldMasker.skipReason(
+            for: .init(role: "AXTextField", identifier: "messageComposer")
+        )
+        XCTAssertNil(reason)
+    }
+
     // MARK: - Value-content patterns
 
     func test_mask_creditCard_validLuhn() {
@@ -415,6 +456,71 @@ final class SecureFieldMaskerTests: XCTestCase {
         XCTAssertEqual(result, .keep(value))
     }
 
+    // MARK: - Standard-base64 blob (U11 / R11)
+    //
+    // The opaque catch-all uses `[A-Za-z0-9_\-]` and so structurally cannot
+    // match a run containing `+`, `/`, or `=` — the exact hole AWS secret
+    // access keys and raw base64 key material fall through. The dedicated
+    // base64 rule sits above the catch-all (specific→generic preserved).
+
+    func test_mask_awsSecretAccessKey_base64WithSlash() {
+        // Canonical AWS secret-access-key shape (40 chars, contains `/`).
+        // Assembled from parts so the gitleaks pre-commit hook doesn't trip;
+        // runtime value is the well-known example secret.
+        let awsSecret = "wJalrXUtnFEMI" + "/K7MDENG/" + "bPxRfiCYEXAMPLEKEY"
+        let result = SecureFieldMasker.mask(
+            value: awsSecret,
+            metadata: .init(role: "AXTextField")
+        )
+        XCTAssertEqual(result, .replace("[REDACTED — likely secret]", reason: "content"))
+    }
+
+    func test_mask_base64Blob_withPlusAndPadding() {
+        // GCP service-account-style base64 blob with `+` and `=` padding.
+        let blob = String(repeating: "xY9+", count: 11) + "=="  // 46 chars
+        let result = SecureFieldMasker.mask(
+            value: blob,
+            metadata: .init(role: "AXStaticText")
+        )
+        XCTAssertEqual(result, .replace("[REDACTED — likely secret]", reason: "content"))
+    }
+
+    func test_base64Rule_belowOpaqueCatchAll_pureAlnumStillTokenLabel() {
+        // Regression / ordering: a 42-char pure-alnum run (NO `+`/`/`/`=`)
+        // must fall through the base64 rule (its special-char gate) to the
+        // opaque catch-all and keep the "likely token" label — proving the
+        // base64 rule doesn't over-fire and specific→generic order holds.
+        let token = String(repeating: "aB3", count: 14)  // 42 chars, no special
+        let result = SecureFieldMasker.mask(
+            value: token,
+            metadata: .init(role: "AXTextField")
+        )
+        XCTAssertEqual(result, .replace("[REDACTED — likely token]", reason: "content"))
+    }
+
+    func test_base64Rule_doesNotShadowMoreSpecific_googleKeyKeepsLabel() {
+        // A more-specific provider rule (Google API key) runs BEFORE the
+        // base64 rule and must still win its label. Prefix split for gitleaks.
+        let googleKey = "AIza" + "SyA1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q"
+        let result = SecureFieldMasker.mask(
+            value: googleKey,
+            metadata: .init(role: "AXTextField")
+        )
+        XCTAssertEqual(result, .replace("[REDACTED — likely Google API key]", reason: "content"))
+    }
+
+    func test_base64Rule_doesNotOverRedact_digitlessPath() {
+        // Spare prose / file paths: a 46-char absolute path (base64 charset via
+        // slashes + letters) has NO digit, so the letter-AND-digit gate keeps
+        // it. Paths are useful proper-noun context for transcription.
+        let path = "/Users/kopachev/Documents/ClaudeCode/NoTypeApp"
+        let result = SecureFieldMasker.mask(
+            value: path,
+            metadata: .init(role: "AXStaticText")
+        )
+        XCTAssertEqual(result, .keep(path))
+    }
+
     // MARK: - Negative cases — policy lock for false-positive ceiling
 
     func test_keep_shortAlphanumericProductTokens() {
@@ -431,6 +537,41 @@ final class SecureFieldMaskerTests: XCTestCase {
             )
             XCTAssertEqual(result, .keep(v), "expected \(v) to pass through unchanged")
         }
+    }
+
+    // MARK: - AX title consumer (U8 / R8)
+    //
+    // Node titles (`formatLine`) and window titles (`AccessibilityTree.walkApp`
+    // → `RedactedWindowDump.title`) now pass through `scrubContent` before they
+    // reach the prompt. Previously only node *values* were masked; titles were
+    // interpolated with only quote-swapping. These cases pin the scrub on the
+    // title-shaped inputs that path surfaces.
+
+    func test_axTitle_scrubs_urlCredentials() {
+        // Browser-tab / link title carrying basic-auth creds.
+        let title = "https://alice:p4ssw0rd@internal.example.com/dashboard"
+        let scrubbed = SecureFieldMasker.scrubContent(title)
+        XCTAssertTrue(scrubbed.contains("https://[REDACTED — url creds]@internal.example.com/dashboard"), scrubbed)
+        XCTAssertFalse(scrubbed.contains("alice"))
+        XCTAssertFalse(scrubbed.contains("p4ssw0rd"))
+    }
+
+    func test_axTitle_scrubs_tokenShapedWindowTitle() {
+        // A window title that leaked a token-shaped string (e.g. a devtools
+        // panel or a mis-labelled document title). Prefix split to avoid the
+        // gitleaks pre-commit hook's static PAT match; runtime value unchanged.
+        let title = "prod — gh" + "p_abcdefghijklmnopqrstuvwxyz0123456789"
+        let scrubbed = SecureFieldMasker.scrubContent(title)
+        XCTAssertTrue(scrubbed.contains("[REDACTED — likely GitHub token]"), scrubbed)
+        XCTAssertTrue(scrubbed.contains("prod — "), scrubbed)
+        XCTAssertFalse(scrubbed.contains("p_abcdefghij"))
+    }
+
+    func test_axTitle_preserves_ordinaryWindowTitle() {
+        // Don't over-redact: a normal window / tab title must survive so the
+        // model keeps its app/document context.
+        let title = "Inbox — Mail"
+        XCTAssertEqual(SecureFieldMasker.scrubContent(title), title)
     }
 
     // MARK: - Empty / no-op paths
@@ -522,6 +663,55 @@ final class SecureFieldMaskerTests: XCTestCase {
         let line = "#engineering Acme Corp — John Doe yesterday at 10:24am"
         let scrubbed = SecureFieldMasker.scrubContent(line)
         XCTAssertEqual(scrubbed, line, "innocuous OCR text must pass through unchanged")
+    }
+
+    // MARK: - Insertion-target split-cursor scrub (U10 / R10)
+    //
+    // `InsertionTarget.slice` now scrubs the FULL focused value once before
+    // splitting into before/after, so a secret straddling the cursor can't
+    // evade the anchored patterns by being cut in half.
+
+    func test_slice_tokenStraddlingCursor_redacted() {
+        // 42-char mixed letter+digit token; cursor lands INSIDE it.
+        // Split-then-scrub would leave two sub-40 halves that neither the
+        // opaque nor base64 rule matches. Scrub-then-split catches the whole
+        // token. (Repetitive fixture keeps entropy below the gitleaks
+        // pre-commit hook; runtime shape — ≥40, letter+digit — is what
+        // matters for the opaque-token rule.)
+        let token = String(repeating: "aB3", count: 14)  // 42 chars
+        let value = "note " + token + " end"
+        let cursor = "note ".utf16.count + 20  // mid-token
+        let target = InsertionTarget.slice(value: value, cursor: cursor)
+        let combined = target.textBefore + target.textAfter
+        XCTAssertTrue(combined.contains("[REDACTED — likely token]"), combined)
+        XCTAssertFalse(combined.contains(token), combined)
+    }
+
+    func test_slice_pemBodyStraddlingCursor_redacted() {
+        // A PEM private key with the cursor in the middle of the body. The
+        // after-window alone would lack the BEGIN marker; full-value scrub
+        // still redacts the whole block. (BEGIN/END markers assembled from
+        // parts, filler body — keeps the gitleaks hook quiet; the PEM regex
+        // matches arbitrary body between the markers.)
+        let begin = "-----BEGIN RSA PRIVATE" + " KEY-----"
+        let end   = "-----END RSA PRIVATE"   + " KEY-----"
+        let bodyMarker = "PEMBODYLINEAAAA"
+        let pem = "\(begin)\n\(bodyMarker)0001\n\(bodyMarker)0002\n\(end)"
+        let cursor = (begin + "\n" + bodyMarker).utf16.count  // mid-body
+        let target = InsertionTarget.slice(value: pem, cursor: cursor)
+        let combined = target.textBefore + target.textAfter
+        XCTAssertTrue(combined.contains("[REDACTED — private key]"), combined)
+        XCTAssertFalse(combined.contains(bodyMarker), combined)
+    }
+
+    func test_slice_normalText_unaffected_cursorUsable() {
+        // No redaction → no drift; the cursor split is exactly where it was,
+        // so the spacing/capitalization signal stays intact.
+        let value = "Hello world foo bar"
+        let cursor = "Hello world".utf16.count  // 11
+        let target = InsertionTarget.slice(value: value, cursor: cursor)
+        XCTAssertEqual(target.textBefore, "Hello world")
+        XCTAssertEqual(target.textAfter, " foo bar")
     }
 
     func test_ocr_idempotent_underRepeatedScrubbing() {

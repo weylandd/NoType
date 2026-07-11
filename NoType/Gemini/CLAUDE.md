@@ -59,8 +59,11 @@ Implemented via `retryDecision(for:attempt:)`:
 - HTTP 429 → 2 retries with 500 ms then 2 s backoff.
 - HTTP 5xx → 1 retry after 500 ms.
 - HTTP 4xx other than 429 → no retry.
+- `GeminiError.truncated` (`finishReason == MAX_TOKENS`) → no retry (an identical re-issue truncates identically; recovered one layer up as a `[…]` gap marker).
 
-Each attempt logs `attempt=N`. These retries are the HTTP-level safety net inside one Gemini call. **Session-level resilience lives one layer up** in `RecordingSession`: if a call still fails after exhausting its retries, the session classifies the error as terminal (auth, blocked, encode, cancellation) or recoverable (everything else). Recoverable failures become `RecordingSession.failureMarker` ("[…]") at stitch time and a batched call gets split into N independent `transcribe` retries first. The session aborts only on terminal errors or when every dispatched chunk failed. See `NoType/Recording/CLAUDE.md` "Partial recovery".
+Each attempt logs `attempt=N`. These retries are the HTTP-level safety net inside one Gemini call. **Session-level resilience lives one layer up** in `RecordingSession`: if a call still fails after exhausting its retries, the session classifies the error as terminal (auth, blocked, encode, cancellation) or recoverable (everything else — HTTP, empty, decoding, `.truncated`). Recoverable failures become `RecordingSession.failureMarker` ("[…]") at stitch time and a batched call gets split into N independent `transcribe` retries first. The session aborts only on terminal errors or when every dispatched chunk failed. See `NoType/Recording/CLAUDE.md` "Partial recovery".
+
+`sendRequest` also inspects the candidate's `finishReason` after parsing (response-parsing only — no prompt or cache-prefix change): a content block (SAFETY/RECITATION/PROHIBITED_CONTENT/BLOCKLIST/SPII/IMAGE_SAFETY) throws `GeminiError.blocked` (terminal, same as a prompt-level block); `MAX_TOKENS` throws `GeminiError.truncated` (recoverable → gap marker); `STOP` / absent / unrecognised keep the text. Pinned by `GeminiFinishReasonTests`.
 
 ## Endpoint URLs
 
