@@ -2,9 +2,9 @@
 #
 # sparkle_appcast_item.sh — inserts a new <item> into docs/appcast.xml.
 #
-# Used by .github/workflows/release.yml after `sign_update` produces the
-# EdDSA signature for the release .zip. Can also be invoked manually if
-# CI fails partway through and you need to recover by hand.
+# Called by scripts/publish_release.sh after `sign_update` produces the
+# EdDSA signature for the release .zip. Can also be invoked manually if a
+# publish fails partway through and you need to recover the appcast by hand.
 #
 # Usage:
 #   scripts/sparkle_appcast_item.sh \
@@ -89,8 +89,8 @@ min_sys_ver = os.environ["MIN_SYSTEM_VERSION"]
 # ends at the `---` separator that precedes the next `## [`. Anything
 # between is taken verbatim.
 #
-# If the version isn't found in the changelog (unlikely; release.yml
-# verifies the bump beforehand), we fall back to using the full file
+# If the version isn't found in the changelog (unlikely if you bumped
+# CHANGELOG.md before releasing), we fall back to using the full file
 # so we never ship an empty description. A warning is printed to
 # stderr in that case.
 def extract_section(text: str, version: str) -> str:
