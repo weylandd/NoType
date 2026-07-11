@@ -777,6 +777,21 @@ final class AppState {
         return .applied
     }
 
+    /// Pure gate: on a first hotkey press with Screen Recording still
+    /// undecided, should the session be deferred to surface the TCC prompt?
+    /// True only when the OCR fallback is enabled — a user who disabled it
+    /// (Settings → Recording) is never interrupted for a permission the OCR
+    /// limb won't use (R22 / OQ2). Extracted so
+    /// `AppStateScreenRecordingGateTests` can pin the contract without
+    /// standing up a full `AppState`, mirroring
+    /// `shouldCancelActiveSessionOnAxRevoke`.
+    nonisolated static func shouldDeferForScreenRecordingPrompt(
+        fallbackEnabled: Bool,
+        screenRecordingNotDetermined: Bool
+    ) -> Bool {
+        fallbackEnabled && screenRecordingNotDetermined
+    }
+
     private func handleHotkeyPress() {
         // Onboarding step 4 (hotkey check) intercepts presses to drive
         // its own UI without starting a recording session. The CGEventTap
@@ -834,7 +849,16 @@ final class AppState {
         // before any audio capture, and let the user decide. The next
         // press proceeds normally — at that point the status is granted
         // or denied, and the OCR limb behaves accordingly.
-        if ScreenRecordingPermission.current() == .notDetermined {
+        //
+        // Gated on the OCR toggle (R22 / OQ2): only defer when the
+        // screen-capture fallback is ON. A user who turned OCR off will
+        // never hit the ScreenCaptureKit path, so interrupting their first
+        // dictation for a permission it won't use is pure friction — fall
+        // through and record immediately in that case.
+        if Self.shouldDeferForScreenRecordingPrompt(
+            fallbackEnabled: screenCaptureFallbackEnabled,
+            screenRecordingNotDetermined: ScreenRecordingPermission.current() == .notDetermined
+        ) {
             Self.log.info("hotkey: screen-recording not yet asked; deferring session to surface prompt")
             Task { await permissions.requestScreenRecording() }
             return
