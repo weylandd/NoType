@@ -348,7 +348,7 @@ struct OnboardingAPIKeyStep: View {
                     )
                 case .missingKey:
                     errorMessage = "Paste a key first."
-                case .decoding, .empty, .blocked:
+                case .decoding, .empty, .blocked, .truncated:
                     errorMessage = g.errorDescription ?? "Couldn't validate key."
                 }
             } catch let urlError as URLError {

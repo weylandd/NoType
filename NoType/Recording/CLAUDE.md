@@ -58,6 +58,7 @@ Error classification lives in `RecordingSession.isTerminal(_:)`:
 | `GeminiError.http(_, _)` (any status) | recoverable | marker, continue |
 | `GeminiError.empty` | recoverable | marker, continue |
 | `GeminiError.decoding(_)` | recoverable | marker, continue |
+| `GeminiError.truncated` (`finishReason == MAX_TOKENS`) | recoverable | marker, continue |
 
 A batched call (`transcribeBatch`) failing recoverably triggers `splitRetry` — each chunk re-issued as an independent `transcribe`. Each independent call has its own retry budget inside `GeminiClient.sendRequest` (HTTP-class-based, see "Retry policy" in the Gemini module). Markers in the priors list are *not* sent back to Gemini — `currentPriors()` filters them out so the model never sees its own failure placeholders.
 

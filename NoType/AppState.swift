@@ -1967,6 +1967,18 @@ enum NoTypeErrorKind {
                     severity: .danger,
                     iconSymbol: "exclamationmark.triangle.fill"
                 )
+            case .truncated:
+                // Only reached when a whole session's transcription was cut
+                // short (single chunk, or every chunk hit the output cap).
+                // In multi-chunk sessions a truncated chunk becomes a `[…]`
+                // gap and never surfaces here.
+                return ErrorPayload(
+                    title: "Transcription cut short",
+                    description: "Gemini stopped before finishing. Try dictating in shorter bursts.",
+                    code: "ERR_TRUNCATED",
+                    severity: .neutral,
+                    iconSymbol: "text.badge.xmark"
+                )
             }
         }
         if let s = err as? RecordingSession.SessionError, case .noSpeech = s {

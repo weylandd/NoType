@@ -181,8 +181,8 @@ final class RecordingSession {
     /// prompt won't unblock; an encode failure means PCM is corrupt
     /// or AVFAudio is wedged; a user cancellation is, well, user-
     /// initiated. Everything else (HTTP 4xx/5xx/network/decoding/
-    /// empty) is treated as a transient gap — paste what we have,
-    /// mark the gap, let the user decide whether to re-dictate.
+    /// empty/truncated) is treated as a transient gap — paste what we
+    /// have, mark the gap, let the user decide whether to re-dictate.
     nonisolated static func isTerminal(_ error: Error) -> Bool {
         if error is CancellationError { return true }
         if let gerr = error as? GeminiClient.GeminiError {
@@ -197,7 +197,10 @@ final class RecordingSession {
                 // Settings. Other 4xx / 5xx / network (status=0) stay
                 // recoverable: gap marker, continue draining.
                 return status == 401 || status == 403
-            case .empty, .decoding:
+            case .empty, .decoding, .truncated:
+                // `.truncated` (finishReason == MAX_TOKENS) is a cut
+                // response, not a broken session — recover it as a `[…]`
+                // gap marker so the rest of the session still pastes.
                 return false
             }
         }

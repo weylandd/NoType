@@ -119,7 +119,7 @@ extension GeminiKeyRow {
                 return "Invalid key — check format"
             case .http(let status, _) where status == 401 || status == 403:
                 return "Authentication failed (\(status))"
-            case .http, .decoding, .empty, .blocked:
+            case .http, .decoding, .empty, .blocked, .truncated:
                 return g.errorDescription ?? "Couldn't validate key."
             }
         }
