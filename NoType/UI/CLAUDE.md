@@ -12,7 +12,7 @@ SwiftUI surfaces: menu-bar icon, history popover, the main app window (Home tab 
 
 **Surfaces:**
 
-- `MenuBarIcon.swift` — `MenuBarExtra` label (idle / recording / sending / error states).
+- `MenuBarIcon.swift` — `MenuBarExtra` label (idle / recording / sending states).
 - `HistoryPopover.swift` — popover content + footer mic-input picker + "Open NoType" button.
 - `MicInputPicker.swift` — shared input-device dropdown. Used by popover footer and onboarding mic-check.
 - `HistoryRowView.swift` — single history entry (real macOS app icon via `AppIconCache`).

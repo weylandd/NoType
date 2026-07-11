@@ -2,9 +2,9 @@ import SwiftUI
 
 /// Menu-bar tray label.
 ///
-/// Three resting states (idle / sending / error) render as a static SF
-/// Symbol — cheap, hit-testable, no re-rendering. The active "recording"
-/// state morphs into the design's `tray-aura` pill: filled mic glyph in
+/// Two resting states (idle / sending) render as a static SF Symbol —
+/// cheap, hit-testable, no re-rendering. The active "recording" state
+/// morphs into the design's `tray-aura` pill: filled mic glyph in
 /// accent + a live mm:ss timer + a pulsing red dot.
 ///
 /// **About the timer.** A previous iteration shipped without any timer
@@ -42,10 +42,6 @@ struct MenuBarIcon: View {
                     .resizable()
                     .scaledToFit()
                     .frame(width: 18, height: 18)
-
-            case .error:
-                Image(systemName: "mic.slash")
-                    .foregroundStyle(DS.Color.dangerBase)
             }
         }
         // Bridge SwiftUI's `openWindow` into AppState. The menu-bar icon

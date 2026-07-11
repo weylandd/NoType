@@ -7,9 +7,9 @@ import XCTest
 /// assertion unwound) rather than merely having its hotkey tap torn down.
 ///
 /// The load-bearing property is that a *live* session (`.recording` or
-/// `.sending`) unwinds, while `.idle` / `.error` are left alone. Without
-/// this, revoking Accessibility mid-hold removes the tap — so the
-/// release / Esc events can never arrive — and the mic stays hot (R4).
+/// `.sending`) unwinds, while `.idle` is left alone. Without this,
+/// revoking Accessibility mid-hold removes the tap — so the release /
+/// Esc events can never arrive — and the mic stays hot (R4).
 ///
 /// The full integration (a real granted→denied transition driving
 /// `applyAccessibilityState` → `cancelRecording`) is not unit-tested:
@@ -34,14 +34,6 @@ final class AppStateAxRevokeTests: XCTestCase {
     func test_idle_doesNotCancel() {
         XCTAssertFalse(AppState.shouldCancelActiveSessionOnAxRevoke(
             recordingState: .idle
-        ))
-    }
-
-    func test_error_doesNotCancel() {
-        // A session already in the error state has nothing live to unwind;
-        // `cancelRecording()` no-ops on `.error` too, so the gate matches.
-        XCTAssertFalse(AppState.shouldCancelActiveSessionOnAxRevoke(
-            recordingState: .error("boom")
         ))
     }
 }

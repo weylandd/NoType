@@ -8,7 +8,6 @@ enum RecordingState: Equatable, Sendable {
     case idle
     case recording(startedAt: Date)
     case sending
-    case error(String)
 }
 
 @MainActor
@@ -435,7 +434,7 @@ final class AppState {
     ) -> Bool {
         switch recordingState {
         case .recording, .sending: return true
-        case .idle, .error:        return false
+        case .idle:                return false
         }
     }
 
@@ -1115,10 +1114,10 @@ final class AppState {
     /// installs a synthetic `CancellationError` so a racing `stop()`
     /// path bails cleanly without trying to paste a partial transcript.
     private func cancelRecording() {
-        // Stray Escape when idle/error is a harmless no-op (the CGEventTap
+        // Stray Escape when idle is a harmless no-op (the CGEventTap
         // fires for every keystroke globally, we just filter here).
         switch recordingState {
-        case .idle, .error: return
+        case .idle: return
         case .recording, .sending: break
         }
         guard let session = currentSession else { return }

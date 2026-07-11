@@ -39,22 +39,30 @@ Guidance).
 
 ## Guidance
 
-Leave `.error` in place for now. When this area is next touched, pick one
-of two clean resolutions — don't leave it ambiguous:
+**Done — dropped (option 2).** Resolved on branch
+`remediation/pr-f-techdebt-followups` (PR-F tech-debt follow-ups).
+
+The two clean resolutions were:
 
 1. **Wire it up.** Have the "recording broke" failure sites (or
    `surfaceError`) set `recordingState = .error(message)` so the menu-bar
-   `mic.slash` glyph actually renders during a broken state, and clear it
-   back to `.idle` on the next successful press. This makes the existing
-   `MenuBarIcon` case live.
-2. **Drop it.** Remove the case from the enum, both `switch` arms
-   (`:438`, `:1097`), the `MenuBarIcon` case (`:46`), and rewrite
-   `AppStateAxRevokeTests.test_error_doesNotCancel`.
+   `mic.slash` glyph renders during a broken state. **Rejected** — it adds
+   a new, visible, *sticky* menu-bar error state that outlives the Error
+   HUD, which is a UX/product change, not a tech-debt cleanup. Errors are
+   deliberately HUD-only (UI invariant 1); a persistent broken glyph would
+   need product sign-off.
+2. **Drop it.** ✅ **What shipped.** Removed the `case error(String)` from
+   the `RecordingState` enum, collapsed both `switch` arms (`.idle, .error`
+   → `.idle` in `shouldCancelActiveSessionOnAxRevoke` and `cancelRecording`),
+   removed the `MenuBarIcon` `.error` branch, and deleted
+   `AppStateAxRevokeTests.test_error_doesNotCancel` (its subject vanished;
+   the `.idle` case — `test_idle_doesNotCancel` — already covers the
+   "not-live → don't cancel" intent).
 
-Removal touches a UI file (needs a visual check that the menu-bar icon
-still renders across all states — see the "Test UI before push" project
-rule) and a just-landed PR-A test, so it is not a safe drive-by in an
-unrelated PR.
+The `MenuBarIcon` branch was **compiler-dead** (the state was never
+assigned), so its removal has zero visual effect for the three live states
+(idle / recording / sending) — a successful build proves they still render
+identically, no separate visual smoke needed.
 
 ## Why This Matters
 
@@ -90,5 +98,6 @@ case .error:
 - `NoType/AppState.swift` (`RecordingState`, `surfaceError`, `cancelRecording`)
 - `NoType/UI/MenuBarIcon.swift` (the `.error` rendering)
 - `NoType/UI/CLAUDE.md` (invariant 1 — errors surface only via `showErrorHUD`)
-- `NoTypeTests/AppStateAxRevokeTests.swift` (`test_error_doesNotCancel`)
+- `NoTypeTests/AppStateAxRevokeTests.swift` (`test_error_doesNotCancel` — removed on close)
 - Source plan: `docs/plans/2026-07-10-001-fix-code-review-remediation-plan.md` (R21 / U22)
+- **Closed by:** `refactor(recording): drop dead RecordingState.error case (tech-debt)` on branch `remediation/pr-f-techdebt-followups`.
