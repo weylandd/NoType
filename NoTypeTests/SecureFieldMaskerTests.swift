@@ -456,6 +456,71 @@ final class SecureFieldMaskerTests: XCTestCase {
         XCTAssertEqual(result, .keep(value))
     }
 
+    // MARK: - Standard-base64 blob (U11 / R11)
+    //
+    // The opaque catch-all uses `[A-Za-z0-9_\-]` and so structurally cannot
+    // match a run containing `+`, `/`, or `=` — the exact hole AWS secret
+    // access keys and raw base64 key material fall through. The dedicated
+    // base64 rule sits above the catch-all (specific→generic preserved).
+
+    func test_mask_awsSecretAccessKey_base64WithSlash() {
+        // Canonical AWS secret-access-key shape (40 chars, contains `/`).
+        // Assembled from parts so the gitleaks pre-commit hook doesn't trip;
+        // runtime value is the well-known example secret.
+        let awsSecret = "wJalrXUtnFEMI" + "/K7MDENG/" + "bPxRfiCYEXAMPLEKEY"
+        let result = SecureFieldMasker.mask(
+            value: awsSecret,
+            metadata: .init(role: "AXTextField")
+        )
+        XCTAssertEqual(result, .replace("[REDACTED — likely secret]", reason: "content"))
+    }
+
+    func test_mask_base64Blob_withPlusAndPadding() {
+        // GCP service-account-style base64 blob with `+` and `=` padding.
+        let blob = String(repeating: "xY9+", count: 11) + "=="  // 46 chars
+        let result = SecureFieldMasker.mask(
+            value: blob,
+            metadata: .init(role: "AXStaticText")
+        )
+        XCTAssertEqual(result, .replace("[REDACTED — likely secret]", reason: "content"))
+    }
+
+    func test_base64Rule_belowOpaqueCatchAll_pureAlnumStillTokenLabel() {
+        // Regression / ordering: a 42-char pure-alnum run (NO `+`/`/`/`=`)
+        // must fall through the base64 rule (its special-char gate) to the
+        // opaque catch-all and keep the "likely token" label — proving the
+        // base64 rule doesn't over-fire and specific→generic order holds.
+        let token = String(repeating: "aB3", count: 14)  // 42 chars, no special
+        let result = SecureFieldMasker.mask(
+            value: token,
+            metadata: .init(role: "AXTextField")
+        )
+        XCTAssertEqual(result, .replace("[REDACTED — likely token]", reason: "content"))
+    }
+
+    func test_base64Rule_doesNotShadowMoreSpecific_googleKeyKeepsLabel() {
+        // A more-specific provider rule (Google API key) runs BEFORE the
+        // base64 rule and must still win its label. Prefix split for gitleaks.
+        let googleKey = "AIza" + "SyA1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q"
+        let result = SecureFieldMasker.mask(
+            value: googleKey,
+            metadata: .init(role: "AXTextField")
+        )
+        XCTAssertEqual(result, .replace("[REDACTED — likely Google API key]", reason: "content"))
+    }
+
+    func test_base64Rule_doesNotOverRedact_digitlessPath() {
+        // Spare prose / file paths: a 46-char absolute path (base64 charset via
+        // slashes + letters) has NO digit, so the letter-AND-digit gate keeps
+        // it. Paths are useful proper-noun context for transcription.
+        let path = "/Users/kopachev/Documents/ClaudeCode/NoTypeApp"
+        let result = SecureFieldMasker.mask(
+            value: path,
+            metadata: .init(role: "AXStaticText")
+        )
+        XCTAssertEqual(result, .keep(path))
+    }
+
     // MARK: - Negative cases — policy lock for false-positive ceiling
 
     func test_keep_shortAlphanumericProductTokens() {

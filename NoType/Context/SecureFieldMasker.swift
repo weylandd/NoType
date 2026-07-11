@@ -144,6 +144,7 @@ enum SecureFieldMasker {
         s = replaceStripeKeys(s)
         s = replaceAWSKeys(s)
         s = replaceURLCreds(s)
+        s = replaceBase64Blobs(s)
         s = replaceLongOpaqueTokens(s)
         return s
     }
@@ -303,6 +304,37 @@ enum SecureFieldMasker {
     private static func replaceAWSKeys(_ s: String) -> String {
         replaceMatches(in: s, regex: awsKeyRegex) { _, _ in
             "[REDACTED — AWS key]"
+        }
+    }
+
+    /// Standard-base64 blob (charset `A-Za-z0-9+/=`, length ≥ 40). Complements
+    /// `opaqueTokenRegex`, whose `[A-Za-z0-9_\-]` charset structurally CANNOT
+    /// match a run containing `+`, `/`, or `=` — the exact shape of AWS secret
+    /// access keys and raw base64-encoded key material (`wJalr…FEMI/K7…`,
+    /// GCP service-account blobs). Sits directly ABOVE the generic catch-all
+    /// so the specific provider rules above still win (they run first and
+    /// their patterns — `_`/`-`/`.`/prefix-anchored — are never pure base64
+    /// runs ≥ 40), but nothing more generic can shadow it.
+    ///
+    /// Uses a maximal-run look-around (not `\b`) because `+`/`/`/`=` are
+    /// non-word chars that `\b` would split on.
+    private static let base64BlobRegex = try! NSRegularExpression(
+        pattern: #"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/=]{40,}(?![A-Za-z0-9+/=])"#
+    )
+
+    private static func replaceBase64Blobs(_ s: String) -> String {
+        replaceMatches(in: s, regex: base64BlobRegex) { match, _ in
+            // Same letter-AND-digit gate as the opaque catch-all (avoids
+            // redacting prose and digit-less file paths), PLUS a required
+            // base64-special char (`+`/`/`/`=`). The special-char gate means
+            // this rule fires ONLY on the shape the opaque rule can't reach —
+            // a pure `[A-Za-z0-9]` run stays the opaque rule's job below, and
+            // hyphen/underscore tokens are never touched here.
+            let hasLetter  = match.contains(where: { $0.isLetter })
+            let hasDigit   = match.contains(where: { $0.isNumber })
+            let hasSpecial = match.contains(where: { $0 == "+" || $0 == "/" || $0 == "=" })
+            guard hasLetter && hasDigit && hasSpecial else { return nil }
+            return "[REDACTED — likely secret]"
         }
     }
 
