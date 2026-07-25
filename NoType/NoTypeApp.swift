@@ -25,8 +25,33 @@ final class NoTypeAppDelegate: NSObject, NSApplicationDelegate {
     /// the class doc-comment for why.
     var terminationHandler: (@MainActor () -> Void)?
 
+    /// Runs from `applicationDidFinishLaunching(_:)` — the first moment
+    /// `NSApplicationMain` has actually started the application. Every
+    /// piece of launch work that schedules `MainActor` work or touches
+    /// `NSApp` hangs off this, because doing any of it from
+    /// `NoTypeApp.init()` is a latent ordering bug and the leading
+    /// suspect for the macOS 26.2 executor-identity crash. Assigned in
+    /// `NoTypeApp.init()` (assigning a closure schedules nothing) so the
+    /// handler is guaranteed to be in place before AppKit calls back.
+    ///
+    /// Deliberately NOT a SwiftUI `.task` on the main `Window`: NoType is
+    /// `LSUIElement` and, once onboarding is complete, that window is not
+    /// presented at launch — a returning user would never fire it.
+    var launchHandler: (@MainActor () -> Void)?
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    /// Note the absence of `MainActor.assumeIsolated` here, unlike
+    /// `applicationWillTerminate(_:)` below. `assumeIsolated` calls into
+    /// the `swift_task_isCurrentExecutor` family — precisely the check
+    /// that faults in this crash family — so the launch path, which this
+    /// change exists to keep clean, must not add one. AppKit calls this
+    /// on the main thread and `NSApplicationDelegate` is `@MainActor`, so
+    /// the isolation is already static and no runtime check is needed.
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        launchHandler?()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -43,9 +68,9 @@ struct NoTypeApp: App {
 
     @State private var permissions: PermissionsViewModel
     @State private var appState:    AppState
-    /// Owns the user's theme preference and applies it to NSApp on init —
-    /// must exist before the first SwiftUI body resolves so the very first
-    /// frame already has the correct appearance.
+    /// Owns the user's theme preference. Reads it from `UserDefaults` on
+    /// init; the `NSApp.appearance` write happens in `apply()` from the
+    /// launch hook, because no launch-path initializer may touch `NSApp`.
     @State private var appearance:  AppearanceController
     /// Drives the first-run wizard. Created before AppState so AppState
     /// can hold a reference and suppress permission HUDs while the
@@ -66,23 +91,37 @@ struct NoTypeApp: App {
         let dictionary   = DictionaryStore()
         let onboarding   = OnboardingState()
 
-        _permissions = State(wrappedValue: perms)
-        _appState = State(
-            wrappedValue: AppState(
-                permissions: perms,
-                hud: hud,
-                gemini: gemini,
-                historyStore: history,
-                statsStore: stats,
-                instructionsStore: instructions,
-                appCategorizer: categorizer,
-                dictionaryStore: dictionary,
-                onboarding: onboarding
-            )
+        let appearance = AppearanceController()
+        let state = AppState(
+            permissions: perms,
+            hud: hud,
+            gemini: gemini,
+            historyStore: history,
+            statsStore: stats,
+            instructionsStore: instructions,
+            appCategorizer: categorizer,
+            dictionaryStore: dictionary,
+            onboarding: onboarding
         )
-        _appearance = State(wrappedValue: AppearanceController())
-        _onboarding = State(wrappedValue: onboarding)
-        _updates    = State(wrappedValue: UpdateController())
+
+        _permissions = State(wrappedValue: perms)
+        _appState    = State(wrappedValue: state)
+        _appearance  = State(wrappedValue: appearance)
+        _onboarding  = State(wrappedValue: onboarding)
+        _updates     = State(wrappedValue: UpdateController())
+
+        // Assigning a closure schedules nothing and touches no `NSApp`, so
+        // this is legal here — and doing it in `init` (rather than from a
+        // scene's `.task`) guarantees the handler is installed before
+        // AppKit fires `applicationDidFinishLaunching(_:)`.
+        //
+        // Appearance is applied BEFORE priming so the theme is on `NSApp`
+        // ahead of any UI the priming work can surface (the launch
+        // permission HUD).
+        appDelegate.launchHandler = {
+            appearance.apply()
+            state.prime()
+        }
     }
 
     /// Bind the termination handler once at scene-graph build time so

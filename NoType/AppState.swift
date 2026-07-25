@@ -166,6 +166,11 @@ final class AppState {
     @ObservationIgnored private let onboarding: OnboardingState
     @ObservationIgnored private var observationTasks: [Task<Void, Never>] = []
 
+    /// Guards `prime()` against a second run. Mirrors `UpdateController`'s
+    /// `didStart` latch — re-priming would append a second observation
+    /// task and re-issue every store snapshot.
+    @ObservationIgnored private var didPrime = false
+
     /// While the wizard is showing step 4 (hotkey check), it sets these
     /// so a Right Option press fires its UI feedback instead of starting
     /// a recording session. Cleared on disappear.
@@ -343,6 +348,39 @@ final class AppState {
             .flatMap(GeminiModel.init(rawValue:))
         self.geminiModel = storedModel ?? GeminiModel.fallback
         self.loginItemController = LoginItemController()
+    }
+
+    /// Everything that used to run as a fire-and-forget `Task` from
+    /// `init`. Called once from `applicationDidFinishLaunching(_:)`.
+    ///
+    /// **Why this is not in `init`.** `NoTypeApp.init()` runs before
+    /// `NSApplicationMain` has started the application. Scheduling
+    /// `MainActor` work in that window is a latent ordering bug in its own
+    /// right, and it is the leading hypothesis for the macOS 26.2
+    /// executor-identity crash — see
+    /// `docs/solutions/runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md`.
+    /// The rule is pinned mechanically by `NoTypeTests/LaunchOrderingTests.swift`.
+    ///
+    /// Idempotent — mirrors `UpdateController.start()`'s `didStart` latch.
+    func prime() {
+        guard !didPrime else { return }
+        didPrime = true
+
+        // Order is load-bearing, which is why `AppState` drives it rather
+        // than the launch hook doing it in two calls that could be
+        // reordered:
+        //
+        //   1. `permissions.prime()` performs the live TCC read. Until it
+        //      runs, every status is `.unknown` — its own initializer no
+        //      longer refreshes (same no-work-before-launch rule).
+        //   2. `applyAccessibilityState()` installs the hotkey from those
+        //      now-real values. This MUST be a synchronous call here and
+        //      not left to `observePermissions()`: that loop snapshots the
+        //      current values on entry and only reacts to a subsequent
+        //      *change*, so a state that was already `.granted` before the
+        //      loop started would never install the tap.
+        permissions.prime()
+        applyAccessibilityState()
 
         Task { @MainActor [weak self] in
             await self?.refreshHistory()
@@ -374,11 +412,6 @@ final class AppState {
             let snap = await dictionaryStore.snapshot()
             self?.applyDictionarySnapshot(snap)
         }
-
-        // Apply the current accessibility state synchronously so the
-        // hotkey is installed (or known-missing) before the first observed
-        // change. Mirrors `removeDuplicates` semantics on the Combine path.
-        applyAccessibilityState()
 
         // Install/uninstall the hotkey based on Accessibility, and reconcile
         // the permission-card HUD when either Accessibility or Microphone

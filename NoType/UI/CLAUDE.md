@@ -50,6 +50,18 @@ SwiftUI surfaces: menu-bar icon, history popover, the main app window (Home tab 
 - **`TimelineView` content closures may NOT call instance methods or read instance computed properties on the enclosing View.** On macOS 26 this crashes with `swift_task_isCurrentExecutorWithFlagsImpl` → `objc_opt_class` at a small faulting address — see `solutions/runtime-errors/timelineview-mainactor-instance-method-crash-2026-05-16.md`. Allowed inside the closure: `let` props on `self`, `Self.foo(...)` static helpers, `ctx.date`, SwiftUI view builders. For views with mutable state (spectrum meters, animated bars), use a `.task { while !Task.isCancelled { … assign @State … try? await Task.sleep(...) } }` driver instead of `TimelineView` — `@State` mutation triggers normal SwiftUI re-render without the TimelineView dispatch path.
 - **All `.onHover` callsites go through `dsOnHover` (in `DSComponents.swift`).** Raw `.onHover { hovered = $0 }` written inside a `@MainActor` View body inherits `@MainActor` per SE-0420; on macOS 26.2 the closure's prologue executor check faults at `swift_getObjectType` because the SerialExecutorRef SwiftUI hands the concurrency runtime via `HoverResponder.updatePhase(_:)` carries an invalid identity — see `solutions/runtime-errors/onhover-mainactor-inheritance-crash-2026-05-19.md`. `dsOnHover` strips the inherited isolation via `@Sendable` and then hops back with `Task { @MainActor in … }` for the `@State` write — an async hop costing ~one frame. **`MainActor.assumeIsolated` was considered and rejected as that bridge** (it calls into the same `_taskIsCurrentExecutor` family as the crash and traps unconditionally if SwiftUI ever dispatches `.onHover` off-main); don't "simplify" the helper back into it. The only legal raw `.onHover` in the project is `dsOnHover`'s own definition.
 
+## Launch ordering
+
+**No type constructed by `NoTypeApp.init()` may schedule `MainActor` work or touch `NSApp` during construction.** That code runs before `NSApplicationMain` has started the application; scheduling into that window is a latent ordering bug and the leading hypothesis for the macOS-26.2 executor-identity crash family (issue #82).
+
+- Launch work lives in `AppState.prime()`, `PermissionsViewModel.prime()`, and `AppearanceController.apply()`.
+- All three are driven by `NoTypeAppDelegate.launchHandler`, assigned in `NoTypeApp.init()` (assigning a closure schedules nothing) and invoked from `applicationDidFinishLaunching(_:)`. Appearance is applied **before** priming so the theme is on `NSApp` ahead of any UI priming can surface.
+- **Don't move this to a scene's `.task`.** NoType is `LSUIElement` and the main window isn't presented at launch once onboarding is complete, so a returning user would never fire it. `wireTerminationHandler()` is the counter-example, not the precedent.
+- `AppState.prime()` calls `permissions.prime()` and then `applyAccessibilityState()` **synchronously, in that order**. `observePermissions()` only reacts to changes *after* its entry snapshot, so an already-`.granted` state would otherwise never install the hotkey tap.
+- `applicationDidFinishLaunching(_:)` deliberately does **not** use `MainActor.assumeIsolated` (unlike `applicationWillTerminate(_:)`): it calls into the same `swift_task_isCurrentExecutor` family that faults in this crash family.
+
+Pinned by `NoTypeTests/LaunchOrderingTests.swift` (source scan over every type reachable by construction from `NoTypeApp.init()`, following same-file calls transitively) and `NoTypeTests/LaunchPrimingTests.swift` (behaviour).
+
 ## HUD slots & widths
 
 | HUD | Width | Trigger | Hides on |
