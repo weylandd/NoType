@@ -9,7 +9,13 @@
 #   pre-commit run --all-files
 #
 # Hooks here are intentionally minimal — they catch common mistakes (secrets,
-# whitespace, broken JSON/YAML) without forcing a heavy lint pipeline.
+# whitespace, broken JSON/YAML/XML) without forcing a heavy lint pipeline.
+#
+# `check-xml` earns its place: Apple's plist parser is lenient, so a malformed
+# `.entitlements` / `.plist` / appcast passes `plutil -lint`, builds, and signs
+# while strict parsers reject it. 0.1.12 shipped exactly that — a `--` sequence
+# inside an XML comment in NoType.entitlements, which is illegal in XML but
+# invisible to every Apple tool in the release path.
 
 repos:
   - repo: https://github.com/gitleaks/gitleaks
@@ -25,6 +31,13 @@ repos:
       - id: end-of-file-fixer
       - id: check-yaml
       - id: check-json
+      - id: check-xml
+        # The upstream hook declares `types: [xml]`, and `identify` does not
+        # classify .plist / .entitlements as xml — so widening `files:` alone
+        # silently matches nothing. Reset the type filter to `file` and let the
+        # pattern below do the selecting.
+        types: [file]
+        files: '\.(xml|plist|entitlements)$'
       - id: check-added-large-files
         args: ['--maxkb=1024']
       - id: check-merge-conflict
