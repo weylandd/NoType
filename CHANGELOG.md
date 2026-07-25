@@ -12,6 +12,58 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
 
 ---
 
+## [0.1.13-rc1] — 2026-07-25
+
+Test build, handed out directly rather than published — it is not in the
+auto-update feed and installed copies will not be offered it. The point
+of this RC is to find out whether the start-up rework below fixes the
+macOS 26.2 crash reported in
+[issue #82](https://github.com/weylandd/NoType/issues/82).
+
+### Fixed
+- **Auto-updates now actually run for menu-bar-only users.** NoType's
+  update scheduler was started from the main window, and that window
+  doesn't open by itself once you've finished onboarding — so if you
+  only ever used the menu-bar icon, NoType never checked for updates at
+  all, and the daily check was moot. It now starts when the app
+  launches, whether or not a window is on screen. Settings → "Check for
+  updates" also recovers on its own if the launch-time start fails.
+- **Quitting no longer risks leaving your system audio muted.** The
+  handler that unmutes your Mac when NoType exits was wired up from the
+  same never-opened window, so it could be missing entirely — and if
+  NoType had ducked audio for a recording, quitting could leave it that
+  way.
+
+### Changed
+- **All start-up work now happens after macOS has finished launching
+  the app**, instead of partly during construction. This is the change
+  the build exists to test: on macOS 26.2 (build 25C56) every button
+  tap inside NoType's windows crashes it
+  ([#82](https://github.com/weylandd/NoType/issues/82)), and doing
+  main-thread work that early is the leading suspect. **It is not
+  confirmed to fix that crash** — the crash doesn't reproduce on any
+  machine we can test on, which is exactly why this build is going out
+  to the reporter. The reordering is the correct thing to do either
+  way, so it ships regardless of the outcome.
+
+### Internal
+- README gained a "Known issues" section for the macOS 26.2 crash:
+  what still works (push-to-talk dictation, which doesn't go through
+  SwiftUI's button dispatch), what doesn't (a new user can't finish
+  onboarding), and the unconfirmed "try a newer macOS build"
+  workaround.
+- Corrected the `dsOnHover` documentation, which described a shape the
+  shipped helper doesn't use and that the crash notes explicitly
+  reject.
+- New entries under `docs/solutions/`: the macOS 26 executor-identity
+  crash family (three incidents previously recorded as unrelated, now
+  as one), a note that a SwiftUI scene `.task` is not a launch hook for
+  a menu-bar-only app, that moving an eager read into an observation
+  loop swallows the initial state, and a convention on source-scan
+  guards that only assert absence.
+
+---
+
 ## [0.1.12] — 2026-07-25
 
 ### Fixed
