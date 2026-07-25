@@ -12,7 +12,7 @@ applies_when:
   - "Considering a Swift-runtime check-mode knob, a linked-SDK pin, or a deployment-target change as the fix"
 symptoms:
   - "EXC_BAD_ACCESS (SIGSEGV) at a small integer address — 0x1e, 0x1, and 0x0 observed across the three incidents"
-  - "Faulting frame swift_getObjectType, reached via swift_task_isMainExecutorImpl <- SerialExecutorRef::isMainExecutor() <- swift_task_isCurrentExecutorWithFlagsImpl"
+  - "Faults in swift_getObjectType — or one frame deeper in objc_opt_class — reached via SerialExecutorRef::isMainExecutor() <- swift_task_isCurrentExecutorWithFlagsImpl"
   - "The frame below the runtime differs every time: a TimelineView closure, an .onHover closure, then SwiftUI's own _ButtonGesture"
   - "Every occurrence so far from one machine and one OS build: Mac15,7 / M3 Pro / macOS 26.2 (25C56)"
   - "Each per-call-site fix held at that site, and the crash reappeared at an unrelated site that still performed the check"
@@ -59,7 +59,7 @@ The current incident's cost is also asymmetric in a way that shapes triage. Dict
 
 ## When to Apply
 
-- **In the family** — any macOS 26.x crash where `swift_getObjectType` faults at a small integer address, reached from `swift_task_isMainExecutorImpl` / `SerialExecutorRef::isMainExecutor()` / `swift_task_isCurrentExecutorWithFlagsImpl`, on any thread including the main thread. "Main thread" is not an alibi — the `.onHover` incident faulted on `com.apple.main-thread`.
+- **In the family** — any macOS 26.x crash that faults at a small integer address inside `swift_getObjectType`, reached from `SerialExecutorRef::isMainExecutor()` / `swift_task_isCurrentExecutorWithFlagsImpl`, on any thread including the main thread. **The terminal symbol varies by one frame and is not a discriminator:** the `.onHover` incident stopped at `swift_getObjectType + 40` (with `swift_task_isMainExecutorImpl` symbolicated above it), while the `TimelineView` incident stopped one frame deeper at `objc_opt_class + 48`, which `swift_getObjectType` tail-calls for ObjC-interop types. Match on the `isMainExecutor()` caller plus the small-integer address, not on the leaf symbol. "Main thread" is not an alibi either — the `.onHover` incident faulted on `com.apple.main-thread`.
 - **Not in the family** — [`audio-ioproc-mainactor-inheritance-crash-2026-05-19.md`](./audio-ioproc-mainactor-inheritance-crash-2026-05-19.md) is the explicit counter-example. It shares the `swift_task_isCurrentExecutorWithFlagsImpl` frame but nothing else that matters: `EXC_BREAKPOINT` (SIGTRAP) rather than SIGSEGV, on the Core Audio HAL thread rather than the main thread, terminating in `_dispatch_assert_queue_fail` rather than in a bad-pointer read. It was a **genuine** actor-isolation violation — a `@MainActor`-inheriting closure literal really was running on `ioQueue` — and the one-keyword `@Sendable` fix was correct and final. It has not recurred. Folding it in would corrupt the family's evidence with a case where the runtime was right.
 - **Before proposing a build-setting fix** — read the runtime path below first. Two of the three obvious levers are already disproved.
 
@@ -92,7 +92,7 @@ SwiftUI _ButtonGesture fires MainActor.assumeIsolated
 | Signal | `EXC_BAD_ACCESS` / SIGSEGV | `EXC_BREAKPOINT` / SIGTRAP |
 | Address | small integer (`0x1e`, `0x1`, `0x0`) | n/a — a deliberate trap |
 | Thread | main thread | `com.apple.audio.IOThread.client` |
-| Terminal frame | `swift_getObjectType` | `_dispatch_assert_queue_fail` |
+| Terminal frame | `swift_getObjectType`, or `objc_opt_class` one frame deeper | `_dispatch_assert_queue_fail` |
 | Was the runtime right? | No — the identity is garbage | **Yes** — the closure really was off-main |
 | Fix | mitigation only; cause open | `@Sendable`; correct and final |
 
