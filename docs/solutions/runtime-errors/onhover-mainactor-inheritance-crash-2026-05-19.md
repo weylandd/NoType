@@ -27,7 +27,7 @@ This is the third instance of the same macOS 26 concurrency-runtime family. Prev
 
 1. **PR #41 (2026-04 / 2026-05-15)** — `TimelineView` content closures calling `@MainActor` instance methods. Fix shape: avoid the dispatch path entirely (`.task` driver loop instead of `TimelineView` for mutable state) or use only `Self.static` helpers + `let` props inside the closure. See [`timelineview-mainactor-instance-method-crash-2026-05-16.md`](./timelineview-mainactor-instance-method-crash-2026-05-16.md).
 2. **PR #53 / cd36c48 (2026-05-19)** — `AudioDeviceCreateIOProcIDWithBlock` closure literal inheriting `@MainActor` from the enclosing recorder method. Fix shape: add `@Sendable` to strip the inheritance. See [`audio-ioproc-mainactor-inheritance-crash-2026-05-19.md`](./audio-ioproc-mainactor-inheritance-crash-2026-05-19.md).
-3. **This entry** — SwiftUI `.onHover` modifier closures inheriting `@MainActor`. Fix shape: strip inheritance with `@Sendable`, re-enter MainActor synchronously with `MainActor.assumeIsolated` for the `@State` write. Wrapped behind a single `dsOnHover` helper applied to every `.onHover` site in the app.
+3. **This entry** — SwiftUI `.onHover` modifier closures inheriting `@MainActor`. Fix shape: strip inheritance with `@Sendable`, then hop back to MainActor with `Task { @MainActor in … }` for the `@State` write. `MainActor.assumeIsolated` was considered and **rejected** as that bridge — see *What Didn't Work* below. Wrapped behind a single `dsOnHover` helper applied to every `.onHover` site in the app.
 
 ## Symptoms
 
@@ -101,6 +101,7 @@ The shape mirrors PR #53's audio fix (`@Sendable` strips inheritance) but adds t
 
 ## Related Issues
 
+- [`macos-26-executor-identity-check-family-2026-07-25.md`](./macos-26-executor-identity-check-family-2026-07-25.md) — **read this first.** This entry is the *second* of three same-signature incidents that were later reframed as one poisoned main-executor identity rather than three independent dispatch-path bugs. Two corrections to the framing below: the `dsOnHover` fix is mitigation at one call site, not coverage of the class (a stock SwiftUI `Button` crashed the same way two months later, inside Apple's own `_ButtonGesture`, where no NoType closure exists to annotate); and the audio-IOProc crash listed below as "second instance" is the family's **counter-example**, not a member — it was a genuine isolation violation with a different signal, thread, and terminal frame.
 - [`timelineview-mainactor-instance-method-crash-2026-05-16.md`](./timelineview-mainactor-instance-method-crash-2026-05-16.md) — first instance of this family. Different SwiftUI dispatch path (TimelineView), same underlying runtime mechanism (`swift_task_isCurrentExecutorWithFlagsImpl`), different fix shape (restructure closure body to avoid `@MainActor` instance method calls).
 - [`audio-ioproc-mainactor-inheritance-crash-2026-05-19.md`](./audio-ioproc-mainactor-inheritance-crash-2026-05-19.md) — second instance. Different framework (Core Audio HAL), same underlying mechanism, similar fix shape (`@Sendable` strips inheritance). This entry's fix is the audio-fix pattern + a MainActor bridge to keep `@State` writes compiling.
 - `NoType/UI/CLAUDE.md` — owns the UI module's hover rule pinning `dsOnHover` as the only legal `.onHover` entry point.
