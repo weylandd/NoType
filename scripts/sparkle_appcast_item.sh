@@ -94,6 +94,30 @@ min_sys_ver = os.environ["MIN_SYSTEM_VERSION"]
 # so we never ship an empty description. A warning is printed to
 # stderr in that case.
 def extract_section(text: str, version: str) -> str:
+    # Two callers, two shapes of `--notes-file`:
+    #   * a full CHANGELOG.md (this script's documented usage) — find and
+    #     return the section for `version`;
+    #   * an already-extracted section, which is what
+    #     `scripts/publish_release.sh` passes (it extracts the notes itself
+    #     for the GitHub Release body and reuses the same file here).
+    #
+    # Telling them apart matters. Before this check the script always tried
+    # to extract, so the pre-extracted input — which has no `## [x.y.z]`
+    # heading — hit the not-found branch on every release and printed
+    # "using full CHANGELOG as description". The fallback returned the whole
+    # input, which for that caller happens to be exactly the right text, so
+    # the appcast was correct and the warning was noise. The cost was that a
+    # REAL extraction failure looked identical to the normal path.
+    #
+    # A body with no version headings at all is already a section: use it
+    # verbatim, no warning. Only warn when the text does look like a
+    # changelog but lacks the requested version — the case actually worth
+    # shouting about.
+    if not re.search(r"^##\s+\[", text, re.MULTILINE):
+        # Same trailing-separator trim the extract path applies, so both
+        # callers produce a byte-identical description for the same release.
+        return re.sub(r"\n---\s*$", "", text.strip()).rstrip()
+
     # Match `## [VERSION]` followed by anything until the next `## [`
     # or end of file. The trailing `---` separator (if present) and
     # any whitespace immediately before the next heading are dropped.
@@ -104,8 +128,9 @@ def extract_section(text: str, version: str) -> str:
     m = pattern.search(text)
     if not m:
         sys.stderr.write(
-            f"warning: changelog section for {version} not found — "
-            f"using full CHANGELOG as description\n"
+            f"warning: changelog section for {version} not found in a file that "
+            f"does contain version headings — using the whole file as the "
+            f"description. The appcast item will be wrong; fix CHANGELOG.md.\n"
         )
         return text
     body = m.group(1).strip()
