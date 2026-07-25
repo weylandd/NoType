@@ -12,6 +12,7 @@ Living rules for NoType's code. Each convention lives as a per-topic file under 
 - [Module architecture, DI, and naming](solutions/conventions/module-architecture-and-naming-2026-05-15.md) — MVVM with `@Observable`; initializer-only DI; module-owned errors; one type per file.
 - [Force-unwrap, error handling, and logging](solutions/conventions/force-unwrap-error-and-logging-2026-05-15.md) — no force-unwrap policy; error model (recoverable / programming / user-facing); `os.Logger` rules and privacy annotations.
 - [Testing, SPM dependency, and Git/PR hygiene](solutions/conventions/testing-spm-and-git-2026-05-15.md) — unit-test expectations; security / Gemini hard-rule tests; SPM allow-list; Conventional Commits; comments explain *why*.
+- [Source-scan guard fidelity](solutions/conventions/source-scan-guard-fidelity-2026-07-25.md) — a guard that only asserts absence stays green when the feature is dead; pin the destination too; needle-list rot, identifier boundaries, transitive depth, stored-property defaults; prove the guard red.
 
 ## Related conventions (treated as decisions, not conventions)
 

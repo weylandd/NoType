@@ -166,6 +166,11 @@ final class AppState {
     @ObservationIgnored private let onboarding: OnboardingState
     @ObservationIgnored private var observationTasks: [Task<Void, Never>] = []
 
+    /// Guards `prime()` against a second run. Mirrors `UpdateController`'s
+    /// `didStart` latch — re-priming would append a second observation
+    /// task and re-issue every store snapshot.
+    @ObservationIgnored private var didPrime = false
+
     /// While the wizard is showing step 4 (hotkey check), it sets these
     /// so a Right Option press fires its UI feedback instead of starting
     /// a recording session. Cleared on disappear.
@@ -343,6 +348,48 @@ final class AppState {
             .flatMap(GeminiModel.init(rawValue:))
         self.geminiModel = storedModel ?? GeminiModel.fallback
         self.loginItemController = LoginItemController()
+    }
+
+    /// Everything that used to run as a fire-and-forget `Task` from
+    /// `init`. Called once from `applicationDidFinishLaunching(_:)`.
+    ///
+    /// **Why this is not in `init`.** `NoTypeApp.init()` runs before
+    /// `NSApplicationMain` has started the application. Scheduling
+    /// `MainActor` work in that window is a latent ordering bug in its own
+    /// right, and it is the leading hypothesis for the macOS 26.2
+    /// executor-identity crash — see
+    /// `docs/solutions/runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md`.
+    /// The rule is pinned mechanically by `NoTypeTests/LaunchOrderingTests.swift`.
+    ///
+    /// Idempotent — mirrors `UpdateController.start()`'s `didStart` latch.
+    func prime() {
+        guard !didPrime else { return }
+        didPrime = true
+
+        // The one breadcrumb that distinguishes "priming never ran" from
+        // every other failure. If `launchHandler` is nil, is overwritten,
+        // or the delegate callback never fires, the user sees a running
+        // menu-bar app whose hotkey does nothing, empty history, and
+        // permanently `.unknown` permissions — which is indistinguishable
+        // from a genuinely ungranted install. This line is what a field
+        // `log stream --predicate 'subsystem == "app.notype"'` looks for.
+        Self.log.info("launch: priming AppState")
+
+        // Order is load-bearing, which is why `AppState` drives it rather
+        // than the launch hook doing it in two calls that could be
+        // reordered:
+        //
+        //   1. `permissions.prime()` performs the live TCC read. Until it
+        //      runs, every status is `.unknown` — its own initializer no
+        //      longer refreshes (same no-work-before-launch rule).
+        //   2. `applyAccessibilityState()` installs the hotkey from those
+        //      now-real values. This MUST be a synchronous call here and
+        //      not left to `observePermissions()`: that loop snapshots the
+        //      current values on entry and only reacts to a subsequent
+        //      *change*, so a state that was already `.granted` before the
+        //      loop started would never install the tap.
+        permissions.prime()
+        applyAccessibilityState()
 
         Task { @MainActor [weak self] in
             await self?.refreshHistory()
@@ -374,11 +421,6 @@ final class AppState {
             let snap = await dictionaryStore.snapshot()
             self?.applyDictionarySnapshot(snap)
         }
-
-        // Apply the current accessibility state synchronously so the
-        // hotkey is installed (or known-missing) before the first observed
-        // change. Mirrors `removeDuplicates` semantics on the Combine path.
-        applyAccessibilityState()
 
         // Install/uninstall the hotkey based on Accessibility, and reconcile
         // the permission-card HUD when either Accessibility or Microphone
@@ -439,8 +481,11 @@ final class AppState {
     }
 
     /// Synchronous accessibility-state application — install or uninstall
-    /// the hotkey to match the current permission. Called once at init
-    /// and once after every change observed by `observePermissions()`.
+    /// the hotkey to match the current permission. Called once from
+    /// `prime()` — immediately after `permissions.prime()`, whose live TCC
+    /// read it depends on — and once after every change observed by
+    /// `observePermissions()`. It is NOT called from `init`: the statuses
+    /// are all `.unknown` there, so it would uninstall rather than install.
     private func applyAccessibilityState() {
         if permissions.accessibility.isGranted {
             installHotkeyIfPossible()
@@ -657,6 +702,14 @@ final class AppState {
         if monitor.start() {
             hotkeyMonitor = monitor
             Self.log.info("hotkey installed (record=\(self.hotkeyBinding.code, privacy: .public) cancel=\(self.cancelHotkeyBinding.code, privacy: .public))")
+        } else {
+            // No retry: `observePermissions()` only re-applies on a *change*
+            // of `permissions.accessibility`, so a granted-and-stays-granted
+            // state never comes back here. A failed tap is therefore silent
+            // and permanent for the process lifetime — log it so the
+            // "Accessibility says granted but the hotkey does nothing"
+            // report is diagnosable.
+            Self.log.error("hotkey install failed — CGEventTap not created; push-to-talk is inert until relaunch")
         }
     }
 

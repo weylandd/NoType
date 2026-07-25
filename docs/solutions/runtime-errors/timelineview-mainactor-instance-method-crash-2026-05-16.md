@@ -170,6 +170,7 @@ private struct SpectrumBar: View {
 
 ## Related Issues
 
+- [`runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md`](macos-26-executor-identity-check-family-2026-07-25.md) — **read this first.** This entry is the *first* of three same-signature incidents that were later reframed as one poisoned main-executor identity rather than three independent dispatch-path bugs. That reframing supersedes this file's framing in two places: the fix below is mitigation at one call site, not coverage of the class (the crash reappeared twice afterward at unrelated sites), and the audio-IOProc entry cross-linked below is the family's **counter-example**, not its second member.
 - PR #41 — fix for both spectrum meters (this file's introducing PR).
 - The 2026-04 incident note inlined in `NoType/UI/HistoryRowView.swift` next to `TimestampDisplay.body` — first time this pattern was diagnosed in NoType.
 - Companion comment in `NoType/UI/RecordingHUD.swift` next to `TimerPill.body`.

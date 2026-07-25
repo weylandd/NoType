@@ -44,10 +44,15 @@ final class AppearanceController {
         didSet { persistAndApply() }
     }
 
+    /// Reads the persisted mode only. The `NSApp.appearance` write lives in
+    /// `apply()`, called from `applicationDidFinishLaunching(_:)` — no
+    /// launch-path initializer may touch `NSApp` before
+    /// `NSApplicationMain` has started the application. See
+    /// `docs/solutions/runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md`
+    /// and `NoTypeTests/LaunchOrderingTests.swift`.
     init() {
         let raw = UserDefaults.standard.string(forKey: Self.userDefaultsKey)
         self.mode = AppearanceMode(rawValue: raw ?? "") ?? .system
-        apply()
     }
 
     private func persistAndApply() {
@@ -55,16 +60,16 @@ final class AppearanceController {
         apply()
     }
 
-    private func apply() {
+    /// Pushes the current mode onto `NSApp`. Called once at launch, then
+    /// by `mode`'s `didSet` on every later user change. Idempotent.
+    func apply() {
         // `NSApp` is an implicitly-unwrapped global (`NSApplication!`).
-        // In the regular launch path it's always non-nil by the time
-        // SwiftUI scenes build, but xctest-host launches the app binary
-        // differently and can reach `AppearanceController.init` before
-        // `NSApplication.shared` has been registered as `NSApp`. Guard
-        // explicitly so unit tests don't crash on import. Skipping the
-        // apply in that window is harmless — when the real app run
-        // resumes it picks up the appearance again on the next mode
-        // mutation, and unit tests never need the side effect at all.
+        // In the app it is always non-nil here — this runs from
+        // `applicationDidFinishLaunching(_:)`, by which point
+        // `NSApplicationMain` has registered it. The guard covers the
+        // xctest host, which launches the binary differently and can
+        // reach this without an `NSApp`. Skipping the write in that
+        // window is harmless: unit tests never need the side effect.
         guard let app: NSApplication = NSApp else { return }
         app.appearance = mode.nsAppearance
     }

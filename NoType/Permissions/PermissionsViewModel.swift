@@ -19,6 +19,16 @@ final class PermissionsViewModel {
 
     @ObservationIgnored private var pollingTask: Task<Void, Never>?
 
+    /// Guards `prime()` against a second run. Mirrors `UpdateController`'s
+    /// `didStart` latch — re-priming would register a second pair of
+    /// notification observers (which are never de-registered).
+    ///
+    /// `private(set)` rather than `private` so `LaunchPrimingTests` can pin
+    /// the latch: the statuses alone cannot detect its removal, because
+    /// `refresh()` is value-idempotent and a second run returns the same
+    /// three values whether or not the guard fired.
+    @ObservationIgnored private(set) var didPrime = false
+
     var allGranted: Bool {
         microphone.isGranted && accessibility.isGranted
     }
@@ -26,13 +36,29 @@ final class PermissionsViewModel {
     /// Critical-path subset for actually starting a recording session.
     var recordingReady: Bool { allGranted }
 
-    init() {
-        refresh()
-        observeAppActivation()
-    }
+    /// Deliberately empty. Every launch-path type must schedule no
+    /// `MainActor` work and touch no `NSApp` during construction — this
+    /// is the first object `NoTypeApp.init()` builds, and the old
+    /// `refresh()` call reached `startPollingIfNeeded()`, which spawns a
+    /// `Task` whenever any permission is ungranted (i.e. on every first
+    /// run). See `prime()`.
+    init() {}
 
     deinit {
         pollingTask?.cancel()
+    }
+
+    /// Reads the live TCC state and starts observing. Called from
+    /// `applicationDidFinishLaunching(_:)`, never from `init` — see the
+    /// initializer's doc-comment and
+    /// `docs/solutions/runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md`.
+    /// Idempotent.
+    func prime() {
+        guard !didPrime else { return }
+        didPrime = true
+        Self.log.info("launch: priming permissions")
+        refresh()
+        observeAppActivation()
     }
 
     func refresh() {

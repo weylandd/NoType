@@ -15,25 +15,91 @@ import SwiftUI
 /// safety net (e.g. `MusicInterruption.deinit` restores mute). Used to
 /// run the `MusicInterruption` mute-restore *synchronously* before the
 /// process exits so the user's system isn't left stranded on mute when
-/// the deinit chain may not run reliably under `NSApp.terminate`. Any
-/// AppState-side handler is registered via `terminationHandler` after
-/// the `@NSApplicationDelegateAdaptor` instantiates this class.
+/// the deinit chain may not run reliably under `NSApp.terminate`. The
+/// AppState-side handler is assigned in `NoTypeApp.init()`, alongside
+/// the two launch handlers.
 final class NoTypeAppDelegate: NSObject, NSApplicationDelegate {
     /// Runs from `applicationWillTerminate(_:)` on the main thread,
     /// synchronously before the process exits. Used by `AppState` to
     /// release the `MusicInterruption` assertion if one is held — see
     /// the class doc-comment for why.
+    ///
+    /// Assigned in `NoTypeApp.init()`. It used to be assigned from a
+    /// `.task` on `MainWindowView`, which for a returning `LSUIElement`
+    /// user never fires — the main window isn't presented at launch, so
+    /// quitting from the popover left the system muted. See
+    /// `launchHandler`'s doc-comment for the same trap.
     var terminationHandler: (@MainActor () -> Void)?
+
+    /// Runs from `applicationDidFinishLaunching(_:)` — the first moment
+    /// `NSApplicationMain` has actually started the application. Every
+    /// piece of launch work that *schedules* `MainActor` work hangs off
+    /// this, because doing any of it from `NoTypeApp.init()` is a latent
+    /// ordering bug and the leading suspect for the macOS 26.2
+    /// executor-identity crash. (The one thing that rides the earlier
+    /// `willFinishLaunchingHandler` instead is the appearance write,
+    /// which schedules nothing — see that property.) Assigned in
+    /// `NoTypeApp.init()` (assigning a closure schedules nothing) so the
+    /// handler is guaranteed to be in place before AppKit calls back.
+    ///
+    /// Deliberately NOT a SwiftUI `.task` on the main `Window`: NoType is
+    /// `LSUIElement` and, once onboarding is complete, that window is not
+    /// presented at launch — a returning user would never fire it. That
+    /// is not hypothetical: Sparkle's `UpdateController.start()` sat on
+    /// exactly that `.task`, so menu-bar-only users got no update checks
+    /// at all until they happened to open the window.
+    ///
+    /// This is a single point of failure for the whole app: if it is
+    /// never assigned or never fires, NoType runs with no hotkey tap, no
+    /// permission reads and every mirror empty, which looks exactly like
+    /// a genuinely ungranted install. `AppState.prime()` logs on entry so
+    /// that state is diagnosable, and
+    /// `LaunchOrderingTests.test_launchWork_isActuallyWiredUp_fromNoTypeAppInit`
+    /// pins the assignment.
+    var launchHandler: (@MainActor () -> Void)?
+
+    /// Runs from `applicationWillFinishLaunching(_:)` — the earliest hook
+    /// that is still after `NSApplicationMain` has started the app, and
+    /// crucially *before* SwiftUI evaluates the first `View.body`. Only
+    /// the appearance write hangs off this: `AppearanceController.init`
+    /// used to apply the theme precisely so "the very first frame already
+    /// has the correct appearance", and `applicationDidFinishLaunching`
+    /// is one hook too late to preserve that. Priming stays on the later
+    /// hook — it is the work that must not run early.
+    ///
+    /// `AppearanceController.apply()` is idempotent, so `launchHandler`
+    /// re-applies it as a belt-and-braces: if a future SwiftUI release
+    /// stops forwarding `willFinishLaunching` through
+    /// `@NSApplicationDelegateAdaptor`, the theme still lands, one frame
+    /// later, instead of never.
+    var willFinishLaunchingHandler: (@MainActor () -> Void)?
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        willFinishLaunchingHandler?()
+    }
+
+    /// Note the absence of `MainActor.assumeIsolated` in both launch hooks
+    /// and in `applicationWillTerminate(_:)`. `assumeIsolated` calls into
+    /// the `swift_task_isCurrentExecutor` family — precisely the check
+    /// that faults in this crash family, and the reason the project
+    /// rejects it as a bridge (`NoType/UI/CLAUDE.md` hard rules). It is
+    /// also pure ceremony here: `NSApplicationDelegate` conformance makes
+    /// this class `@MainActor`, so calling a `@MainActor` closure needs no
+    /// runtime check — the direct calls below typecheck under
+    /// `SWIFT_STRICT_CONCURRENCY: complete`, which is the proof.
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        launchHandler?()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         // AppKit guarantees this fires on the main thread before the
         // process dies, so the synchronous `releaseMusicInterruption()`
         // call gets to roll back the CoreAudio mute write before exit.
-        MainActor.assumeIsolated { terminationHandler?() }
+        terminationHandler?()
     }
 }
 
@@ -43,9 +109,9 @@ struct NoTypeApp: App {
 
     @State private var permissions: PermissionsViewModel
     @State private var appState:    AppState
-    /// Owns the user's theme preference and applies it to NSApp on init —
-    /// must exist before the first SwiftUI body resolves so the very first
-    /// frame already has the correct appearance.
+    /// Owns the user's theme preference. Reads it from `UserDefaults` on
+    /// init; the `NSApp.appearance` write happens in `apply()` from the
+    /// launch hook, because no launch-path initializer may touch `NSApp`.
     @State private var appearance:  AppearanceController
     /// Drives the first-run wizard. Created before AppState so AppState
     /// can hold a reference and suppress permission HUDs while the
@@ -66,34 +132,63 @@ struct NoTypeApp: App {
         let dictionary   = DictionaryStore()
         let onboarding   = OnboardingState()
 
-        _permissions = State(wrappedValue: perms)
-        _appState = State(
-            wrappedValue: AppState(
-                permissions: perms,
-                hud: hud,
-                gemini: gemini,
-                historyStore: history,
-                statsStore: stats,
-                instructionsStore: instructions,
-                appCategorizer: categorizer,
-                dictionaryStore: dictionary,
-                onboarding: onboarding
-            )
+        let appearance = AppearanceController()
+        let updates    = UpdateController()
+        let state = AppState(
+            permissions: perms,
+            hud: hud,
+            gemini: gemini,
+            historyStore: history,
+            statsStore: stats,
+            instructionsStore: instructions,
+            appCategorizer: categorizer,
+            dictionaryStore: dictionary,
+            onboarding: onboarding
         )
-        _appearance = State(wrappedValue: AppearanceController())
-        _onboarding = State(wrappedValue: onboarding)
-        _updates    = State(wrappedValue: UpdateController())
-    }
 
-    /// Bind the termination handler once at scene-graph build time so
-    /// the user's mute state always gets restored on `NSApp.terminate(nil)`
-    /// (popover's Quit button). The delegate retains the closure; the
-    /// closure retains the State-wrapped `appState`, which is the same
-    /// instance the rest of the app uses. Idempotent — re-binding the
-    /// same closure on every body invalidation is harmless.
-    private func wireTerminationHandler() {
-        appDelegate.terminationHandler = { [appState] in
-            appState.releaseMusicInterruption()
+        _permissions = State(wrappedValue: perms)
+        _appState    = State(wrappedValue: state)
+        _appearance  = State(wrappedValue: appearance)
+        _onboarding  = State(wrappedValue: onboarding)
+        _updates     = State(wrappedValue: updates)
+
+        // Assigning a closure schedules nothing and touches no `NSApp`, so
+        // this is legal here — and doing it in `init` (rather than from a
+        // scene's `.task`) guarantees the handlers are installed before
+        // AppKit fires the callbacks that invoke them.
+        //
+        // Appearance is applied BEFORE priming so the theme is on `NSApp`
+        // ahead of any UI the priming work can surface (the launch
+        // permission HUD) — and on the earlier `willFinishLaunching` hook
+        // so it also lands ahead of the first `View.body`. Re-applied from
+        // `launchHandler` as an idempotent fallback; see
+        // `willFinishLaunchingHandler`'s doc-comment.
+        appDelegate.willFinishLaunchingHandler = {
+            appearance.apply()
+        }
+        appDelegate.launchHandler = {
+            appearance.apply()
+            state.prime()
+            // Last of the three: Sparkle's scheduler is background work
+            // with no user-visible surface at launch, so it goes behind
+            // the theme write and the hotkey-tap install. `start()` needs
+            // a live `NSApplication` to attach to, which
+            // `applicationDidFinishLaunching(_:)` satisfies at least as
+            // well as the scene `.task` it replaces.
+            updates.start()
+        }
+
+        // Restores the user's mute state on the orderly-quit path
+        // (`NSApp.terminate(nil)` from the popover's Quit button). A pure
+        // closure assignment like the two above — it schedules nothing, so
+        // it belongs in `init` rather than in `launchHandler`: the delegate
+        // owns the closure, so assigning it from a closure the delegate
+        // itself owns would only add a retain cycle and a later wiring
+        // point, for a handler that cannot possibly be needed before launch.
+        // Captures the local `state`, not `self.appState`: `@State` must not
+        // be read outside a view update.
+        appDelegate.terminationHandler = {
+            state.releaseMusicInterruption()
         }
     }
 
@@ -138,15 +233,6 @@ struct NoTypeApp: App {
                 .environment(appearance)
                 .environment(onboarding)
                 .environment(updates)
-                // Sparkle wants a live NSApplication to attach its scheduler
-                // to — `start()` from MainWindowView's lifecycle fits that.
-                // Idempotent: the controller no-ops if started already.
-                .task { updates.start() }
-                // Register the orderly-quit handler that releases the
-                // MusicInterruption assertion before exit so the user's
-                // mute state survives `NSApp.terminate(nil)` from the
-                // popover's Quit button.
-                .task { wireTerminationHandler() }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
