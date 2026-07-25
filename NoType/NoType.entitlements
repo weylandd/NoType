@@ -12,8 +12,8 @@
 
 	     macOS classes `keychain-access-groups` as restricted: AMFI refuses to
 	     exec a binary carrying it unless the bundle embeds a profile that
-	     grants it. The binary still passes `codesign --verify --deep --strict`,
-	     notarization, stapling and `spctl --assess` — none of those validate
+	     grants it. The binary still passes a strict deep `codesign` verify,
+	     notarization, stapling and `spctl` assessment — none of those validate
 	     restricted entitlements — so the breakage is invisible until launch,
 	     where the process is SIGKILLed before main() with
 	     `amfid: -413 "No matching profile found"`. That shipped as v0.1.11 and
