@@ -11,8 +11,10 @@ import os
 /// section of the auto-update plan.
 ///
 /// Lifecycle: instantiated once in `NoTypeApp.init()` and injected into the
-/// SwiftUI environment. `start()` is called from `NoTypeApp.body` once the
-/// scene is up so Sparkle's scheduler observes the live `NSApplication`.
+/// SwiftUI environment. `start()` runs from `applicationDidFinishLaunching(_:)`
+/// via `NoTypeAppDelegate.launchHandler`, so Sparkle's scheduler observes a
+/// live `NSApplication` and does so on every launch — including the
+/// menu-bar-only launch of a returning `LSUIElement` user.
 @MainActor
 @Observable
 final class UpdateController {
@@ -81,10 +83,10 @@ final class UpdateController {
         driver.controller = self
     }
 
-    /// Start the scheduler. Must be called from `NoTypeApp.body` (not `init`)
-    /// because Sparkle wants a live `NSApplication` to attach to. Idempotent
-    /// — SwiftUI's `.task` modifier can fire multiple times across window
-    /// re-presentations, and `SPUUpdater.start()` throws if called twice.
+    /// Start the scheduler. Must be called from a launch callback (not
+    /// `init`) because Sparkle wants a live `NSApplication` to attach to.
+    /// Idempotent — `SPUUpdater.start()` throws if called twice, and the
+    /// latch also covers a retry after a failed start.
     func start() {
         guard !didStart else { return }
         didStart = true
@@ -93,7 +95,12 @@ final class UpdateController {
             log.info("sparkle updater started; auto-checks=\(self.updater.automaticallyChecksForUpdates, privacy: .public)")
         } catch {
             log.error("sparkle start failed: \(error.localizedDescription, privacy: .public)")
-            didStart = false  // allow retry on next window appearance
+            // Reopen the latch. The launch hook fires exactly once, so the
+            // only remaining retry is the user's explicit Settings →
+            // "Check for updates", which calls `start()` first for this
+            // reason. (Before the launch-hook move, a window
+            // re-presentation re-fired the scene `.task` and retried here.)
+            didStart = false
         }
     }
 
@@ -132,7 +139,13 @@ final class UpdateController {
     /// driver callbacks, so phase transitions through `.checking` → `.idle`
     /// (no update) or `.checking` → `.available(...)` exactly like the
     /// scheduled 24 h check.
+    ///
+    /// Calls `start()` first — a no-op in the normal case (the launch hook
+    /// already started the scheduler) and the recovery path when that
+    /// start threw: a manual check would otherwise run against an
+    /// unstarted `SPUUpdater` for the rest of the process lifetime.
     func checkForUpdates() {
+        start()
         updater.checkForUpdates()
     }
 

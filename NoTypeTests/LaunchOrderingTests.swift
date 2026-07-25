@@ -128,6 +128,44 @@ final class LaunchOrderingTests: XCTestCase {
         )
     }
 
+    /// The same class of bug as the test above, one level out: work that IS
+    /// wired, to a hook that never fires. `updates.start()` and the
+    /// termination handler both sat on `.task` modifiers on `MainWindowView`.
+    /// For a returning `LSUIElement` user the main window is not presented at
+    /// launch (`defaultLaunchBehavior(.automatic)`), so that `.task` never
+    /// ran: Sparkle never checked for updates, and quitting from the popover
+    /// left the system muted because the mute-restore handler was unassigned.
+    ///
+    /// Both now hang off `NoTypeApp.init()` — `start()` inside `launchHandler`
+    /// (it needs a live `NSApplication`), `terminationHandler` as a direct
+    /// closure assignment (it schedules nothing, so it needs no hook).
+    func test_sparkleAndTerminationHandler_areWiredFromInit_notAWindowTask() throws {
+        let url = Self.repoRoot()
+            .appendingPathComponent("NoType")
+            .appendingPathComponent("NoTypeApp.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        let combined = LaunchPathScanner.initBodies(inSource: source).joined(separator: "\n")
+
+        XCTAssertTrue(
+            combined.contains("updates.start()"),
+            "NoTypeApp.init() must start Sparkle from the launch handler — on a .task it never runs for menu-bar-only users."
+        )
+        XCTAssertTrue(
+            combined.contains("terminationHandler ="),
+            "NoTypeApp.init() must assign appDelegate.terminationHandler — without it, quitting can leave the system muted."
+        )
+
+        // Neither may drift back onto the scene. `.task` on a scene view is
+        // fine for genuinely window-scoped work; if you are adding such a
+        // case, narrow this assertion rather than deleting it — the thing it
+        // guards is that *launch* work never rides a modifier that a
+        // menu-bar-only launch does not evaluate.
+        XCTAssertFalse(
+            LaunchPathScanner.strippingCommentsAndStrings(source).contains(".task"),
+            "NoTypeApp.swift must not hang work off a scene `.task` — the main window is not presented at launch once onboarding is complete."
+        )
+    }
+
     // MARK: - Fixtures pinning the scanner itself
 
     func test_scanner_flagsTaskLiteralInInitializerBody() {

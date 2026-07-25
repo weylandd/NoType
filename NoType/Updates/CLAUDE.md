@@ -19,8 +19,8 @@ UI surface: `NoType/UI/UpdateBanner.swift` (rendered at the bottom of the main-w
    - `SUScheduledCheckInterval` = `86400` (24 hours).
    - `SUEnableInstallerLauncherService` deliberately NOT set — NoType is non-sandboxed; Sparkle 2 installs the `.zip` directly without the XPC installer-launcher service.
 3. **`@preconcurrency import Sparkle`** in both files — absorbs the few callback closures Sparkle hasn't yet annotated as `Sendable`. Drop when Sparkle ships full Swift 6 concurrency support.
-4. **`UpdateController.start()` is called from a SwiftUI scene's `.task`**, not from `init()`. Sparkle wants a live `NSApplication` to attach to. `NoTypeApp.body` attaches via `.task { updates.start() }` on the main `Window`.
-5. **`start()` is idempotent** via `didStart` flag — SwiftUI's `.task` can fire multiple times across window re-presentations.
+4. **`UpdateController.start()` is called from `applicationDidFinishLaunching(_:)`**, not from `init()`. Sparkle wants a live `NSApplication` to attach to, which that hook satisfies. It rides `NoTypeAppDelegate.launchHandler` alongside `AppearanceController.apply()` + `AppState.prime()` — see `NoType/UI/CLAUDE.md` "Launch ordering". **It used to be a `.task` on the main `Window`, which was a bug**: NoType is `LSUIElement` and that window isn't presented at launch once onboarding is complete, so menu-bar-only users never checked for updates at all. Don't move it back onto a scene modifier.
+5. **`start()` is idempotent** via `didStart` flag. The launch hook fires once, so the latch mostly guards `checkForUpdates()`, which calls `start()` first — that manual check is the only remaining retry if the launch-time `start()` threw (it reopens the latch on failure).
 6. **`.failed(message)` auto-bounces back to `.idle` after 5 s** so the banner doesn't stay stuck on a transient error.
 
 ## Hard rules

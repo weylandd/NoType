@@ -53,6 +53,21 @@ final class LaunchPrimingTests: XCTestCase {
         XCTAssertEqual(fired, 1, "applicationWillFinishLaunching must invoke willFinishLaunchingHandler")
     }
 
+    /// The orderly-quit hook. It restores the user's system audio after a
+    /// `MusicInterruption` mute, so a handler that is never invoked leaves
+    /// the whole machine silent after quitting NoType.
+    func test_applicationWillTerminate_invokesTerminationHandler() {
+        let delegate = NoTypeAppDelegate()
+        var fired = 0
+        delegate.terminationHandler = { fired += 1 }
+
+        delegate.applicationWillTerminate(
+            Notification(name: NSApplication.willTerminateNotification)
+        )
+
+        XCTAssertEqual(fired, 1, "applicationWillTerminate must invoke terminationHandler")
+    }
+
     /// Both hooks are optional-chained; an unassigned handler must be a
     /// no-op rather than a crash (the xctest host reaches them with no
     /// handler installed).

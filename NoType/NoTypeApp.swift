@@ -15,14 +15,20 @@ import SwiftUI
 /// safety net (e.g. `MusicInterruption.deinit` restores mute). Used to
 /// run the `MusicInterruption` mute-restore *synchronously* before the
 /// process exits so the user's system isn't left stranded on mute when
-/// the deinit chain may not run reliably under `NSApp.terminate`. Any
-/// AppState-side handler is registered via `terminationHandler` after
-/// the `@NSApplicationDelegateAdaptor` instantiates this class.
+/// the deinit chain may not run reliably under `NSApp.terminate`. The
+/// AppState-side handler is assigned in `NoTypeApp.init()`, alongside
+/// the two launch handlers.
 final class NoTypeAppDelegate: NSObject, NSApplicationDelegate {
     /// Runs from `applicationWillTerminate(_:)` on the main thread,
     /// synchronously before the process exits. Used by `AppState` to
     /// release the `MusicInterruption` assertion if one is held — see
     /// the class doc-comment for why.
+    ///
+    /// Assigned in `NoTypeApp.init()`. It used to be assigned from a
+    /// `.task` on `MainWindowView`, which for a returning `LSUIElement`
+    /// user never fires — the main window isn't presented at launch, so
+    /// quitting from the popover left the system muted. See
+    /// `launchHandler`'s doc-comment for the same trap.
     var terminationHandler: (@MainActor () -> Void)?
 
     /// Runs from `applicationDidFinishLaunching(_:)` — the first moment
@@ -38,7 +44,10 @@ final class NoTypeAppDelegate: NSObject, NSApplicationDelegate {
     ///
     /// Deliberately NOT a SwiftUI `.task` on the main `Window`: NoType is
     /// `LSUIElement` and, once onboarding is complete, that window is not
-    /// presented at launch — a returning user would never fire it.
+    /// presented at launch — a returning user would never fire it. That
+    /// is not hypothetical: Sparkle's `UpdateController.start()` sat on
+    /// exactly that `.task`, so menu-bar-only users got no update checks
+    /// at all until they happened to open the window.
     ///
     /// This is a single point of failure for the whole app: if it is
     /// never assigned or never fires, NoType runs with no hotkey tap, no
@@ -124,6 +133,7 @@ struct NoTypeApp: App {
         let onboarding   = OnboardingState()
 
         let appearance = AppearanceController()
+        let updates    = UpdateController()
         let state = AppState(
             permissions: perms,
             hud: hud,
@@ -140,12 +150,12 @@ struct NoTypeApp: App {
         _appState    = State(wrappedValue: state)
         _appearance  = State(wrappedValue: appearance)
         _onboarding  = State(wrappedValue: onboarding)
-        _updates     = State(wrappedValue: UpdateController())
+        _updates     = State(wrappedValue: updates)
 
         // Assigning a closure schedules nothing and touches no `NSApp`, so
         // this is legal here — and doing it in `init` (rather than from a
-        // scene's `.task`) guarantees the handler is installed before
-        // AppKit fires `applicationDidFinishLaunching(_:)`.
+        // scene's `.task`) guarantees the handlers are installed before
+        // AppKit fires the callbacks that invoke them.
         //
         // Appearance is applied BEFORE priming so the theme is on `NSApp`
         // ahead of any UI the priming work can surface (the launch
@@ -159,18 +169,26 @@ struct NoTypeApp: App {
         appDelegate.launchHandler = {
             appearance.apply()
             state.prime()
+            // Last of the three: Sparkle's scheduler is background work
+            // with no user-visible surface at launch, so it goes behind
+            // the theme write and the hotkey-tap install. `start()` needs
+            // a live `NSApplication` to attach to, which
+            // `applicationDidFinishLaunching(_:)` satisfies at least as
+            // well as the scene `.task` it replaces.
+            updates.start()
         }
-    }
 
-    /// Bind the termination handler once at scene-graph build time so
-    /// the user's mute state always gets restored on `NSApp.terminate(nil)`
-    /// (popover's Quit button). The delegate retains the closure; the
-    /// closure retains the State-wrapped `appState`, which is the same
-    /// instance the rest of the app uses. Idempotent — re-binding the
-    /// same closure on every body invalidation is harmless.
-    private func wireTerminationHandler() {
-        appDelegate.terminationHandler = { [appState] in
-            appState.releaseMusicInterruption()
+        // Restores the user's mute state on the orderly-quit path
+        // (`NSApp.terminate(nil)` from the popover's Quit button). A pure
+        // closure assignment like the two above — it schedules nothing, so
+        // it belongs in `init` rather than in `launchHandler`: the delegate
+        // owns the closure, so assigning it from a closure the delegate
+        // itself owns would only add a retain cycle and a later wiring
+        // point, for a handler that cannot possibly be needed before launch.
+        // Captures the local `state`, not `self.appState`: `@State` must not
+        // be read outside a view update.
+        appDelegate.terminationHandler = {
+            state.releaseMusicInterruption()
         }
     }
 
@@ -215,15 +233,6 @@ struct NoTypeApp: App {
                 .environment(appearance)
                 .environment(onboarding)
                 .environment(updates)
-                // Sparkle wants a live NSApplication to attach its scheduler
-                // to — `start()` from MainWindowView's lifecycle fits that.
-                // Idempotent: the controller no-ops if started already.
-                .task { updates.start() }
-                // Register the orderly-quit handler that releases the
-                // MusicInterruption assertion before exit so the user's
-                // mute state survives `NSApp.terminate(nil)` from the
-                // popover's Quit button.
-                .task { wireTerminationHandler() }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
