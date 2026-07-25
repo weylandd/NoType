@@ -38,13 +38,14 @@ targets:
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: "49T6U8DQXZ"
         INFOPLIST_FILE: NoType/Info.plist
-        # Entitlements carry the data-protection keychain access group
-        # (keychain-access-groups → 49T6U8DQXZ.app.notype) that scopes the
-        # Gemini key so access survives code-signing-identity rotation.
-        # Automatic Debug signing may require the App ID to have the
-        # "Keychain Sharing" capability enabled on the developer portal;
-        # Developer ID release self-asserts the team-prefixed group with no
-        # profile. Verify both during the U1 signing spike (see the plan).
+        # Entitlements carry ONLY unrestricted keys today (audio-input,
+        # app-sandbox=false). `keychain-access-groups` was removed in 0.1.12:
+        # it is a RESTRICTED entitlement, and a bundle declaring one without an
+        # embedded provisioning profile is SIGKILLed by AMFI before main().
+        # 0.1.11 shipped exactly that and could not launch anywhere.
+        # Do not add a restricted entitlement here without also embedding a
+        # profile — see the comment in NoType/NoType.entitlements and the AMFI
+        # gate in scripts/release.sh.
         CODE_SIGN_ENTITLEMENTS: NoType/NoType.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
       configs:

@@ -25,9 +25,11 @@ resolves the key from two sources, **in priority order**:
 1. `NOTYPE_GEMINI_KEY` environment variable (CI, one-off override).
 2. macOS Keychain entry: service `app.notype.tests.gemini`,
    account `default` — read from the **legacy file keychain**
-   (`KeychainStore.load(..., store: .legacyFile)`), which is where the
-   `security … -A` recipe below lands it. The production key's migration to
-   the data-protection keychain does not affect this eval-key path.
+   (`KeychainStore.load(..., store: .legacyFile)`), pinned explicitly rather
+   than following `KeychainStore.productionStore` — the `security … -A` recipe
+   below always lands it there. Whatever backend production uses, this eval-key
+   path is unaffected; it is kept separate from the production key by its
+   distinct service string, not by living in a different keychain.
 
 If neither is set, every test in `PromptEvalTests` `XCTSkip`s with
 the setup instructions printed inline.

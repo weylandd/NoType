@@ -2,29 +2,23 @@ import XCTest
 import Security
 @testable import NoType
 
-/// Pins `KeychainStore` behaviour against the data-protection keychain.
+/// Pins `KeychainStore` behaviour against both backends.
 ///
-/// Doubles as the local proof for the U1 signing spike, **step 1**: if these
-/// pass under the Debug (Apple Development) signed test host, the
-/// `keychain-access-groups` entitlement is wired and the access group
-/// `49T6U8DQXZ.app.notype` is reachable from our signature. The notarized
-/// Developer ID half (spike steps 2–3) is a maintainer task — unit tests
-/// can't exercise notarization. See
-/// `docs/plans/2026-05-30-001-fix-keychain-data-protection-migration-plan.md`.
+/// **Production (`KeychainStore.productionStore`, currently `.legacyFile`)**
+/// needs no entitlement, so its round-trip tests run everywhere including CI.
 ///
-/// **Environment gate.** The data-protection access group only works when the
-/// test host is signed with the entitlement AND that entitlement is honoured
-/// (a dev machine with the "Keychain Sharing" capability set up, or a signed
-/// release). On a CI runner whose Debug build is ad-hoc / unentitled, the
-/// access group is unavailable and `SecItem*` returns `errSecMissingEntitlement`.
-/// Every test that touches the real keychain calls
-/// `skipIfDataProtectionUnavailable()` first and `XCTSkip`s there — same
-/// pattern as `PromptEvalTests` skipping without an API key. The real
-/// verification of the entitlement is the notarized build (U1 step 3), not CI.
+/// **`.dataProtection`** only works when the host process carries the
+/// `keychain-access-groups` entitlement. The app deliberately does **not**
+/// carry it right now — macOS classes it as restricted and AMFI SIGKILLs an
+/// unprofiled bundle that declares it (that shipped as v0.1.11; see
+/// `docs/solutions/runtime-errors/amfi-restricted-entitlement-launch-kill-2026-07-25.md`).
+/// Those tests therefore `XCTSkip` today. They are kept, not deleted: they are
+/// the acceptance suite for restoring the data-protection store once a
+/// Developer ID provisioning profile is embedded
+/// (`docs/solutions/documentation-gaps/developer-id-provisioning-profile-2026-07-25.md`).
 ///
 /// Each test uses a UUID-suffixed service so it never touches the production
-/// item (`app.notype.gemini`) and parallel runs don't collide. The access
-/// group is fixed by entitlement, so only the service varies for isolation.
+/// item (`app.notype.gemini`) and parallel runs don't collide.
 final class KeychainStoreTests: XCTestCase {
     private let account = "test-account"
 
@@ -33,27 +27,26 @@ final class KeychainStoreTests: XCTestCase {
     }
 
     /// Skip when the data-protection keychain access group isn't usable in
-    /// this environment (e.g. an unentitled CI Debug build). Probes with a
-    /// throwaway save+delete; any thrown `OSStatus` (typically
+    /// this environment. Probes with a throwaway save+delete against
+    /// `.dataProtection` explicitly; any thrown `OSStatus` (typically
     /// `errSecMissingEntitlement`) means the access group is unavailable.
     private func skipIfDataProtectionUnavailable() throws {
         let probe = "app.notype.tests.keychainstore.probe.\(UUID().uuidString)"
         do {
-            try KeychainStore.save("probe", service: probe, account: account)
-            try KeychainStore.delete(service: probe, account: account)
+            try KeychainStore.save("probe", service: probe, account: account, store: .dataProtection)
+            try KeychainStore.delete(service: probe, account: account, store: .dataProtection)
         } catch {
             throw XCTSkip(
                 "data-protection keychain access group unavailable (\(error.localizedDescription)); "
-                + "needs the keychain-access-groups entitlement + Keychain Sharing capability — "
-                + "see the U1 signing spike. Verified on a signed build."
+                + "needs the keychain-access-groups entitlement + an embedded Developer ID "
+                + "provisioning profile. Expected to skip while productionStore == .legacyFile."
             )
         }
     }
 
-    // MARK: - Data-protection round trip
+    // MARK: - Production store round trip (runs everywhere)
 
-    func test_dataProtection_roundTrip() throws {
-        try skipIfDataProtectionUnavailable()
+    func test_production_roundTrip() throws {
         let service = uniqueService()
         defer { try? KeychainStore.delete(service: service, account: account) }
 
@@ -62,37 +55,55 @@ final class KeychainStoreTests: XCTestCase {
         XCTAssertEqual(loaded, "AIzaSy-secret-value")
     }
 
-    func test_dataProtection_deleteThenLoadReturnsNil() throws {
-        try skipIfDataProtectionUnavailable()
+    func test_production_deleteThenLoadReturnsNil() throws {
         let service = uniqueService()
         try KeychainStore.save("value", service: service, account: account)
         try KeychainStore.delete(service: service, account: account)
-        let loaded = try KeychainStore.load(service: service, account: account)
-        XCTAssertNil(loaded)
+        XCTAssertNil(try KeychainStore.load(service: service, account: account))
     }
 
-    func test_dataProtection_upsertReturnsSecondValue() throws {
-        try skipIfDataProtectionUnavailable()
+    func test_production_upsertReturnsSecondValue() throws {
         let service = uniqueService()
         defer { try? KeychainStore.delete(service: service, account: account) }
 
         try KeychainStore.save("first", service: service, account: account)
         try KeychainStore.save("second", service: service, account: account)
-        let loaded = try KeychainStore.load(service: service, account: account)
-        XCTAssertEqual(loaded, "second")
+        XCTAssertEqual(try KeychainStore.load(service: service, account: account), "second")
     }
 
-    func test_dataProtection_idempotentDeleteOnMissing() throws {
-        try skipIfDataProtectionUnavailable()
+    func test_production_idempotentDeleteOnMissing() throws {
         let service = uniqueService()
         // No item was ever written — delete must be a no-op, not a throw.
         XCTAssertNoThrow(try KeychainStore.delete(service: service, account: account))
     }
 
-    func test_load_missingItemReturnsNil() throws {
+    func test_production_loadMissingItemReturnsNil() throws {
+        XCTAssertNil(try KeychainStore.load(service: uniqueService(), account: account))
+    }
+
+    // MARK: - Data-protection round trip (skips until a profile is embedded)
+
+    func test_dataProtection_roundTrip() throws {
         try skipIfDataProtectionUnavailable()
         let service = uniqueService()
-        XCTAssertNil(try KeychainStore.load(service: service, account: account))
+        defer { try? KeychainStore.delete(service: service, account: account, store: .dataProtection) }
+
+        try KeychainStore.save("AIzaSy-secret-value", service: service, account: account, store: .dataProtection)
+        let loaded = try KeychainStore.load(service: service, account: account, store: .dataProtection)
+        XCTAssertEqual(loaded, "AIzaSy-secret-value")
+    }
+
+    func test_dataProtection_upsertReturnsSecondValue() throws {
+        try skipIfDataProtectionUnavailable()
+        let service = uniqueService()
+        defer { try? KeychainStore.delete(service: service, account: account, store: .dataProtection) }
+
+        try KeychainStore.save("first", service: service, account: account, store: .dataProtection)
+        try KeychainStore.save("second", service: service, account: account, store: .dataProtection)
+        XCTAssertEqual(
+            try KeychainStore.load(service: service, account: account, store: .dataProtection),
+            "second"
+        )
     }
 
     // MARK: - Store isolation (proves the migration reads the right backend)
@@ -117,18 +128,14 @@ final class KeychainStoreTests: XCTestCase {
 
     /// macOS keychain isolation is **asymmetric**, and the migration relies on
     /// only one direction (the one `test_storeIsolation_legacyItemInvisibleToDataProtection`
-    /// pins): a scoped `.dataProtection` read never surfaces a legacy item, so
-    /// the production read path can't accidentally pick up a stale legacy item.
+    /// pins): a scoped `.dataProtection` read never surfaces a legacy item.
     ///
     /// The reverse does NOT hold and we pin the real behavior here so nobody
     /// assumes bidirectional isolation: an unscoped `.legacyFile` query (no
     /// data-protection flag, no access group) DOES surface the entitled app's
-    /// data-protection item. This is harmless for the migration — the only
-    /// `.legacyFile` reads are (a) SecretStore's one-shot migration, which runs
-    /// *only when the data-protection store is empty* (nothing to leak), and
-    /// (b) PromptEvalHarness reading the eval test key. Production reads default
-    /// to `.dataProtection` and resolve it first, so the legacy path is never
-    /// reached when a data-protection item exists.
+    /// data-protection item. This is why `SecretStore` never deletes the
+    /// migration source after migrating — a cross-store delete can match the
+    /// item it just wrote.
     func test_storeIsolation_legacyQuerySurfacesDataProtectionItem_documentedMacOSBehavior() throws {
         try skipIfDataProtectionUnavailable()
         let service = uniqueService()
@@ -141,7 +148,6 @@ final class KeychainStoreTests: XCTestCase {
             try KeychainStore.load(service: service, account: account, store: .legacyFile),
             "dp-only"
         )
-        // The production-scoped read works as expected.
         XCTAssertEqual(
             try KeychainStore.load(service: service, account: account, store: .dataProtection),
             "dp-only"
@@ -151,21 +157,18 @@ final class KeychainStoreTests: XCTestCase {
     // MARK: - Malformed item
 
     func test_load_malformedItem_throws() throws {
-        try skipIfDataProtectionUnavailable()
         let service = uniqueService()
-        defer { try? KeychainStore.delete(service: service, account: account, store: .dataProtection) }
+        defer { try? KeychainStore.delete(service: service, account: account) }
 
         // Seed a raw item with non-UTF-8 data directly, bypassing save().
         // 0xFF is never a valid UTF-8 byte, so decode yields nil →
         // KeychainError.malformedItem.
         let add: [String: Any] = [
-            kSecClass as String:                     kSecClassGenericPassword,
-            kSecAttrService as String:               service,
-            kSecAttrAccount as String:               account,
-            kSecUseDataProtectionKeychain as String: true,
-            kSecAttrAccessGroup as String:           KeychainStore.accessGroup,
-            kSecValueData as String:                 Data([0xFF, 0xFE, 0xFF]),
-            kSecAttrAccessible as String:            kSecAttrAccessibleAfterFirstUnlock,
+            kSecClass as String:          kSecClassGenericPassword,
+            kSecAttrService as String:    service,
+            kSecAttrAccount as String:    account,
+            kSecValueData as String:      Data([0xFF, 0xFE, 0xFF]),
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
         ]
         let status = SecItemAdd(add as CFDictionary, nil)
         try XCTSkipUnless(status == errSecSuccess, "couldn't seed malformed item (status \(status))")
@@ -177,15 +180,115 @@ final class KeychainStoreTests: XCTestCase {
         }
     }
 
-    // MARK: - Access-group / entitlement consistency
+    // MARK: - Stranded-item recovery (the .needsReentry write path)
 
-    func test_accessGroup_matchesEntitlementLiteral() {
-        // The hardcoded access group MUST equal the keychain-access-groups
-        // entitlement literal in NoType/NoType.entitlements verbatim. A
-        // one-sided edit is silent at build time and breaks every
-        // data-protection read at runtime with errSecMissingEntitlement —
-        // pin the literal so the drift fails here instead. (No keychain
-        // access — runs everywhere, including unentitled CI.)
-        XCTAssertEqual(KeychainStore.accessGroup, "49T6U8DQXZ.app.notype")
+    /// The read side (`SecretStore.isStrandingFailure`) and the write side
+    /// (`KeychainStore.save`'s recovery arm) must agree on which statuses mean
+    /// "the item exists but this build can't use it". If they drift, a user
+    /// told to re-paste their key gets a save that throws instead of
+    /// recovering — the failure this recovery arm exists to prevent.
+    func test_strandingStatus_setMatchesSecretStoreClassification() {
+        for status in [errSecAuthFailed, errSecInteractionNotAllowed] {
+            XCTAssertTrue(KeychainStore.isStrandingStatus(status), "status \(status) should strand")
+            XCTAssertTrue(
+                SecretStore.isStrandingFailure(KeychainStore.KeychainError.status(status)),
+                "SecretStore must classify status \(status) the same way save() does"
+            )
+        }
+        for status in [errSecItemNotFound, errSecMissingEntitlement, errSecIO, errSecSuccess] {
+            XCTAssertFalse(KeychainStore.isStrandingStatus(status), "status \(status) should not strand")
+            XCTAssertFalse(
+                SecretStore.isStrandingFailure(KeychainStore.KeychainError.status(status)),
+                "SecretStore must classify status \(status) the same way save() does"
+            )
+        }
+    }
+
+    /// `save` upserts over an item it CAN write without going through the
+    /// recovery arm. Pins that the recovery arm is genuinely conditional —
+    /// a regression that always deleted first would still pass a naive
+    /// round-trip test, but would needlessly churn the item's ACL.
+    func test_save_overExistingWritableItem_updatesInPlace() throws {
+        let service = uniqueService()
+        defer { try? KeychainStore.delete(service: service, account: account) }
+
+        try KeychainStore.save("first", service: service, account: account)
+        XCTAssertNoThrow(try KeychainStore.save("second", service: service, account: account))
+        XCTAssertEqual(try KeychainStore.load(service: service, account: account), "second")
+    }
+
+    // MARK: - Store / entitlement consistency
+
+    func test_migrationSourceStore_isTheOtherBackend() {
+        // The migration must read the store production is NOT using, or an
+        // upgrading user's key is never found.
+        switch KeychainStore.productionStore {
+        case .legacyFile:      XCTAssertEqual(KeychainStore.migrationSourceStore, .dataProtection)
+        case .dataProtection:  XCTAssertEqual(KeychainStore.migrationSourceStore, .legacyFile)
+        }
+    }
+
+    /// **Regression guard for the v0.1.11 launch kill.**
+    ///
+    /// `keychain-access-groups` is a *restricted* entitlement: AMFI SIGKILLs a
+    /// bundle that declares it without an embedded provisioning profile, before
+    /// `main()` runs. `codesign --verify`, notarization and `spctl` all pass on
+    /// such a bundle, so nothing else catches it.
+    ///
+    /// The entitlement is therefore only legitimate when the data-protection
+    /// store is actually in use. Pinning the biconditional catches both
+    /// half-migrations:
+    /// - entitlement re-added without flipping `productionStore` → dead weight
+    ///   that risks the launch kill for no benefit;
+    /// - `productionStore` flipped to `.dataProtection` without the entitlement
+    ///   → every keychain read fails with `errSecMissingEntitlement`.
+    ///
+    /// (Re-adding the entitlement with no profile at all doesn't reach this
+    /// assertion — the test host itself fails to launch, which is a louder
+    /// signal. `scripts/release.sh` gates the shipped artefact separately.)
+    func test_restrictedEntitlement_presentIffDataProtectionIsProduction() {
+        XCTAssertEqual(
+            Self.hostCarriesAccessGroup(),
+            KeychainStore.productionStore == .dataProtection,
+            "keychain-access-groups must be declared iff productionStore == .dataProtection. "
+            + "Declaring it also requires Contents/embedded.provisionprofile — without one the "
+            + "app is SIGKILLed at launch (v0.1.11). See NoType/NoType.entitlements."
+        )
+    }
+
+    /// The defect itself: v0.1.11 declared the restricted entitlement in a
+    /// bundle with **no** embedded provisioning profile. Every static check we
+    /// ran (`codesign --verify --deep --strict`, notarization, `spctl --assess`)
+    /// passed; the failure only appeared at `exec`, as a SIGKILL.
+    ///
+    /// Scope caveat — this asserts against the *bundle under test*. A Debug
+    /// build signed by Xcode's automatic signing embeds a profile, so this can
+    /// pass locally while the Release artefact (hand-signed by
+    /// `scripts/release.sh`, which does not embed one) would still be dead.
+    /// The authoritative guard for the shipped artefact is the AMFI gate in
+    /// `scripts/release.sh`; this test is the fast local half.
+    func test_restrictedEntitlement_requiresEmbeddedProvisioningProfile() throws {
+        try XCTSkipUnless(
+            Self.hostCarriesAccessGroup(),
+            "host declares no restricted entitlement — nothing to profile-check"
+        )
+        let profile = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/embedded.provisionprofile")
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: profile.path),
+            "This bundle declares the restricted entitlement keychain-access-groups but embeds no "
+            + "provisioning profile at Contents/embedded.provisionprofile. AMFI will SIGKILL it "
+            + "before main() with amfid -413 'No matching profile found' — exactly how v0.1.11 "
+            + "bricked every install."
+        )
+    }
+
+    /// Whether the process hosting these tests declares NoType's keychain
+    /// access group in its code-signing entitlements.
+    private static func hostCarriesAccessGroup() -> Bool {
+        let declaredGroups = SecTaskCreateFromSelf(nil).flatMap {
+            SecTaskCopyValueForEntitlement($0, "keychain-access-groups" as CFString, nil) as? [String]
+        }
+        return declaredGroups?.contains(KeychainStore.accessGroup) ?? false
     }
 }

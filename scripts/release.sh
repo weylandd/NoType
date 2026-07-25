@@ -71,15 +71,20 @@ echo "▶ Archiving (${CONFIG}) unsigned"
 #    provisioning profile and fail with
 #    `"NoType" requires a provisioning profile` — even under Manual signing
 #    with an empty PROVISIONING_PROFILE_SPECIFIER. (Confirmed twice on CI.)
-#  - A NON-sandboxed macOS app on Developer ID needs NO profile for this
-#    entitlement: the access group is prefixed with the literal Team ID
-#    (`49T6U8DQXZ.app.notype`, see NoType.entitlements), which the Developer
-#    ID signature authorizes directly. (iOS would need a real profile.)
-#  - So we sidestep xcodebuild's profile machinery entirely: archive
-#    unsigned (`CODE_SIGNING_ALLOWED=NO`), then `codesign` the bundle
-#    inside-out with the Developer ID identity + `NoType.entitlements`.
-#    This is the standard recipe for Developer ID apps carrying entitlements
-#    that Xcode wants a profile for.
+#  - THAT ERROR WAS CORRECT AND WE WERE WRONG. `keychain-access-groups` is a
+#    RESTRICTED entitlement: AMFI refuses to exec a bundle declaring it unless
+#    the bundle embeds a matching provisioning profile — a team-prefixed access
+#    group is NOT self-authorized by a Developer ID signature. Sidestepping the
+#    profile requirement instead of satisfying it is what shipped the
+#    unlaunchable v0.1.11. The entitlement is gone (see NoType.entitlements) and
+#    the AMFI gate below now proves the remaining set can actually exec.
+#    Never route around a "requires a provisioning profile" error again.
+#  - The unsigned-archive path is KEPT, but for a different reason than it was
+#    introduced: it is what lets us sign Sparkle's nested code inside-out
+#    below. Archive unsigned (`CODE_SIGNING_ALLOWED=NO`), then `codesign` the
+#    bundle inside-out with the Developer ID identity + `NoType.entitlements`.
+#    Revisiting this in favour of a normal signed `-exportArchive` is a
+#    reasonable follow-up now that no entitlement forces our hand.
 xcodebuild -project "${PROJECT}" \
            -scheme "${SCHEME}" \
            -configuration "${CONFIG}" \
@@ -112,7 +117,8 @@ for nested in \
     "${APP_PATH}/Contents/Frameworks/Sparkle.framework"; do
     codesign --force --options runtime --timestamp --sign "${SIGN_IDENTITY}" "${nested}"
 done
-# Main app last: our entitlements (keychain-access-groups + audio-input) and
+# Main app last: our entitlements (audio-input only — keychain-access-groups
+# was removed in 0.1.12, see NoType/NoType.entitlements) and
 # the stable designated requirement (`identifier "app.notype"`) so TCC grants
 # survive across updates (signing/NoType.xcrequirements — same DR the old
 # xcodebuild path embedded via OTHER_CODE_SIGN_FLAGS).
@@ -123,6 +129,68 @@ codesign --force --options runtime --timestamp \
 
 echo "▶ Verifying signature on the signed .app"
 codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
+
+echo "▶ AMFI gate — proving the entitlements can actually exec"
+# WHY THIS EXISTS: v0.1.11 shipped a bundle that passed `codesign --verify
+# --deep --strict`, notarization, stapling AND `spctl --assess` — and could not
+# launch on a single machine. `keychain-access-groups` is a *restricted*
+# entitlement: AMFI SIGKILLs a binary carrying it unless the bundle embeds a
+# matching provisioning profile. None of the checks above validate restricted
+# entitlements, so the breakage was invisible until users ran it:
+#
+#   amfid: not valid: ... Code=-413 "No matching profile found"
+#   AMFI:  Code has restricted entitlements, but the validation of its code
+#          signature failed.
+#   kernel: proc N: load code signature error 4 for file "NoType"
+#
+# The only check that catches this is an actual exec. We can't exec NoType
+# itself here (it installs a CGEventTap, opens the mic and shows a menu-bar
+# item), so we sign a do-nothing binary with the SAME identity, the SAME
+# entitlements file and the SAME embedded-profile state as the real bundle, and
+# confirm the kernel lets it run.
+#
+# See docs/solutions/runtime-errors/amfi-restricted-entitlement-launch-kill-2026-07-25.md
+AMFI_PROBE_DIR="$(mktemp -d)"
+trap 'rm -rf "${AMFI_PROBE_DIR}"' EXIT
+PROBE_APP="${AMFI_PROBE_DIR}/AMFIProbe.app"
+mkdir -p "${PROBE_APP}/Contents/MacOS"
+# Same bundle id as the real app: a provisioning profile only satisfies AMFI
+# for the App ID it was issued for, so the probe must claim the same identity
+# or a correctly-profiled build would fail this gate.
+/usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string app.notype" \
+                        -c "Add :CFBundleExecutable string probe" \
+                        -c "Add :CFBundlePackageType string APPL" \
+                        "${PROBE_APP}/Contents/Info.plist" >/dev/null
+printf 'int main(void){return 0;}\n' > "${AMFI_PROBE_DIR}/probe.c"
+xcrun clang -o "${PROBE_APP}/Contents/MacOS/probe" "${AMFI_PROBE_DIR}/probe.c"
+# Mirror the real bundle's profile state. Once a Developer ID profile is
+# embedded (restoring the data-protection keychain — see
+# docs/solutions/documentation-gaps/developer-id-provisioning-profile-2026-07-25.md)
+# the probe picks it up automatically and this gate keeps passing.
+if [[ -f "${APP_PATH}/Contents/embedded.provisionprofile" ]]; then
+    cp "${APP_PATH}/Contents/embedded.provisionprofile" "${PROBE_APP}/Contents/"
+fi
+codesign --force --options runtime --timestamp=none \
+         --entitlements "NoType/NoType.entitlements" \
+         --sign "${SIGN_IDENTITY}" "${PROBE_APP}"
+if "${PROBE_APP}/Contents/MacOS/probe"; then
+    echo "  ✓ entitlements exec cleanly under AMFI"
+else
+    probe_rc=$?
+    echo >&2
+    echo "✗ AMFI REJECTED the entitlements — this build would NOT launch." >&2
+    echo "  A probe signed with NoType.entitlements exited ${probe_rc} (137 = SIGKILL)." >&2
+    echo >&2
+    echo "  Cause: NoType/NoType.entitlements declares a RESTRICTED entitlement" >&2
+    echo "  with no matching provisioning profile embedded in the bundle." >&2
+    echo "  Diagnose with:" >&2
+    echo "    log show --last 2m --predicate 'process == \"amfid\"' --style compact" >&2
+    echo >&2
+    echo "  Fix: either drop the restricted entitlement, or embed a Developer ID" >&2
+    echo "  provisioning profile at Contents/embedded.provisionprofile before" >&2
+    echo "  signing. Aborting before notarization." >&2
+    exit 1
+fi
 
 echo "▶ Submitting .app to Apple notary service (1–5 min)"
 ditto -c -k --sequesterRsrc --keepParent "${APP_PATH}" "${ZIP_PATH}"

@@ -17,6 +17,7 @@ See `docs/solutions/README.md` for the frontmatter contract and body structure.
 - [Token usage deltas + cache-hits indicator](solutions/documentation-gaps/token-usage-deltas-and-cache-hits-2026-05-18.md) — **M**; Settings → API & Usage panel ships v1 without per-period deltas or cache-hit %.
 - [Mid-session device-swap rebuild could orphan an IOProc in a narrow race](solutions/documentation-gaps/device-swap-rebuild-orphan-2026-07-10.md) — **S**; existing `stopped`-latch + queue drain cover the known windows; add a rebuild-generation token only if a repro appears.
 - [ContextSnapshot.minimal drops instruction/dictionary parts on a fast utterance](solutions/documentation-gaps/context-minimal-part-count-2026-07-10.md) — **S**; the non-lite quick-release fallback ships without per-app instructions/dictionary; thread them in if it ever matters.
+- [Embed a Developer ID provisioning profile to restore the data-protection keychain](solutions/documentation-gaps/developer-id-provisioning-profile-2026-07-25.md) — **M**; needs Apple Developer portal access. Until then the Gemini key sits in the legacy file keychain and the cert-rotation re-entry bug is back.
 
 ## Closing an entry
 

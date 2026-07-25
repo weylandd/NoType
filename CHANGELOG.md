@@ -12,6 +12,44 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
 
 ---
 
+## [0.1.12] — 2026-07-25
+
+### Fixed
+- **NoType launches again.** v0.1.11 could not start at all: it quit
+  instantly on every Mac, with no crash report. macOS was refusing to run
+  it — the build declared a restricted capability (a keychain access
+  group) without the Apple-issued profile that authorises it, so the
+  system killed the process before any of our code ran. The capability is
+  removed and the app starts normally. **If you are on 0.1.11 you must
+  install this update by hand** — a build that cannot launch cannot check
+  for updates. Download the DMG from the
+  [releases page](https://github.com/weylandd/NoType/releases/latest) and
+  drag it over the old copy; your API key, history and settings are kept.
+
+### Changed
+- **Your Gemini API key moves back to the standard macOS keychain.** This
+  reverts the storage change from 0.1.11 (#70), which is what pulled in
+  the capability that broke launching. Existing keys are picked up
+  automatically — you should not have to re-enter anything. The downside
+  the 0.1.11 change had fixed comes back: if this Mac's code-signing
+  identity ever rotates, macOS may ask for your login password or lose
+  the key, in which case NoType shows a calm one-time "re-enter your key"
+  note. Restoring the better storage needs an Apple Developer portal
+  change and is tracked for a later release.
+
+### Internal
+- `scripts/release.sh` now refuses to ship a build whose entitlements
+  cannot actually execute. `codesign --verify`, notarization, stapling
+  and `spctl --assess` all passed on the broken 0.1.11 bundle — only an
+  exec catches a restricted-entitlement mismatch, so the release script
+  signs a throwaway probe with the same identity, entitlements and
+  embedded-profile state and aborts before notarization if the kernel
+  rejects it.
+- v0.1.11 was pulled from `docs/appcast.xml` so installs still on 0.1.10
+  are never offered the broken build.
+
+---
+
 ## [0.1.11] — 2026-07-11
 
 ### Added
