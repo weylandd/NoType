@@ -21,8 +21,13 @@ final class PermissionsViewModel {
 
     /// Guards `prime()` against a second run. Mirrors `UpdateController`'s
     /// `didStart` latch — re-priming would register a second pair of
-    /// notification observers and leak a redundant polling task.
-    @ObservationIgnored private var didPrime = false
+    /// notification observers (which are never de-registered).
+    ///
+    /// `private(set)` rather than `private` so `LaunchPrimingTests` can pin
+    /// the latch: the statuses alone cannot detect its removal, because
+    /// `refresh()` is value-idempotent and a second run returns the same
+    /// three values whether or not the guard fired.
+    @ObservationIgnored private(set) var didPrime = false
 
     var allGranted: Bool {
         microphone.isGranted && accessibility.isGranted
@@ -51,6 +56,7 @@ final class PermissionsViewModel {
     func prime() {
         guard !didPrime else { return }
         didPrime = true
+        Self.log.info("launch: priming permissions")
         refresh()
         observeAppActivation()
     }

@@ -27,29 +27,61 @@ final class NoTypeAppDelegate: NSObject, NSApplicationDelegate {
 
     /// Runs from `applicationDidFinishLaunching(_:)` — the first moment
     /// `NSApplicationMain` has actually started the application. Every
-    /// piece of launch work that schedules `MainActor` work or touches
-    /// `NSApp` hangs off this, because doing any of it from
-    /// `NoTypeApp.init()` is a latent ordering bug and the leading
-    /// suspect for the macOS 26.2 executor-identity crash. Assigned in
+    /// piece of launch work that *schedules* `MainActor` work hangs off
+    /// this, because doing any of it from `NoTypeApp.init()` is a latent
+    /// ordering bug and the leading suspect for the macOS 26.2
+    /// executor-identity crash. (The one thing that rides the earlier
+    /// `willFinishLaunchingHandler` instead is the appearance write,
+    /// which schedules nothing — see that property.) Assigned in
     /// `NoTypeApp.init()` (assigning a closure schedules nothing) so the
     /// handler is guaranteed to be in place before AppKit calls back.
     ///
     /// Deliberately NOT a SwiftUI `.task` on the main `Window`: NoType is
     /// `LSUIElement` and, once onboarding is complete, that window is not
     /// presented at launch — a returning user would never fire it.
+    ///
+    /// This is a single point of failure for the whole app: if it is
+    /// never assigned or never fires, NoType runs with no hotkey tap, no
+    /// permission reads and every mirror empty, which looks exactly like
+    /// a genuinely ungranted install. `AppState.prime()` logs on entry so
+    /// that state is diagnosable, and
+    /// `LaunchOrderingTests.test_launchWork_isActuallyWiredUp_fromNoTypeAppInit`
+    /// pins the assignment.
     var launchHandler: (@MainActor () -> Void)?
+
+    /// Runs from `applicationWillFinishLaunching(_:)` — the earliest hook
+    /// that is still after `NSApplicationMain` has started the app, and
+    /// crucially *before* SwiftUI evaluates the first `View.body`. Only
+    /// the appearance write hangs off this: `AppearanceController.init`
+    /// used to apply the theme precisely so "the very first frame already
+    /// has the correct appearance", and `applicationDidFinishLaunching`
+    /// is one hook too late to preserve that. Priming stays on the later
+    /// hook — it is the work that must not run early.
+    ///
+    /// `AppearanceController.apply()` is idempotent, so `launchHandler`
+    /// re-applies it as a belt-and-braces: if a future SwiftUI release
+    /// stops forwarding `willFinishLaunching` through
+    /// `@NSApplicationDelegateAdaptor`, the theme still lands, one frame
+    /// later, instead of never.
+    var willFinishLaunchingHandler: (@MainActor () -> Void)?
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
 
-    /// Note the absence of `MainActor.assumeIsolated` here, unlike
-    /// `applicationWillTerminate(_:)` below. `assumeIsolated` calls into
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        willFinishLaunchingHandler?()
+    }
+
+    /// Note the absence of `MainActor.assumeIsolated` in both launch hooks
+    /// and in `applicationWillTerminate(_:)`. `assumeIsolated` calls into
     /// the `swift_task_isCurrentExecutor` family — precisely the check
-    /// that faults in this crash family — so the launch path, which this
-    /// change exists to keep clean, must not add one. AppKit calls this
-    /// on the main thread and `NSApplicationDelegate` is `@MainActor`, so
-    /// the isolation is already static and no runtime check is needed.
+    /// that faults in this crash family, and the reason the project
+    /// rejects it as a bridge (`NoType/UI/CLAUDE.md` hard rules). It is
+    /// also pure ceremony here: `NSApplicationDelegate` conformance makes
+    /// this class `@MainActor`, so calling a `@MainActor` closure needs no
+    /// runtime check — the direct calls below typecheck under
+    /// `SWIFT_STRICT_CONCURRENCY: complete`, which is the proof.
     func applicationDidFinishLaunching(_ notification: Notification) {
         launchHandler?()
     }
@@ -58,7 +90,7 @@ final class NoTypeAppDelegate: NSObject, NSApplicationDelegate {
         // AppKit guarantees this fires on the main thread before the
         // process dies, so the synchronous `releaseMusicInterruption()`
         // call gets to roll back the CoreAudio mute write before exit.
-        MainActor.assumeIsolated { terminationHandler?() }
+        terminationHandler?()
     }
 }
 
@@ -117,7 +149,13 @@ struct NoTypeApp: App {
         //
         // Appearance is applied BEFORE priming so the theme is on `NSApp`
         // ahead of any UI the priming work can surface (the launch
-        // permission HUD).
+        // permission HUD) — and on the earlier `willFinishLaunching` hook
+        // so it also lands ahead of the first `View.body`. Re-applied from
+        // `launchHandler` as an idempotent fallback; see
+        // `willFinishLaunchingHandler`'s doc-comment.
+        appDelegate.willFinishLaunchingHandler = {
+            appearance.apply()
+        }
         appDelegate.launchHandler = {
             appearance.apply()
             state.prime()

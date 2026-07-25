@@ -366,6 +366,15 @@ final class AppState {
         guard !didPrime else { return }
         didPrime = true
 
+        // The one breadcrumb that distinguishes "priming never ran" from
+        // every other failure. If `launchHandler` is nil, is overwritten,
+        // or the delegate callback never fires, the user sees a running
+        // menu-bar app whose hotkey does nothing, empty history, and
+        // permanently `.unknown` permissions — which is indistinguishable
+        // from a genuinely ungranted install. This line is what a field
+        // `log stream --predicate 'subsystem == "app.notype"'` looks for.
+        Self.log.info("launch: priming AppState")
+
         // Order is load-bearing, which is why `AppState` drives it rather
         // than the launch hook doing it in two calls that could be
         // reordered:
@@ -472,8 +481,11 @@ final class AppState {
     }
 
     /// Synchronous accessibility-state application — install or uninstall
-    /// the hotkey to match the current permission. Called once at init
-    /// and once after every change observed by `observePermissions()`.
+    /// the hotkey to match the current permission. Called once from
+    /// `prime()` — immediately after `permissions.prime()`, whose live TCC
+    /// read it depends on — and once after every change observed by
+    /// `observePermissions()`. It is NOT called from `init`: the statuses
+    /// are all `.unknown` there, so it would uninstall rather than install.
     private func applyAccessibilityState() {
         if permissions.accessibility.isGranted {
             installHotkeyIfPossible()
@@ -690,6 +702,14 @@ final class AppState {
         if monitor.start() {
             hotkeyMonitor = monitor
             Self.log.info("hotkey installed (record=\(self.hotkeyBinding.code, privacy: .public) cancel=\(self.cancelHotkeyBinding.code, privacy: .public))")
+        } else {
+            // No retry: `observePermissions()` only re-applies on a *change*
+            // of `permissions.accessibility`, so a granted-and-stays-granted
+            // state never comes back here. A failed tap is therefore silent
+            // and permanent for the process lifetime — log it so the
+            // "Accessibility says granted but the hotkey does nothing"
+            // report is diagnosable.
+            Self.log.error("hotkey install failed — CGEventTap not created; push-to-talk is inert until relaunch")
         }
     }
 

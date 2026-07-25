@@ -20,10 +20,11 @@ import XCTest
 ///
 /// Scope: the launch path only — every type reachable by construction from
 /// `NoTypeApp.init()`. The rule is NOT about `Task` usage in general.
-/// Depth: each type's initializer **plus every same-file method that
-/// initializer calls**. One call level is enough to cover the
-/// `init` -> `refresh()` -> `startPollingIfNeeded()` shape that was the
-/// known offender.
+/// Depth: each type's initializer, its stored-property default expressions,
+/// **plus every same-file method reachable from the initializer,
+/// transitively**. One call level is NOT enough: the known offender's
+/// `Task` literal (`init` -> `refresh()` -> `startPollingIfNeeded()`) sits
+/// **two** hops down, so a single-level scan would walk straight past it.
 final class LaunchOrderingTests: XCTestCase {
 
     // MARK: - The repo-wide assertion
@@ -92,6 +93,38 @@ final class LaunchOrderingTests: XCTestCase {
         XCTAssertFalse(
             types.keys.contains("SileroVAD"),
             "SileroVAD is constructed by prime(), not by an initializer; discovery over-reached."
+        )
+    }
+
+    // MARK: - The launch wire must exist
+
+    /// The complement to every other test in this file. The scan proves the
+    /// launch work is ABSENT from initializers; nothing proved it is PRESENT
+    /// at the launch hook. Delete `appDelegate.launchHandler = { … }` from
+    /// `NoTypeApp.init()` and the app ships with no hotkey tap, no permission
+    /// reads, no history/stats/dictionary mirrors and no VAD — while every
+    /// assertion in this file and in `LaunchPrimingTests` stays green,
+    /// because "nothing is primed" is exactly the state they assert.
+    func test_launchWork_isActuallyWiredUp_fromNoTypeAppInit() throws {
+        let url = Self.repoRoot()
+            .appendingPathComponent("NoType")
+            .appendingPathComponent("NoTypeApp.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        let initBodies = LaunchPathScanner.initBodies(inSource: source)
+
+        let combined = initBodies.joined(separator: "\n")
+        XCTAssertFalse(initBodies.isEmpty, "Could not parse NoTypeApp.init() — the scan lost its anchor.")
+        XCTAssertTrue(
+            combined.contains("launchHandler ="),
+            "NoTypeApp.init() must assign appDelegate.launchHandler — without it nothing ever primes."
+        )
+        XCTAssertTrue(
+            combined.contains("prime()"),
+            "The launch handler must reach prime(); otherwise AppState is never initialized."
+        )
+        XCTAssertTrue(
+            combined.contains("apply()"),
+            "The launch handler must reach AppearanceController.apply(); otherwise the theme is never applied."
         )
     }
 
@@ -224,6 +257,99 @@ final class LaunchOrderingTests: XCTestCase {
         )
     }
 
+    /// Stored-property defaults run during construction but live in no
+    /// function body — the shape the scanner was originally blind to.
+    func test_scanner_flagsTaskLiteralInStoredPropertyDefault() {
+        let source = """
+        @MainActor final class Fixture {
+            private let boot = Task { @MainActor in await load() }
+            init() {}
+        }
+        """
+        let hits = LaunchPathScanner.violations(inSource: source)
+        XCTAssertEqual(hits.count, 1, "A Task in a property default must be flagged. Got: \\(hits)")
+        XCTAssertEqual(hits.first?.scope, "property")
+    }
+
+    /// A property *observer* is not construction-time code — it cannot fire
+    /// during `init` — so it must not be flagged.
+    func test_scanner_ignoresTaskInsidePropertyObserver() {
+        let source = """
+        @MainActor final class Fixture {
+            var mode: String = "a" {
+                didSet { Task { @MainActor in await save() } }
+            }
+            init() {}
+        }
+        """
+        XCTAssertEqual(LaunchPathScanner.violations(inSource: source), [])
+    }
+
+    /// The rule is "schedule no MainActor work", not "write no `Task {`".
+    /// Each of these is an equally-violating spelling that the original
+    /// four-needle list walked straight past.
+    func test_scanner_flagsEveryMainActorSchedulingSpelling() {
+        let spellings = [
+            "Task{ @MainActor in await load() }",
+            "Task(priority: .high) { @MainActor in await load() }",
+            "DispatchQueue.main.async { load() }",
+            "MainActor.assumeIsolated { load() }",
+            "RunLoop.main.perform { load() }",
+        ]
+        for spelling in spellings {
+            let source = """
+            @MainActor final class Fixture {
+                init() {
+                    \(spelling)
+                }
+            }
+            """
+            XCTAssertFalse(
+                LaunchPathScanner.violations(inSource: source).isEmpty,
+                "Expected `\(spelling)` to be flagged as launch-path MainActor scheduling."
+            )
+        }
+    }
+
+    /// `NSApp` must match the application global, not every identifier that
+    /// merely starts with it — otherwise a legitimate `NSAppearance` read
+    /// fails the scan for the wrong reason and the rule gets relaxed.
+    func test_scanner_nsAppNeedleRespectsIdentifierBoundaries() {
+        let source = """
+        @MainActor final class Fixture {
+            init() {
+                let a = NSAppearance(named: .darkAqua)
+                _ = a
+            }
+        }
+        """
+        XCTAssertEqual(
+            LaunchPathScanner.violations(inSource: source), [],
+            "NSAppearance is not NSApp."
+        )
+    }
+
+    /// Overloads share a name; keying the visited set on the name alone
+    /// scanned only the first one and walked past a `Task` in the second.
+    func test_scanner_doesNotCollapseOverloads() {
+        let source = """
+        @MainActor final class Fixture {
+            init() {
+                start(deferred: true)
+            }
+
+            func start() {}
+
+            func start(deferred: Bool) {
+                Task { @MainActor in await load() }
+            }
+        }
+        """
+        let hits = LaunchPathScanner.violations(inSource: source)
+        XCTAssertEqual(hits.count, 1, "The dirty overload must still be scanned. Got: \\(hits)")
+        XCTAssertEqual(hits.first?.scope, "start")
+    }
+
     func test_scanner_ignoresNeedlesInsideStringLiterals() {
         let source = """
         @MainActor final class Fixture {
@@ -265,11 +391,68 @@ enum LaunchPathScanner {
         var description: String { "\(scope): \(needle) in `\(line)`" }
     }
 
-    /// Needles that mean "this schedules MainActor work or touches the
-    /// application object". `Task.detached` is included because it schedules
-    /// concurrent work just as `Task {` does; `NSApplication.shared` is the
-    /// non-`NSApp` spelling of the same global.
-    private static let needles = ["Task {", "Task.detached", "NSApp", "NSApplication.shared"]
+    /// Needles that mean "this schedules `MainActor` work or touches the
+    /// application object".
+    ///
+    /// The rule is "schedule no `MainActor` work", not "write no `Task {`",
+    /// so the list has to cover every idiom that reaches the main actor —
+    /// otherwise a maintainer told "don't do this synchronously in `init`"
+    /// reaches for `DispatchQueue.main.async` and the guard stays green
+    /// while the ordering bug is back. `MainActor.assumeIsolated` is here
+    /// because it calls the same `swift_task_isCurrentExecutor` family that
+    /// faults in this crash family (see `NoType/UI/CLAUDE.md` hard rules,
+    /// where it is rejected outright as a bridge).
+    ///
+    /// Matching is whitespace-normalised (`Task{`, `Task  {` and
+    /// `Task(priority:)` all match `Task {`) and identifier-boundary-aware,
+    /// so `NSApp` does not match `NSAppearance` / `NSApplicationDelegate`.
+    private static let needles = [
+        "Task {", "Task (", "Task.detached", "Task.init",
+        "DispatchQueue.main", "OperationQueue.main", "RunLoop.main",
+        "MainActor.run", "MainActor.assumeIsolated",
+        "NSApp", "NSApplication.shared",
+    ]
+
+    /// Substring match with two adjustments the raw `contains` lacks:
+    /// runs of whitespace in the needle match any run of whitespace (so
+    /// `Task {` catches `Task{`), and a needle ending in an identifier
+    /// character must not be followed by one (so `NSApp` does not match
+    /// `NSAppearance`).
+    static func line(_ line: String, contains needle: String) -> Bool {
+        let hay = Array(line)
+        let pat = Array(needle)
+        guard !pat.isEmpty else { return false }
+        let lastIsIdent = pat[pat.count - 1].isLetter || pat[pat.count - 1].isNumber || pat[pat.count - 1] == "_"
+
+        var start = 0
+        while start <= hay.count - 1 {
+            var h = start
+            var p = 0
+            while p < pat.count, h <= hay.count {
+                if pat[p] == " " {
+                    // One space in the needle matches zero-or-more whitespace.
+                    while h < hay.count, hay[h].isWhitespace { h += 1 }
+                    p += 1
+                } else if h < hay.count, hay[h] == pat[p] {
+                    h += 1
+                    p += 1
+                } else {
+                    break
+                }
+            }
+            if p == pat.count {
+                // Reject a match that is only a prefix of a longer identifier.
+                if lastIsIdent, h < hay.count,
+                   hay[h].isLetter || hay[h].isNumber || hay[h] == "_" {
+                    start += 1
+                    continue
+                }
+                return true
+            }
+            start += 1
+        }
+        return false
+    }
 
     // MARK: Discovery
 
@@ -317,13 +500,28 @@ enum LaunchPathScanner {
             throw ScanError.enumerationFailed(repoRoot.path)
         }
 
+        // App sources only — never index the test target, otherwise this
+        // file's own fixtures become scan targets. This MUST be anchored to
+        // the app-source directory, not a `path.contains("/NoType/")`
+        // substring: the repo root is itself named `NoType`, so the
+        // substring form matches every path in the checkout (including
+        // `NoTypeTests/`) and silently indexes the very files it claims to
+        // exclude — and whether it does depends on what the clone
+        // directory was named, which makes CI and local disagree.
+        let appRoot = repoRoot.appendingPathComponent("NoType").standardizedFileURL.path + "/"
+
         var index: [String: URL] = [:]
         for case let url as URL in enumerator {
             guard url.pathExtension == "swift" else { continue }
-            // App sources only — never index the test target, otherwise this
-            // file's own fixtures become scan targets.
-            guard url.path.contains("/NoType/") else { continue }
-            index[url.deletingPathExtension().lastPathComponent] = url
+            guard url.standardizedFileURL.path.hasPrefix(appRoot) else { continue }
+            let typeName = url.deletingPathExtension().lastPathComponent
+            // Last-write-wins over an unordered enumeration would let a
+            // future duplicate basename silently redirect the scan at the
+            // wrong file. Fail loudly instead.
+            if let existing = index[typeName] {
+                throw ScanError.duplicateBasename(typeName, existing.path, url.path)
+            }
+            index[typeName] = url
         }
         return index
     }
@@ -354,40 +552,55 @@ enum LaunchPathScanner {
     // MARK: Violation scan
 
     /// Scans one type's source for launch-path violations: every initializer
-    /// body, plus the body of every same-file method reachable from it.
+    /// body, every same-file method reachable from it, and every
+    /// stored-property default expression.
     ///
     /// The traversal is transitive, not one-deep. The historical offender was
     /// `init()` -> `refresh()` -> `startPollingIfNeeded()`, where the `Task`
     /// literal sits **two** hops from the initializer — a single-level scan
     /// would have walked straight past it. Same-file scoping keeps the
     /// traversal bounded without needing a real call graph.
+    ///
+    /// Stored-property defaults are scanned because they execute as part of
+    /// construction even though they appear in no function body — `private
+    /// let boot = Task { … }` is squarely on the launch path, and this
+    /// codebase already uses property-default initialisers heavily
+    /// (`AppState.hotkeyBinding = .load()`).
     static func violations(inSource source: String) -> [Hit] {
         let code = strippingCommentsAndStrings(source)
         let functions = functionBodies(in: code)
 
         var scopes: [(name: String, body: String)] = []
-        var visited: Set<String> = []
-        var queue: [(name: String, body: String)] = []
+        var visited: Set<Int> = []
+        var queue: [Int] = []
 
-        for fn in functions where fn.name == "init" {
-            queue.append((name: "init", body: fn.body))
+        for (i, fn) in functions.enumerated() where fn.name == "init" {
+            visited.insert(i)
+            queue.append(i)
         }
 
         while let current = queue.popLast() {
-            scopes.append(current)
-            for candidate in functions
+            let scope = functions[current]
+            scopes.append((name: scope.name, body: scope.body))
+            // Index rather than name: overloads share a name, and keying the
+            // visited set on the name alone would scan only the first one —
+            // a `Task {` hidden in a second overload reachable from `init`
+            // would be walked past.
+            for (i, candidate) in functions.enumerated()
             where candidate.name != "init"
-                && !visited.contains(candidate.name)
-                && current.body.contains(candidate.name + "(") {
-                visited.insert(candidate.name)
-                queue.append((name: candidate.name, body: candidate.body))
+                && !visited.contains(i)
+                && scope.body.contains(candidate.name + "(") {
+                visited.insert(i)
+                queue.append(i)
             }
         }
+
+        scopes.append((name: "property", body: storedPropertyDeclarations(in: code, functions: functions)))
 
         var hits: [Hit] = []
         for scope in scopes {
             for line in scope.body.split(separator: "\n", omittingEmptySubsequences: false) {
-                for needle in needles where line.contains(needle) {
+                for needle in needles where Self.line(String(line), contains: needle) {
                     hits.append(
                         Hit(
                             scope: scope.name,
@@ -401,11 +614,75 @@ enum LaunchPathScanner {
         return hits
     }
 
+    /// The stored-property declarations of a file: every line outside any
+    /// function body that declares a `let`/`var` with an `=` initialiser.
+    ///
+    /// Function bodies are blanked first so a `let t = Task { … }` inside an
+    /// unreachable method is not mistaken for a property default. Property
+    /// *observers* (`didSet` / `willSet`) survive the blanking but are
+    /// excluded by the `=` requirement — they do not fire during `init`, so
+    /// flagging them would be a false positive.
+    private static func storedPropertyDeclarations(
+        in code: String,
+        functions: [Function]
+    ) -> String {
+        var chars = Array(code)
+        for fn in functions {
+            for i in fn.range where i < chars.count && !chars[i].isNewline {
+                chars[i] = " "
+            }
+        }
+        return String(chars)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { isStoredPropertyDeclaration(String($0)) }
+            .joined(separator: "\n")
+    }
+
+    /// True for a line that *declares* a property with an initialiser.
+    ///
+    /// The first meaningful token — after attributes (`@ObservationIgnored`)
+    /// and modifiers (`private`, `private(set)`, `static`, `lazy`, …) — must
+    /// be `let` or `var`. A looser "contains `let ` and `=`" test also
+    /// matches `if let window = NSApp.windows.first(…)` inside a computed
+    /// property, which `functionBodies` does not blank because a getter is
+    /// not a `func` body. That is a false positive: it is not
+    /// construction-time code.
+    private static func isStoredPropertyDeclaration(_ line: String) -> Bool {
+        guard line.contains("=") else { return false }
+
+        let modifiers: Set<String> = [
+            "private", "fileprivate", "internal", "public", "open", "package",
+            "static", "class", "final", "lazy", "weak", "unowned",
+            "nonisolated", "override", "dynamic",
+        ]
+
+        for token in line.split(whereSeparator: \.isWhitespace) {
+            if token.hasPrefix("@") { continue }
+            // `private(set)`, `nonisolated(unsafe)`, `unowned(unsafe)`.
+            let head = token.prefix(while: { $0 != "(" })
+            if modifiers.contains(String(head)) { continue }
+            return token == "let" || token == "var"
+        }
+        return false
+    }
+
+    /// Every `init` body in a file, comment- and string-stripped. Exposed so
+    /// `test_launchWork_isActuallyWiredUp_fromNoTypeAppInit` can assert on
+    /// what `NoTypeApp.init()` *does*, not only on what it must not do.
+    static func initBodies(inSource source: String) -> [String] {
+        let code = strippingCommentsAndStrings(source)
+        return functionBodies(in: code).filter { $0.name == "init" }.map(\.body)
+    }
+
     // MARK: Parsing primitives
 
     private struct Function {
         let name: String
         let body: String
+        /// Character range of the body (excluding braces) in the stripped
+        /// source. Used to subtract function bodies when isolating the
+        /// stored-property declarations that run during construction.
+        let range: Range<Int>
     }
 
     /// All `func <name>(…) { … }` and `init(…) { … }` bodies, via brace
@@ -473,7 +750,13 @@ enum LaunchPathScanner {
                     m += 1
                 }
                 guard let close = end, close > open else { continue }
-                result.append(Function(name: name, body: String(chars[(open + 1)..<close])))
+                result.append(
+                    Function(
+                        name: name,
+                        body: String(chars[(open + 1)..<close]),
+                        range: (open + 1)..<close
+                    )
+                )
             }
         }
         return result
@@ -535,6 +818,7 @@ enum LaunchPathScanner {
     enum ScanError: Error, CustomStringConvertible {
         case missingRoot
         case enumerationFailed(String)
+        case duplicateBasename(String, String, String)
 
         var description: String {
             switch self {
@@ -542,6 +826,12 @@ enum LaunchPathScanner {
                 "Could not find NoTypeApp.swift — launch-path discovery has no root."
             case .enumerationFailed(let path):
                 "Could not enumerate repo root at \(path)"
+            case .duplicateBasename(let name, let a, let b):
+                """
+                Two app sources are named \(name).swift, so launch-path discovery \
+                cannot tell which one declares the type: \(a) and \(b). Rename one \
+                — the scan resolves a constructed type to its source purely by filename.
+                """
             }
         }
     }

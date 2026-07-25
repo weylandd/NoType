@@ -20,6 +20,56 @@ import XCTest
 @MainActor
 final class LaunchPrimingTests: XCTestCase {
 
+    // MARK: - The delegate hook (U1/U2 delivery mechanism)
+
+    /// Every piece of launch work now hangs off this one callback. Nothing
+    /// else in the suite exercises it, so a rename, a stray `guard`, or a
+    /// dropped assignment would silently disable the whole app while the
+    /// tests stayed green.
+    func test_applicationDidFinishLaunching_invokesLaunchHandler() {
+        let delegate = NoTypeAppDelegate()
+        var fired = 0
+        delegate.launchHandler = { fired += 1 }
+
+        delegate.applicationDidFinishLaunching(
+            Notification(name: NSApplication.didFinishLaunchingNotification)
+        )
+
+        XCTAssertEqual(fired, 1, "applicationDidFinishLaunching must invoke launchHandler")
+    }
+
+    /// The appearance write rides the earlier hook so it lands before the
+    /// first `View.body` — `didFinishLaunching` is one hook too late for the
+    /// "very first frame already has the correct appearance" guarantee.
+    func test_applicationWillFinishLaunching_invokesWillFinishHandler() {
+        let delegate = NoTypeAppDelegate()
+        var fired = 0
+        delegate.willFinishLaunchingHandler = { fired += 1 }
+
+        delegate.applicationWillFinishLaunching(
+            Notification(name: NSApplication.willFinishLaunchingNotification)
+        )
+
+        XCTAssertEqual(fired, 1, "applicationWillFinishLaunching must invoke willFinishLaunchingHandler")
+    }
+
+    /// Both hooks are optional-chained; an unassigned handler must be a
+    /// no-op rather than a crash (the xctest host reaches them with no
+    /// handler installed).
+    func test_launchHooks_areNoOpsWithoutHandlers() {
+        let delegate = NoTypeAppDelegate()
+
+        delegate.applicationWillFinishLaunching(
+            Notification(name: NSApplication.willFinishLaunchingNotification)
+        )
+        delegate.applicationDidFinishLaunching(
+            Notification(name: NSApplication.didFinishLaunchingNotification)
+        )
+        delegate.applicationWillTerminate(
+            Notification(name: NSApplication.willTerminateNotification)
+        )
+    }
+
     // MARK: - PermissionsViewModel (U1)
 
     /// The regression guard for the change: `PermissionsViewModel` is the
@@ -39,6 +89,9 @@ final class LaunchPrimingTests: XCTestCase {
     /// After priming, the statuses are real. `.unknown` is only ever the
     /// pre-prime placeholder — every TCC API returns one of the other three.
     func test_permissionsViewModel_prime_resolvesEveryStatus() {
+        let restore = Self.stashPermissionFlags()
+        defer { restore() }
+
         let vm = PermissionsViewModel()
         vm.prime()
 
@@ -48,17 +101,28 @@ final class LaunchPrimingTests: XCTestCase {
     }
 
     /// Idempotence: a second `prime()` must not register a second pair of
-    /// notification observers or a redundant polling task. Observed through
-    /// the latch's visible effect — the statuses stay coherent and the call
-    /// is a no-op rather than a re-entry.
+    /// notification observers (they are never de-registered).
+    ///
+    /// Asserting only on the statuses would be vacuous — `refresh()` is
+    /// value-idempotent, so three identical reads pass whether or not the
+    /// latch fired. The latch itself is therefore the assertion: reading
+    /// `didPrime` also means deleting the guard breaks compilation here
+    /// rather than silently reopening double-registration.
     func test_permissionsViewModel_prime_isIdempotent() {
+        let restore = Self.stashPermissionFlags()
+        defer { restore() }
+
         let vm = PermissionsViewModel()
+        XCTAssertFalse(vm.didPrime, "the latch must start open")
+
         vm.prime()
+        XCTAssertTrue(vm.didPrime, "prime() must latch")
         let afterFirst = (vm.microphone, vm.accessibility, vm.screenRecording)
 
         vm.prime()
         vm.prime()
 
+        XCTAssertTrue(vm.didPrime)
         XCTAssertEqual(vm.microphone, afterFirst.0)
         XCTAssertEqual(vm.accessibility, afterFirst.1)
         XCTAssertEqual(vm.screenRecording, afterFirst.2)
@@ -176,13 +240,29 @@ final class LaunchPrimingTests: XCTestCase {
     /// `AppearanceController` reads `UserDefaults.standard` directly, so
     /// tests must put the real key back afterwards.
     private static func stashAppearanceDefault() -> () -> Void {
-        let key = AppearanceController.userDefaultsKey
-        let saved = UserDefaults.standard.string(forKey: key)
+        stash([AppearanceController.userDefaultsKey])
+    }
+
+    /// `prime()` -> `refresh()` -> `AccessibilityPermission.current()` runs
+    /// `migrateHasAskedIfNeeded`, which WRITES `hasAsked = true` into the
+    /// real `UserDefaults.standard` whenever onboarding is already complete
+    /// and Accessibility is not granted — the exact state that flips the
+    /// developer's onboarding card from neutral "REQUIRED" to red "DENIED".
+    /// `AccessibilityPermissionTests` uses a UUID suite for the same reason;
+    /// `PermissionsViewModel` has no defaults seam, so stash and restore.
+    private static func stashPermissionFlags() -> () -> Void {
+        stash([AccessibilityPermission.hasAskedKey, ScreenRecordingPermission.hasAskedKey])
+    }
+
+    private static func stash(_ keys: [String]) -> () -> Void {
+        let saved = keys.map { ($0, UserDefaults.standard.object(forKey: $0)) }
         return {
-            if let saved {
-                UserDefaults.standard.set(saved, forKey: key)
-            } else {
-                UserDefaults.standard.removeObject(forKey: key)
+            for (key, value) in saved {
+                if let value {
+                    UserDefaults.standard.set(value, forKey: key)
+                } else {
+                    UserDefaults.standard.removeObject(forKey: key)
+                }
             }
         }
     }
