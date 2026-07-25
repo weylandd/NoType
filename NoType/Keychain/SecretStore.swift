@@ -9,22 +9,28 @@ import OSLog
 /// know whether storage is the data-protection keychain, the legacy
 /// keychain, or a file.
 ///
-/// **Storage + one-shot migration.** New writes go to the **data-protection
-/// keychain** (`KeychainStore` default), whose access is gated by the
-/// `keychain-access-groups` entitlement rather than the rotating
-/// code-signing leaf cert — so the key survives re-signing and never prompts
-/// for the login password (see `KeychainStore` doc-comment +
-/// `docs/solutions/documentation-gaps/keychain-data-protection-migration-2026-05-30.md`).
-/// Earlier builds stored the key in the **legacy file-keychain** or, before
-/// that, in a 0600 `~/Library/Application Support/NoType/settings.json`
-/// (`{ "geminiKey": "..." }`). `migrateAndResolve()` resolves in order:
+/// **Storage + one-shot migration.** New writes go to
+/// `KeychainStore.productionStore` (currently the **legacy file-keychain** —
+/// the data-protection store needs a restricted entitlement the app cannot
+/// currently carry; see that property's doc-comment). Keys written under a
+/// *previous* production store, or by builds predating the Keychain entirely
+/// (a 0600 `~/Library/Application Support/NoType/settings.json` holding
+/// `{ "geminiKey": "..." }`), are migrated forward on first read.
+/// `migrateAndResolve()` resolves in order:
 ///
-/// 1. Data-protection keychain → use it (steady state).
-/// 2. Legacy file-keychain → migrate into data-protection, return it. If the
-///    legacy read *throws* (the `errSecAuthFailed` cert-rotation bug), the
-///    value is unrecoverable → `.needsReentry` (UI asks for a one-time paste).
-/// 3. Legacy `settings.json` → migrate into data-protection, remove the file.
-/// 4. Nothing anywhere → `.absent` (genuine first run).
+/// 1. Production keychain → use it (steady state).
+/// 2. Deliberate-delete tombstone set → `.absent`, no resurrection.
+/// 3. `KeychainStore.migrationSourceStore` (the other backend) → migrate into
+///    production, return it.
+/// 4. Legacy `settings.json` → migrate into production, remove the file.
+/// 5. Nothing anywhere → `.absent` (genuine first run), or `.needsReentry`
+///    when a read failed in a way that means "an item is there but we can't
+///    read it" (see `isStrandingFailure`).
+///
+/// The order is store-neutral on purpose: it reads `productionStore` /
+/// `migrationSourceStore` rather than naming a backend, so restoring the
+/// data-protection store reverses the migration direction automatically
+/// instead of needing this chain rewritten again.
 enum SecretStore {
     private static let log = Logger(subsystem: "app.notype", category: "secret")
     private static let envVar = "NOTYPE_GEMINI_KEY"
@@ -73,24 +79,24 @@ enum SecretStore {
 
     static func saveGeminiKey(_ key: String) throws {
         do {
-            try KeychainStore.save(key)   // defaults to .dataProtection
+            try KeychainStore.save(key)   // KeychainStore.productionStore
         } catch {
             throw SecretError.write(error)
         }
         // Drop the legacy settings.json if it's still around. We deliberately
-        // do NOT delete the legacy *keychain* item here — an unscoped legacy
-        // delete query can also match the data-protection item we just wrote
-        // (asymmetric macOS semantics, pinned by KeychainStoreTests) and would
-        // nuke it. The orphaned legacy item is harmless: resolution always
-        // reads data-protection first, and the tombstone (below) blocks
-        // resurrection after a delete.
+        // do NOT touch the *other* keychain backend here — macOS keychain
+        // isolation is asymmetric (an unscoped legacy query also matches a
+        // data-protection item, pinned by KeychainStoreTests), so a cross-store
+        // delete can nuke the item we just wrote. An orphaned item in the other
+        // store is harmless: resolution reads the production store first, and
+        // the tombstone (below) blocks resurrection after a delete.
         legacyFile.removeIfPresent()
         deliberatelyCleared = false
     }
 
     static func deleteGeminiKey() throws {
         do {
-            try KeychainStore.delete()    // .dataProtection
+            try KeychainStore.delete()    // KeychainStore.productionStore
         } catch {
             throw SecretError.write(error)
         }
@@ -120,77 +126,96 @@ enum SecretStore {
 
     // MARK: - Migration + resolution (testable core)
 
-    /// Resolves the key and migrates any pre-data-protection storage forward.
-    /// No env handling here — see `currentKeyResolution()`. The keychain reads
-    /// / writes and the legacy-file URL are injectable so every branch
-    /// (including the unrecoverable `errSecAuthFailed` stranded path) is
-    /// deterministically unit-testable.
+    /// Whether a keychain read failure means *"an item is probably there but
+    /// we can't read it"* — the user must paste their key once
+    /// (`.needsReentry`) — rather than *"this backend isn't available at all"*,
+    /// which is a quiet fall-through.
     ///
-    /// We deliberately never delete the legacy *keychain* item after a
-    /// successful migration: an unscoped legacy delete query can also match
-    /// the freshly written data-protection item and remove it. The orphaned
-    /// legacy item is invisible to all later reads (data-protection is checked
-    /// first) and the `cleared` tombstone blocks resurrection after a delete,
-    /// so leaving it is both safe and correct.
+    /// The distinction matters because `migrationSourceStore` is routinely
+    /// unavailable: with the production store on `.legacyFile`, every
+    /// data-protection read returns `errSecMissingEntitlement` (the app carries
+    /// no `keychain-access-groups` entitlement — see `KeychainStore`). Treating
+    /// that as stranding would show every genuine first-run user a "paste your
+    /// key once" note instead of onboarding.
+    ///
+    /// `errSecAuthFailed` is the cert-rotation ACL failure; `errSecInteractionNotAllowed`
+    /// is a locked keychain. Both mean the item exists and is unreadable.
+    static func isStrandingFailure(_ error: Error) -> Bool {
+        guard case KeychainStore.KeychainError.status(let status) = error else { return false }
+        return status == errSecAuthFailed || status == errSecInteractionNotAllowed
+    }
+
+    /// Resolves the key and migrates any older storage forward. No env
+    /// handling here — see `currentKeyResolution()`. The keychain reads /
+    /// writes and the legacy-file URL are injectable so every branch
+    /// (including the unrecoverable `errSecAuthFailed` stranded path, which
+    /// can't be forced against the real keychain) is deterministically
+    /// unit-testable.
+    ///
+    /// We deliberately never delete the migration source after a successful
+    /// migration: macOS keychain isolation is asymmetric, so a cross-store
+    /// delete query can also match the item we just wrote. An orphaned source
+    /// item is invisible to later reads (the production store resolves first)
+    /// and the `cleared` tombstone blocks resurrection after a delete, so
+    /// leaving it is both safe and correct.
     static func migrateAndResolve(
         service: String = KeychainStore.defaultService,
         account: String = KeychainStore.defaultAccount,
         legacyFileURL: URL = legacyFile.url,
         cleared: Bool = deliberatelyCleared,
-        dpRead: (String, String) throws -> String? = {
-            try KeychainStore.load(service: $0, account: $1, store: .dataProtection)
+        primaryRead: (String, String) throws -> String? = {
+            try KeychainStore.load(service: $0, account: $1, store: KeychainStore.productionStore)
         },
         // (service, account, value)
-        dpWrite: (String, String, String) throws -> Void = {
-            try KeychainStore.save($2, service: $0, account: $1, store: .dataProtection)
+        primaryWrite: (String, String, String) throws -> Void = {
+            try KeychainStore.save($2, service: $0, account: $1, store: KeychainStore.productionStore)
         },
-        legacyKeychainRead: (String, String) throws -> String? = {
-            try KeychainStore.load(service: $0, account: $1, store: .legacyFile)
+        fallbackRead: (String, String) throws -> String? = {
+            try KeychainStore.load(service: $0, account: $1, store: KeychainStore.migrationSourceStore)
         }
     ) -> KeyResolution {
-        // 1. Data-protection store — steady state.
+        var stranded = false
+
+        // 1. Production store — steady state.
         do {
-            if let value = try dpRead(service, account) {
+            if let value = try primaryRead(service, account) {
                 return .present(value)
             }
         } catch {
-            // A data-protection read shouldn't fail on auth (that's the whole
-            // point), but don't strand on a transient hiccup — fall through.
-            log.error("data-protection read failed: \(error.localizedDescription, privacy: .public)")
+            log.error("production keychain read failed: \(error.localizedDescription, privacy: .public)")
+            stranded = isStrandingFailure(error)
         }
 
-        // 1b. Deliberate-delete tombstone. The user explicitly cleared their
-        // key and the data-protection store is empty — do NOT resurrect it
-        // from, or re-prompt because of, an orphaned/unreadable legacy item.
+        // 2. Deliberate-delete tombstone. The user explicitly cleared their key
+        // and the production store is empty — do NOT resurrect it from, or
+        // re-prompt because of, an orphaned/unreadable item in another store.
         if cleared { return .absent }
 
-        // 2. Legacy file-keychain — pre-migration item.
-        var strandedLegacy = false
+        // 3. The other keychain backend — a key written under a previous
+        // production store.
         do {
-            if let value = try legacyKeychainRead(service, account) {
-                migrate(value, service: service, account: account, dpWrite: dpWrite, source: "legacy keychain")
+            if let value = try fallbackRead(service, account) {
+                migrate(value, service: service, account: account, primaryWrite: primaryWrite, source: "migration-source keychain")
                 return .present(value)
             }
         } catch {
-            // errSecAuthFailed etc. — the exact cert-rotation bug. The value
-            // can't be read, so it can't be migrated; the user pastes once.
-            log.error("legacy keychain read failed (stranded): \(error.localizedDescription, privacy: .public)")
-            strandedLegacy = true
+            log.error("migration-source keychain read failed: \(error.localizedDescription, privacy: .public)")
+            stranded = stranded || isStrandingFailure(error)
         }
 
-        // 3. Legacy settings.json file.
+        // 4. Legacy settings.json file.
         if let value = legacyFile.consumeForMigration(url: legacyFileURL) {
-            if migrate(value, service: service, account: account, dpWrite: dpWrite, source: "settings.json") {
+            if migrate(value, service: service, account: account, primaryWrite: primaryWrite, source: "settings.json") {
                 legacyFile.removeIfPresent(url: legacyFileURL)
             }
             return .present(value)
         }
 
-        // 4. Verdict.
-        return strandedLegacy ? .needsReentry : .absent
+        // 5. Verdict.
+        return stranded ? .needsReentry : .absent
     }
 
-    /// Best-effort write of a migrated value into the data-protection store.
+    /// Best-effort write of a migrated value into the production store.
     /// Returns whether the write succeeded — callers use it to decide whether
     /// it's safe to remove the migration source. On failure we still return
     /// the value to the user (no lock-out) and leave the source for retry.
@@ -199,15 +224,15 @@ enum SecretStore {
         _ value: String,
         service: String,
         account: String,
-        dpWrite: (String, String, String) throws -> Void,
+        primaryWrite: (String, String, String) throws -> Void,
         source: String
     ) -> Bool {
         do {
-            try dpWrite(service, account, value)
-            log.info("migrated key from \(source, privacy: .public) into data-protection keychain")
+            try primaryWrite(service, account, value)
+            log.info("migrated key from \(source, privacy: .public) into the production keychain")
             return true
         } catch {
-            log.error("migration write to data-protection failed: \(error.localizedDescription, privacy: .public)")
+            log.error("migration write to the production keychain failed: \(error.localizedDescription, privacy: .public)")
             return false
         }
     }

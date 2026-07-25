@@ -6,16 +6,24 @@
 	<false/>
 	<key>com.apple.security.device.audio-input</key>
 	<true/>
-	<!-- Data-protection keychain access group for the Gemini API key.
-	     Hardcodes the Team ID prefix (49T6U8DQXZ — matches project.yml
-	     DEVELOPMENT_TEAM and signing/NoType.xcrequirements) instead of
-	     $(AppIdentifierPrefix) so the group resolves identically on the
-	     Developer ID release build, which has no provisioning profile to
-	     expand that variable. KeychainStore.accessGroup must match this
-	     literal verbatim. See docs/solutions/documentation-gaps/keychain-data-protection-migration-2026-05-30.md. -->
-	<key>keychain-access-groups</key>
-	<array>
-		<string>49T6U8DQXZ.app.notype</string>
-	</array>
+	<!-- DO NOT add `keychain-access-groups` (or any other RESTRICTED
+	     entitlement) here without also embedding a matching Developer ID
+	     provisioning profile at Contents/embedded.provisionprofile.
+
+	     macOS classes `keychain-access-groups` as restricted: AMFI refuses to
+	     exec a binary carrying it unless the bundle embeds a profile that
+	     grants it. The binary still passes `codesign --verify --deep --strict`,
+	     notarization, stapling and `spctl --assess` — none of those validate
+	     restricted entitlements — so the breakage is invisible until launch,
+	     where the process is SIGKILLed before main() with
+	     `amfid: -413 "No matching profile found"`. That shipped as v0.1.11 and
+	     bricked every install.
+
+	     scripts/release.sh now gates on this (see its "AMFI restricted-entitlement
+	     gate" step). Re-enabling the data-protection keychain is tracked in
+	     docs/solutions/documentation-gaps/developer-id-provisioning-profile-2026-07-25.md
+	     and requires portal work, not just a code change.
+
+	     See docs/solutions/runtime-errors/amfi-restricted-entitlement-launch-kill-2026-07-25.md. -->
 </dict>
 </plist>

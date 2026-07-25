@@ -1,12 +1,38 @@
 ---
 slug: keychain-data-protection-migration
 created: 2026-05-30
-status: closed
+status: reverted
 size: L
 category: documentation-gaps
 ---
 
 # Move the Gemini key to the data-protection keychain (survive re-sign, never prompt)
+
+> ## ⚠️ REVERTED on 2026-07-25 (v0.1.12)
+>
+> **This migration shipped in v0.1.11 and made the app unlaunchable.** The
+> `keychain-access-groups` entitlement it introduced is *restricted* on macOS:
+> AMFI SIGKILLs any bundle declaring it that does not also embed a matching
+> provisioning profile — before `main()`, with no crash report. Every v0.1.11
+> install was bricked and could not self-heal (a dead app cannot check for
+> updates).
+>
+> Note follow-up (a) in the original resolution note below: "the new entitlement
+> makes `xcodebuild archive` demand a provisioning profile, resolved … by
+> archiving unsigned + manually code-signing". **That was not a resolution — it
+> was the bug.** Xcode's error was correct; bypassing it converted a loud build
+> failure into a silent runtime brick.
+>
+> The key is back in the legacy file keychain, and with it the cert-rotation
+> re-entry bug this document set out to fix. Read
+> [`../runtime-errors/amfi-restricted-entitlement-launch-kill-2026-07-25.md`](../runtime-errors/amfi-restricted-entitlement-launch-kill-2026-07-25.md)
+> before acting on anything below; the corrected path (portal capability +
+> embedded Developer ID profile, as one atomic four-part change) is
+> [`developer-id-provisioning-profile-2026-07-25.md`](developer-id-provisioning-profile-2026-07-25.md).
+>
+> Everything below is preserved as written for institutional memory — the
+> problem analysis and the `KeyResolution` / tombstone / asymmetric-isolation
+> design all still hold and are still shipping.
 
 > **Resolved — shipped in #70 (commit `de230d7`).** U1–U5 landed: the
 > `keychain-access-groups` entitlement, `KeychainStore` data-protection

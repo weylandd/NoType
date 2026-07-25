@@ -6,29 +6,29 @@ import Security
 /// `kSecClassGenericPassword` items. Used by `SecretStore` to persist the
 /// user's Gemini API key.
 ///
-/// **Why the data-protection keychain.** The production path
-/// (`Store.dataProtection`, the default) stores items in the
-/// **data-protection keychain** (`kSecUseDataProtectionKeychain`) scoped by
-/// a **keychain access group** (`accessGroup`). Access is gated by the
-/// app's `keychain-access-groups` entitlement — i.e. by Team ID + bundle id,
-/// **not** by a per-cert trusted-application ACL captured at item-creation
-/// time. This means:
+/// **Which backend is production: see `productionStore`.** Today it is
+/// `.legacyFile`; `.dataProtection` is the better store but is currently
+/// unreachable. The trade-off between them:
 ///
-/// - Access survives code-signing-identity rotation (Apple Development certs
-///   rotate; Developer ID is stable) and OS updates, as long as the Team ID +
-///   bundle id + entitlement are unchanged.
-/// - The data-protection keychain never shows the macOS login-password
-///   prompt for the app's own access-group items.
+/// - **`.dataProtection`** (`kSecUseDataProtectionKeychain` + `accessGroup`)
+///   gates access on the `keychain-access-groups` entitlement — Team ID +
+///   bundle id — **not** on a per-cert trusted-application ACL captured at
+///   item-creation time. Access therefore survives code-signing-identity
+///   rotation, and the store never shows the macOS login-password prompt for
+///   the app's own access-group items. **But** macOS classes that entitlement
+///   as *restricted*: AMFI SIGKILLs a binary carrying it unless the bundle
+///   embeds a matching provisioning profile. v0.1.11 shipped it without one
+///   and could not launch at all.
+/// - **`.legacyFile`** (no flag, no access group) needs no entitlement and no
+///   profile, so it always launches — but it pins each item's ACL to the
+///   creating build's leaf cert. When that cert rotates, reads fail with
+///   `errSecAuthFailed (-25293)` or pop the login-password prompt. That is the
+///   bug the data-protection migration set out to fix, and it is back until a
+///   Developer ID provisioning profile is embedded.
 ///
-/// The **legacy file-based keychain** (`Store.legacyFile`) — no flag, no
-/// access group — pins each item's ACL to the creating build's leaf cert.
-/// When that cert rotated, reads failed with `errSecAuthFailed (-25293)` or
-/// popped the login-password prompt. We keep `legacyFile` only to *read*
-/// pre-migration items (the one-shot migration in `SecretStore`) and the
-/// eval-suite test key. New production writes always go to `dataProtection`.
-///
-/// See `NoType/Keychain/CLAUDE.md` and
-/// `docs/solutions/documentation-gaps/keychain-data-protection-migration-2026-05-30.md`.
+/// See `NoType/Keychain/CLAUDE.md`,
+/// `docs/solutions/runtime-errors/amfi-restricted-entitlement-launch-kill-2026-07-25.md`
+/// and `docs/solutions/documentation-gaps/developer-id-provisioning-profile-2026-07-25.md`.
 enum KeychainStore {
     private static let log = Logger(subsystem: "app.notype", category: "keychain")
 
@@ -39,24 +39,52 @@ enum KeychainStore {
     /// Default account identifier — NoType is single-account (see ADR-011).
     static let defaultAccount = "default"
 
-    /// Data-protection keychain access group. **Must match the
+    /// Data-protection keychain access group. Used only by `.dataProtection`
+    /// queries. **When that store is production, this must match the
     /// `keychain-access-groups` entitlement literal** in
     /// `NoType/NoType.entitlements` verbatim (Team ID prefix + bundle id).
-    /// Hardcoded (not derived) so the Swift side and the entitlement stay in
-    /// lockstep; the Team ID is already fixed in `project.yml`.
+    /// The entitlement is currently absent — see `productionStore` — so the
+    /// literal is dormant, kept so restoring the data-protection store is a
+    /// one-line flip rather than a re-derivation.
     static let accessGroup = "49T6U8DQXZ.app.notype"
 
     /// Which keychain backend a query targets.
     enum Store {
         /// Modern data-protection keychain, scoped by `accessGroup`.
         /// Entitlement-gated → survives signing-identity rotation, never
-        /// prompts. **Production default.**
+        /// prompts. **Requires an embedded provisioning profile** (see
+        /// `productionStore`), so it is not currently reachable.
         case dataProtection
         /// Legacy file-based keychain (no data-protection flag, no access
-        /// group). Read-only in practice: the `SecretStore` migration reads
-        /// pre-migration items here, and `PromptEvalHarness` reads its
-        /// broad-ACL test key here. New production writes never target this.
+        /// group). Needs no entitlement, so it always launches; its ACL is
+        /// pinned to the creating build's leaf cert. **Production default.**
         case legacyFile
+    }
+
+    /// The backend production reads and writes.
+    ///
+    /// **`.legacyFile` — deliberately, and reversibly.** `.dataProtection` is
+    /// the store we want (it is immune to the cert-rotation ACL failure), but
+    /// it requires the `keychain-access-groups` entitlement, which macOS
+    /// classes as *restricted*: AMFI refuses to exec a bundle carrying it
+    /// unless the bundle also embeds a matching Developer ID provisioning
+    /// profile. v0.1.11 shipped the entitlement with no profile and was
+    /// SIGKILLed before `main()` on every install.
+    ///
+    /// Flipping this back to `.dataProtection` is **not** sufficient on its
+    /// own — it must land together with the entitlement AND an embedded
+    /// profile, or the app stops launching again. The portal work and the
+    /// release-script change are tracked in
+    /// `docs/solutions/documentation-gaps/developer-id-provisioning-profile-2026-07-25.md`.
+    static let productionStore: Store = .legacyFile
+
+    /// The other backend — consulted once by `SecretStore.migrateAndResolve`
+    /// so a key written under a previous `productionStore` is migrated forward
+    /// instead of stranding the user. Derived from `productionStore` so the
+    /// migration direction reverses automatically when the production store
+    /// flips.
+    static var migrationSourceStore: Store {
+        productionStore == .dataProtection ? .legacyFile : .dataProtection
     }
 
     enum KeychainError: Error, LocalizedError {
@@ -107,7 +135,7 @@ enum KeychainStore {
         _ value: String,
         service: String = defaultService,
         account: String = defaultAccount,
-        store: Store = .dataProtection
+        store: Store = productionStore
     ) throws {
         let data = Data(value.utf8)
         let query = baseQuery(service: service, account: account, store: store)
@@ -139,7 +167,7 @@ enum KeychainStore {
     static func load(
         service: String = defaultService,
         account: String = defaultAccount,
-        store: Store = .dataProtection
+        store: Store = productionStore
     ) throws -> String? {
         var query = baseQuery(service: service, account: account, store: store)
         query[kSecReturnData as String] = true
@@ -162,7 +190,7 @@ enum KeychainStore {
     static func delete(
         service: String = defaultService,
         account: String = defaultAccount,
-        store: Store = .dataProtection
+        store: Store = productionStore
     ) throws {
         let query = baseQuery(service: service, account: account, store: store)
         let status = SecItemDelete(query as CFDictionary)

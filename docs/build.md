@@ -127,10 +127,14 @@ Installed copies of NoType see the new version on their next scheduled Sparkle c
 
 `scripts/release.sh`:
 1. `xcodegen generate` (regenerates `NoType.xcodeproj` from `project.yml`).
-2. `xcodebuild archive` (Release configuration) + export with Developer ID.
-3. `notarytool submit --wait` on the `.app` → staple ticket.
-4. Build the `.dmg`, sign it, notarize the `.dmg`, staple.
-5. `ditto -c -k --keepParent` the notarized `.app` into `build/NoType-<version>.zip` (Sparkle's artefact).
+2. `xcodebuild archive` (Release configuration, unsigned) + `ditto` the `.app` out of the archive.
+3. `codesign` inside-out with Developer ID (Sparkle's XPC services → `Updater.app` → `Autoupdate` → framework → main app).
+4. **AMFI gate** — signs a throwaway probe `.app` with the same identity, the same `NoType.entitlements` and the same embedded-profile state, and execs it. Aborts the release if the kernel refuses. See below.
+5. `notarytool submit --wait` on the `.app` → staple ticket.
+6. Build the `.dmg`, sign it, notarize the `.dmg`, staple.
+7. `ditto -c -k --keepParent` the notarized `.app` into `build/NoType-<version>.zip` (Sparkle's artefact).
+
+**Why step 4 exists.** v0.1.11 passed `codesign --verify --deep --strict`, notarization, stapling *and* `spctl --assess` — and could not launch on a single machine. It declared the restricted `keychain-access-groups` entitlement with no embedded provisioning profile, so AMFI killed the process before `main()` (`amfid: -413 "No matching profile found"`), producing no crash report. **None of the standard verification tools evaluate restricted entitlements** — only an actual `exec` does. If the gate fails, the message names the cause; diagnose with `log show --last 2m --predicate 'process == "amfid"' --style compact`. Do not weaken or skip it. Full write-up: `docs/solutions/runtime-errors/amfi-restricted-entitlement-launch-kill-2026-07-25.md`.
 
 `scripts/publish_release.sh`:
 1. Find `sign_update` (Sparkle CLI tool — checks `tools/sparkle/sign_update` first, then PATH, `~/Downloads/Sparkle-*/bin/`, `/tmp/sparkle/bin/`, or `--sparkle-bin <path>` flag).
