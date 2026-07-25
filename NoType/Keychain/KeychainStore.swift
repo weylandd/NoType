@@ -129,8 +129,39 @@ enum KeychainStore {
 
     // MARK: - Public API
 
+    /// Whether an `OSStatus` means *"an item is there but this build can't
+    /// touch it"* rather than *"no such item"* or *"this backend is
+    /// unavailable"*.
+    ///
+    /// `errSecAuthFailed` is the cert-rotation ACL failure: a legacy-keychain
+    /// item's ACL is pinned to the signing identity that created it, so after a
+    /// rotation the item is present but unreadable and unwritable.
+    /// `errSecInteractionNotAllowed` is a locked keychain with no UI session.
+    ///
+    /// Single source of truth — `save` uses it to recover, and
+    /// `SecretStore.isStrandingFailure` wraps it to decide `.needsReentry`.
+    static func isStrandingStatus(_ status: OSStatus) -> Bool {
+        status == errSecAuthFailed || status == errSecInteractionNotAllowed
+    }
+
     /// Upsert: try `SecItemUpdate`; on `errSecItemNotFound` fall back to
     /// `SecItemAdd`. Throws on any other failure.
+    ///
+    /// **Stranded-item recovery.** An `SecItemUpdate` against an item whose ACL
+    /// no longer matches this build fails with `errSecAuthFailed` rather than
+    /// `errSecItemNotFound` — the keychain must authorize the item before it
+    /// can modify it. Treating that as fatal would break the one recovery path
+    /// the app offers such a user: `SecretStore.KeyResolution.needsReentry`
+    /// tells them to paste their key once, and the paste would then fail to
+    /// persist with "Couldn't save the key", stranding them permanently. So a
+    /// stranding status is handled like a missing item: delete the unusable
+    /// item, then add a fresh one owned by the current identity. This matters
+    /// more since 0.1.12 put the key back in the cert-pinned legacy keychain —
+    /// see `NoType/Keychain/CLAUDE.md` and
+    /// `docs/solutions/documentation-gaps/developer-id-provisioning-profile-2026-07-25.md`.
+    ///
+    /// The delete is same-store, same service + account, so it never crosses
+    /// the asymmetric-isolation boundary the module's hard rule protects.
     static func save(
         _ value: String,
         service: String = defaultService,
@@ -144,19 +175,33 @@ enum KeychainStore {
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
         ]
 
+        func add() throws {
+            var addQuery = query
+            addQuery.merge(updates) { _, new in new }
+            let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+            guard addStatus == errSecSuccess else {
+                Self.log.error("SecItemAdd failed: \(addStatus, privacy: .public)")
+                throw KeychainError.status(addStatus)
+            }
+        }
+
         let updateStatus = SecItemUpdate(query as CFDictionary, updates as CFDictionary)
         if updateStatus == errSecSuccess {
             return
         }
         if updateStatus == errSecItemNotFound {
-            var add = query
-            add.merge(updates) { _, new in new }
-            let addStatus = SecItemAdd(add as CFDictionary, nil)
-            guard addStatus == errSecSuccess else {
-                Self.log.error("SecItemAdd failed: \(addStatus, privacy: .public)")
-                throw KeychainError.status(addStatus)
+            return try add()
+        }
+        if isStrandingStatus(updateStatus) {
+            // The item exists but this build can't write it. Drop it and
+            // re-create under the current identity so the re-paste sticks.
+            Self.log.error("SecItemUpdate blocked by ACL (\(updateStatus, privacy: .public)); replacing the stranded item")
+            let deleteStatus = SecItemDelete(query as CFDictionary)
+            guard deleteStatus == errSecSuccess || deleteStatus == errSecItemNotFound else {
+                Self.log.error("SecItemDelete of stranded item failed: \(deleteStatus, privacy: .public)")
+                throw KeychainError.status(deleteStatus)
             }
-            return
+            return try add()
         }
         Self.log.error("SecItemUpdate failed: \(updateStatus, privacy: .public)")
         throw KeychainError.status(updateStatus)

@@ -46,7 +46,7 @@ Two mechanisms, and the trade between them is the whole story of this module:
 
 ## Storage backends + migration
 
-`SecretStore.migrateAndResolve` resolves the key in order and migrates whatever it finds into the data-protection store:
+`SecretStore.migrateAndResolve` resolves the key in order and migrates whatever it finds into the production store (`KeychainStore.productionStore`):
 
 1. **`KeychainStore.productionStore`** (today `.legacyFile`) → use it (steady state).
 2. **Deliberate-delete tombstone** set → `.absent`, no resurrection.
@@ -64,7 +64,7 @@ A migration write that fails returns the value anyway (no lock-out) and leaves t
 
 ## Testing
 
-- `NoTypeTests/KeychainStoreTests.swift` — round-trip / upsert / idempotent-delete / malformed-item against the **production** store (UUID-suffixed services), which needs no entitlement and so runs everywhere. The `.dataProtection` cases and the **asymmetric** store-isolation cases `XCTSkip` while the entitlement is absent — kept as the acceptance suite for restoring that store. Plus two entitlement guards: `test_restrictedEntitlement_requiresEmbeddedProvisioningProfile` (the v0.1.11 defect) and `test_restrictedEntitlement_presentIffDataProtectionIsProduction` (no half-migration).
+- `NoTypeTests/KeychainStoreTests.swift` — round-trip / upsert / idempotent-delete / malformed-item against the **production** store (UUID-suffixed services), which needs no entitlement and so runs everywhere. The `.dataProtection` cases and the **asymmetric** store-isolation cases `XCTSkip` while the entitlement is absent — kept as the acceptance suite for restoring that store. Plus two entitlement guards: `test_restrictedEntitlement_requiresEmbeddedProvisioningProfile` (the v0.1.11 defect — **Debug host only**: Xcode's automatic signing embeds a profile, so this cannot catch the same regression in the hand-signed Release artefact; only `scripts/release.sh`'s AMFI gate covers that) and `test_restrictedEntitlement_presentIffDataProtectionIsProduction` (no half-migration).
 - `NoTypeTests/SecretStoreTests.swift` — the `migrateAndResolve` chain: production-present, migration-source migrate, settings.json migrate+remove, stranding classification (`errSecAuthFailed` → `.needsReentry` vs `errSecMissingEntitlement` → `.absent`), tombstone cases, and migration-write-failure resilience (injected keychain closures — touches no real storage). Seams are named `primaryRead` / `fallbackRead` so they survive a `productionStore` flip.
 - `NoTypeTests/AppStateKeyStateTests.swift` — `AppState.keyUIState` mapping (`.needsReentry` not collapsed into the first-run state).
 - CI: macOS Keychain is available but locked by default — tests must not require prompts. The production (legacy) store needs no entitlement, so its tests run unconditionally; `AfterFirstUnlock` is safe on a CI runner logged in once.

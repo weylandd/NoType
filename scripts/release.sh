@@ -71,15 +71,20 @@ echo "▶ Archiving (${CONFIG}) unsigned"
 #    provisioning profile and fail with
 #    `"NoType" requires a provisioning profile` — even under Manual signing
 #    with an empty PROVISIONING_PROFILE_SPECIFIER. (Confirmed twice on CI.)
-#  - A NON-sandboxed macOS app on Developer ID needs NO profile for this
-#    entitlement: the access group is prefixed with the literal Team ID
-#    (`49T6U8DQXZ.app.notype`, see NoType.entitlements), which the Developer
-#    ID signature authorizes directly. (iOS would need a real profile.)
-#  - So we sidestep xcodebuild's profile machinery entirely: archive
-#    unsigned (`CODE_SIGNING_ALLOWED=NO`), then `codesign` the bundle
-#    inside-out with the Developer ID identity + `NoType.entitlements`.
-#    This is the standard recipe for Developer ID apps carrying entitlements
-#    that Xcode wants a profile for.
+#  - THAT ERROR WAS CORRECT AND WE WERE WRONG. `keychain-access-groups` is a
+#    RESTRICTED entitlement: AMFI refuses to exec a bundle declaring it unless
+#    the bundle embeds a matching provisioning profile — a team-prefixed access
+#    group is NOT self-authorized by a Developer ID signature. Sidestepping the
+#    profile requirement instead of satisfying it is what shipped the
+#    unlaunchable v0.1.11. The entitlement is gone (see NoType.entitlements) and
+#    the AMFI gate below now proves the remaining set can actually exec.
+#    Never route around a "requires a provisioning profile" error again.
+#  - The unsigned-archive path is KEPT, but for a different reason than it was
+#    introduced: it is what lets us sign Sparkle's nested code inside-out
+#    below. Archive unsigned (`CODE_SIGNING_ALLOWED=NO`), then `codesign` the
+#    bundle inside-out with the Developer ID identity + `NoType.entitlements`.
+#    Revisiting this in favour of a normal signed `-exportArchive` is a
+#    reasonable follow-up now that no entitlement forces our hand.
 xcodebuild -project "${PROJECT}" \
            -scheme "${SCHEME}" \
            -configuration "${CONFIG}" \
@@ -112,7 +117,8 @@ for nested in \
     "${APP_PATH}/Contents/Frameworks/Sparkle.framework"; do
     codesign --force --options runtime --timestamp --sign "${SIGN_IDENTITY}" "${nested}"
 done
-# Main app last: our entitlements (keychain-access-groups + audio-input) and
+# Main app last: our entitlements (audio-input only — keychain-access-groups
+# was removed in 0.1.12, see NoType/NoType.entitlements) and
 # the stable designated requirement (`identifier "app.notype"`) so TCC grants
 # survive across updates (signing/NoType.xcrequirements — same DR the old
 # xcodebuild path embedded via OTHER_CODE_SIGN_FLAGS).

@@ -180,6 +180,43 @@ final class KeychainStoreTests: XCTestCase {
         }
     }
 
+    // MARK: - Stranded-item recovery (the .needsReentry write path)
+
+    /// The read side (`SecretStore.isStrandingFailure`) and the write side
+    /// (`KeychainStore.save`'s recovery arm) must agree on which statuses mean
+    /// "the item exists but this build can't use it". If they drift, a user
+    /// told to re-paste their key gets a save that throws instead of
+    /// recovering — the failure this recovery arm exists to prevent.
+    func test_strandingStatus_setMatchesSecretStoreClassification() {
+        for status in [errSecAuthFailed, errSecInteractionNotAllowed] {
+            XCTAssertTrue(KeychainStore.isStrandingStatus(status), "status \(status) should strand")
+            XCTAssertTrue(
+                SecretStore.isStrandingFailure(KeychainStore.KeychainError.status(status)),
+                "SecretStore must classify status \(status) the same way save() does"
+            )
+        }
+        for status in [errSecItemNotFound, errSecMissingEntitlement, errSecIO, errSecSuccess] {
+            XCTAssertFalse(KeychainStore.isStrandingStatus(status), "status \(status) should not strand")
+            XCTAssertFalse(
+                SecretStore.isStrandingFailure(KeychainStore.KeychainError.status(status)),
+                "SecretStore must classify status \(status) the same way save() does"
+            )
+        }
+    }
+
+    /// `save` upserts over an item it CAN write without going through the
+    /// recovery arm. Pins that the recovery arm is genuinely conditional —
+    /// a regression that always deleted first would still pass a naive
+    /// round-trip test, but would needlessly churn the item's ACL.
+    func test_save_overExistingWritableItem_updatesInPlace() throws {
+        let service = uniqueService()
+        defer { try? KeychainStore.delete(service: service, account: account) }
+
+        try KeychainStore.save("first", service: service, account: account)
+        XCTAssertNoThrow(try KeychainStore.save("second", service: service, account: account))
+        XCTAssertEqual(try KeychainStore.load(service: service, account: account), "second")
+    }
+
     // MARK: - Store / entitlement consistency
 
     func test_migrationSourceStore_isTheOtherBackend() {

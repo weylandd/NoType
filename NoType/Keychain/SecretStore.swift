@@ -138,11 +138,13 @@ enum SecretStore {
     /// that as stranding would show every genuine first-run user a "paste your
     /// key once" note instead of onboarding.
     ///
-    /// `errSecAuthFailed` is the cert-rotation ACL failure; `errSecInteractionNotAllowed`
-    /// is a locked keychain. Both mean the item exists and is unreadable.
+    /// The status set lives in `KeychainStore.isStrandingStatus` so the read
+    /// side (this classification) and the write side (`KeychainStore.save`'s
+    /// stranded-item recovery) can never disagree about which failures mean
+    /// "the item is there but unusable".
     static func isStrandingFailure(_ error: Error) -> Bool {
         guard case KeychainStore.KeychainError.status(let status) = error else { return false }
-        return status == errSecAuthFailed || status == errSecInteractionNotAllowed
+        return KeychainStore.isStrandingStatus(status)
     }
 
     /// Resolves the key and migrates any older storage forward. No env

@@ -3,19 +3,16 @@ title: Restricted entitlement without a provisioning profile → AMFI SIGKILLs t
 date: 2026-07-25
 category: runtime-errors
 module: Keychain
-problem_type: tooling_decision
+problem_type: runtime_error
 component: tooling
 severity: critical
 symptoms:
   - "App quits instantly on launch with NO crash report in ~/Library/Logs/DiagnosticReports"
   - "`amfid: <app> not valid: Error Domain=AppleMobileFileIntegrityError Code=-413 \"No matching profile found\"`"
   - "`AMFI: Code has restricted entitlements, but the validation of its code signature failed. Unsatisfied Entitlements:` (empty list)"
-  - "`kernel: mac_vnode_check_signature: ... code signature validation failed fatally`"
   - "`kernel: proc N: load code signature error 4 for file \"NoType\"`"
-  - "`ASP: Security policy would not allow process: N`"
-  - "`taskgated-helper: Disallowing <app> because no eligible provisioning profiles found`"
   - "`codesign --verify --deep --strict`, notarization, stapling and `spctl --assess` ALL pass on the same bundle"
-root_cause: configuration_error
+root_cause: config_error
 resolution_type: code_fix
 tags:
   - codesigning
@@ -95,8 +92,19 @@ The chain:
    the Team-ID-prefixed access group is authorized by the Developer ID signature
    directly."* **That premise is false.**
 5. v0.1.11 was the first release carrying the entitlement (0.1.10 shipped
-   2026-05-29, two days before PR #70 landed), so the breakage appeared exactly
-   at that version and not before.
+   2026-05-29, three days before PR #70 landed on 2026-06-01), so the breakage
+   appeared exactly at that version and not before.
+
+**Only an *embedded* profile counts.** Verified empirically on 2026-07-25: a
+probe bundle claiming `app.notype`, signed with the Developer ID identity and
+the restricted entitlement, was SIGKILLed even with a provisioning profile
+granting `49T6U8DQXZ.*` present in *both* machine profile stores
+(`~/Library/Developer/Xcode/UserData/Provisioning Profiles` and
+`~/Library/MobileDevice/Provisioning Profiles`). The identical bundle with that
+profile copied to `Contents/embedded.provisionprofile` ran (rc=0). Installing a
+profile on the build machine therefore does **not** satisfy AMFI and cannot mask
+a missing embedded profile — which is also why the release gate below stays
+honest once the portal work lands.
 
 ## What didn't work
 

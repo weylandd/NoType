@@ -128,12 +128,14 @@ enum PromptEvalHarness {
         // same "missing" outcome — the test will skip rather than
         // throw an unhelpful trace.
         //
-        // Read from the **legacy file keychain** (`store: .legacyFile`):
+        // Read from the **legacy file keychain** (`store: .legacyFile`),
+        // pinned explicitly rather than following `KeychainStore.productionStore`:
         // the eval key is dropped by the maintainer via `security … -A`
-        // (broad ACL), which lands in the legacy keychain, not the
-        // data-protection store the production path now defaults to. See
-        // NoTypeTests/Fixtures/README.md "Setting the API key for the eval
-        // suite".
+        // (broad ACL), which always lands in the legacy keychain whatever the
+        // production backend happens to be. Isolation from the production key
+        // comes from the differing service string, not from the backend — the
+        // two currently share one. See NoTypeTests/Fixtures/README.md
+        // "Setting the API key for the eval suite".
         if let keychainKey = (try? KeychainStore.load(
             service: testKeychainService,
             account: testKeychainAccount,
