@@ -21,7 +21,7 @@ Early beta. The core push-to-talk → transcribe → paste loop works end-to-end
 - **New installs are blocked.** The onboarding wizard's primary control is a stock SwiftUI button, so a new user can't finish setup at all.
 - **Existing installs can still dictate.** Push-to-talk runs through `CGEventTap`, not SwiftUI's button dispatch — hold the hotkey, talk, release, and the transcript still pastes. Only clicking inside NoType's own windows crashes.
 
-**Workaround: update macOS to 26.4 or later.** Every report so far is from build 25C56. Tracked in [issue #82](https://github.com/weylandd/NoType/issues/82) — if you hit this on a different macOS build, please say so there, because that changes the diagnosis.
+**Possible workaround: update macOS past 26.2.** Unconfirmed — every report so far is from build 25C56, and the crash doesn't reproduce on any machine we can test on, so we can't say whether a later build actually fixes it. It's still the first thing worth trying. Tracked in [issue #82](https://github.com/weylandd/NoType/issues/82) — please report your macOS build there either way, especially if you hit this on something other than 25C56, because that changes the diagnosis.
 
 ---
 
