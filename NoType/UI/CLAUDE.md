@@ -66,6 +66,13 @@ SwiftUI surfaces: menu-bar icon, history popover, the main app window (Home tab 
 
 Pinned by `NoTypeTests/LaunchOrderingTests.swift` (source scan over every type reachable by construction from `NoTypeApp.init()`, following same-file calls transitively, and covering stored-property defaults) and `NoTypeTests/LaunchPrimingTests.swift` (behaviour, including the delegate hooks themselves). The scan proves the work is *absent* from initializers; `test_launchWork_isActuallyWiredUp_fromNoTypeAppInit` is its complement and proves it is *present* at the hook.
 
+Why each rule exists (rationale, rejected alternatives, the bugs that produced them):
+
+- `solutions/architecture-patterns/scene-task-is-not-a-launch-hook-2026-07-25.md` — why launch work lives on the delegate; the shipped bug where Sparkle never ran for menu-bar-only users.
+- `solutions/design-patterns/observation-loop-swallows-initial-state-2026-07-25.md` — why `permissions.prime()` must precede `applyAccessibilityState()`, and why the observer cannot cover the initial state.
+- `solutions/conventions/source-scan-guard-fidelity-2026-07-25.md` — how the guard above loses fidelity, and why it needs the presence assertions.
+- `solutions/runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md` — the crash the whole rule is a hypothesis about.
+
 ## HUD slots & widths
 
 | HUD | Width | Trigger | Hides on |

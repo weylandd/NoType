@@ -61,5 +61,6 @@ idle → checking → available → downloading → extracting → installing (p
 ## Pointers
 
 - Why Sparkle 2 + custom banner (not `SPUStandardUserDriver`, not Sparkle 1) → `solutions/tooling-decisions/sparkle-2-with-custom-banner-ui-2026-05-15.md`.
+- Why `start()` is on the launch hook and not a scene `.task` (the bug that gave menu-bar-only users no update checks at all) → `solutions/architecture-patterns/scene-task-is-not-a-launch-hook-2026-07-25.md`.
 - Why direct download (not MAS) → `solutions/tooling-decisions/direct-download-distribution-2026-05-15.md`.
 - Release workflow (xcodegen → archive → notarize → sign → publish) → `docs/build.md`.

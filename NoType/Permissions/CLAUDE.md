@@ -62,3 +62,5 @@ Each individual permission file exposes:
 - High-level rationale + `Info.plist` keys + onboarding flow → `docs/permissions.md`.
 - OCR fallback that consumes Screen Recording → `solutions/architecture-patterns/screenshot-ocr-fallback-2026-05-15.md` + `NoType/Context/CLAUDE.md`.
 - Tap installation / uninstallation on accessibility transition → `NoType/Hotkey/CLAUDE.md`.
+- Why `init()` is inert and `prime()` must run before `applyAccessibilityState()` (the observation loop swallows the initial state) → `solutions/design-patterns/observation-loop-swallows-initial-state-2026-07-25.md`.
+- The launch path `prime()` hangs off → `NoType/UI/CLAUDE.md` "Launch ordering" + `solutions/architecture-patterns/scene-task-is-not-a-launch-hook-2026-07-25.md`.
