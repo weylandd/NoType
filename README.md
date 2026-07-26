@@ -31,6 +31,16 @@ defaults write app.notype NSApplicationCrashOnExceptions -bool YES
 
 That makes NoType crash *at* the underlying error instead of hiding it, so the report names the real culprit. Undo it any time with `defaults delete app.notype NSApplicationCrashOnExceptions`. NoType has no telemetry, so reports like this are the only way we see the problem at all.
 
+**And this second command helps even if you never crash.** NoType now writes a line to the macOS system log every time it hits one of these internal errors — including the ones macOS absorbs silently. Run this after using the app for a bit:
+
+```bash
+/usr/bin/log show --last 30m --predicate 'subsystem == "app.notype" AND category == "exception"' --style compact
+```
+
+You should always see one `EXC BREADCRUMB armed` line — that just confirms the watcher is running. Any `OBJC THROW` line after it is the thing we're hunting; it names the error and where it came from. **Both outcomes are useful to us**, including "armed line only, nothing else" — that result is what tells us we're looking in the wrong place, and it's just as hard to get without you.
+
+Please read the output before you post it. It's filtered for anything that looks like a key or a password, but it is written by macOS, not by us, so we can't promise it never contains something you'd rather not publish — and [issue #82](https://github.com/weylandd/NoType/issues/82) is a public, search-indexed page. If a line looks personal, email it to **kopachevmail@gmail.com** instead and just say on the issue that you've sent one.
+
 ---
 
 ## Requirements

@@ -122,6 +122,20 @@ struct NoTypeApp: App {
     @State private var updates:     UpdateController
 
     init() {
+        // FIRST statement, deliberately. An Objective-C exception raised
+        // inside a main-actor Swift-concurrency job orphans the main thread's
+        // executor identity and then gets swallowed by AppKit, so the process
+        // survives and crashes later at an unrelated executor check — and
+        // nothing else in the process observes that throw
+        // (`NSSetUncaughtExceptionHandler` does not fire; AppKit catches
+        // first). Installing here covers every type constructed below and the
+        // whole launch window. Pure function-pointer swap: it schedules no
+        // `MainActor` work and touches no `NSApp`, so it does not violate the
+        // launch-ordering rule the rest of this initializer obeys. See
+        // `NoType/Diagnostics/ExceptionBreadcrumb.swift`; pinned by
+        // `ExceptionBreadcrumbTests`.
+        ExceptionBreadcrumb.install()
+
         let perms        = PermissionsViewModel()
         let hud          = HUDController(permissions: perms)
         let gemini       = GeminiClient()
