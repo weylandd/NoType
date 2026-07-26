@@ -10,6 +10,11 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
 
 ## [Unreleased]
 
+### Internal
+- **Found the actual cause of the macOS 26 crash** ([#82](https://github.com/weylandd/NoType/issues/82)), and corrected the documentation that named the wrong one. NoType raises an internal Objective-C error inside a background job; macOS absorbs it and keeps running, but the concurrency runtime is left corrupted and the app falls over shortly afterwards at an unrelated click. The three previous incidents — a timeline view, a hover handler, a button — were all innocent bystanders, which is why fixing each of them only moved the crash. The mechanism was reproduced locally rather than inferred.
+- Two things this retires: the start-up rework shipped in 0.1.13-rc1 was tested and **did not** fix the crash (it remains correct for its own reasons), and the README no longer suggests updating macOS as a workaround — the trigger is in NoType, not in the OS.
+- `docs/solutions/runtime-errors/` now records the proven mechanism, the diagnostic breadcrumb that identifies it in any crash report, and every hypothesis that was disproven along the way.
+
 ---
 
 ## [0.1.13-rc1] — 2026-07-25
