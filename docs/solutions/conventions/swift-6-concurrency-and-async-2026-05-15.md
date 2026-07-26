@@ -23,7 +23,7 @@ NoType builds with `SWIFT_STRICT_CONCURRENCY: complete` enabled in `project.yml`
 
 - **Strict concurrency is non-negotiable.** Every new file builds clean under `complete`. Don't silence warnings; refactor.
 - **`actor` for any shared mutable state.** Current actors: `GeminiClient`, `HistoryStore`, `SileroVAD`. `@MainActor` classes: `RecordingSession`, `AppState`, `PermissionsViewModel`, `OnboardingState`, `AppearanceController`, `HUDController`.
-- **No `@unchecked Sendable` without a doc-comment** explaining the lock or thread-confinement that makes it safe. Documented exceptions: `AudioRecorder`, `HotkeyMonitor`, `MicProbe`.
+- **No `@unchecked Sendable` without a doc-comment** explaining the lock or thread-confinement that makes it safe. Documented exceptions: `AudioRecorder`, `HotkeyMonitor`, `MicProbe`, `ExceptionBreadcrumb.State` (`NSLock`-guarded; the Objective-C exception preprocessor fires on whichever thread raised).
 - **Cross-actor communication via `await`, `AsyncStream`, or `AsyncChannel`.** No callbacks, no completion handlers in new code.
 - **`async`/`await` everywhere.** No `DispatchQueue` in new code (legacy callsites can stay until they're touched).
 - **For periodic work:** `Task { while !Task.isCancelled { try await Task.sleep(...); … } }`. Inside SwiftUI views, prefer `.task { while !Task.isCancelled { … } }` — `TimelineView`-driven periodic work is **banned** when the content closure would need to call `@MainActor` instance methods on the view: on macOS 26 the inserted executor check crashes during layout. See [timelineview-mainactor-instance-method-crash](../runtime-errors/timelineview-mainactor-instance-method-crash-2026-05-16.md).

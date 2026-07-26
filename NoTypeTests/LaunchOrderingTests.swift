@@ -444,7 +444,15 @@ enum LaunchPathScanner {
     /// Matching is whitespace-normalised (`Task{`, `Task  {` and
     /// `Task(priority:)` all match `Task {`) and identifier-boundary-aware,
     /// so `NSApp` does not match `NSAppearance` / `NSApplicationDelegate`.
-    private static let needles = [
+    ///
+    /// Non-private so a launch-path file this scan's *discovery* cannot reach
+    /// can still be scanned against the same list rather than a second copy
+    /// of it — see
+    /// `ExceptionBreadcrumbTests.test_breadcrumbSource_schedulesNoMainActorWork_andDoesNotTouchNSApp`,
+    /// which exists because `ExceptionBreadcrumb.install()` enters
+    /// `NoTypeApp.init()` as a static call and `constructedTypeNames` only
+    /// recognises constructions.
+    static let needles = [
         "Task {", "Task (", "Task.detached", "Task.init",
         "DispatchQueue.main", "OperationQueue.main", "RunLoop.main",
         "MainActor.run", "MainActor.assumeIsolated",

@@ -20,11 +20,14 @@ final class ExceptionBreadcrumbTests: XCTestCase {
 
     // MARK: - Install + chaining
 
-    /// The interceptor must already be armed in this process: the test bundle
-    /// is hosted by `NoType.app`, so `NoTypeApp.init()` has run. A non-`nil`
-    /// return is proof the `dlsym` lookup resolved and the swap happened —
-    /// i.e. that the R4a *armed* branch was taken rather than the
-    /// `unavailable` one.
+    /// The `dlsym` lookup resolves on this OS and the swap happens, i.e. the
+    /// R4a *armed* branch is taken rather than the `unavailable` one.
+    ///
+    /// Deliberately **not** claiming more than that. `install()` is idempotent
+    /// against process-wide state, so this call arms the process itself if
+    /// nothing else has — the assertion passes whether or not
+    /// `NoTypeApp.init()` ever called `install()`. The wiring is pinned by
+    /// `test_noTypeAppInit_installsBreadcrumbFirst`, and only there.
     func test_install_isArmedInThisProcess() {
         XCTAssertNotNil(
             ExceptionBreadcrumb.install(),
@@ -47,6 +50,23 @@ final class ExceptionBreadcrumbTests: XCTestCase {
 
         let second = try XCTUnwrap(ExceptionBreadcrumb.install())
         let chainedAfter = ExceptionBreadcrumb.chainedPreprocessor
+
+        // THE load-bearing assertion, and the reason this test was hardened:
+        // every other check below is silently green when `chained` is nil.
+        // `chainedBefore.map(Self.address)` is then `nil`, so the
+        // "is it our own hook?" check reduces to `nil != Optional(ptr)` (true)
+        // and the retention check to `nil == nil` (true) — i.e. the ONE
+        // outcome that turns every swallowed exception into an immediate
+        // process abort passed all three assertions.
+        XCTAssertNotNil(
+            chainedBefore,
+            """
+            install() captured no previous preprocessor. Foundation's is what \
+            populates NSException.callStackReturnAddresses, and with it dropped \
+            HIToolbox aborts the process at HIExceptions.mm:45 on the next \
+            swallowed exception — measured, see ExceptionBreadcrumb's doc-comment.
+            """
+        )
 
         XCTAssertEqual(
             Self.address(first), Self.address(second),
@@ -72,11 +92,30 @@ final class ExceptionBreadcrumbTests: XCTestCase {
             userInfo: nil
         )
 
+        XCTAssertTrue(
+            exception.callStackReturnAddresses.isEmpty,
+            "Fixture precondition: a freshly constructed NSException carries no return addresses yet."
+        )
+
         let returned = hook(exception)
 
         XCTAssertTrue(
             returned === exception,
             "The preprocessor must return its argument unchanged — it is an observer, not a filter."
+        )
+
+        // End-to-end proof that the chain actually RAN, not merely that a
+        // pointer was retained. Populating `callStackReturnAddresses` is
+        // precisely what the preprocessor we replaced does, and it is the field
+        // HIToolbox asserts on at HIExceptions.mm:45. Verified empirically:
+        // 0 addresses before this call, non-empty after.
+        XCTAssertFalse(
+            exception.callStackReturnAddresses.isEmpty,
+            """
+            The chained preprocessor did not run — NSException.callStackReturnAddresses \
+            is still empty after passing through our hook. Ship this and every \
+            exception AppKit currently swallows becomes an immediate SIGABRT.
+            """
         )
     }
 
@@ -122,25 +161,83 @@ final class ExceptionBreadcrumbTests: XCTestCase {
         XCTAssertEqual(ExceptionBreadcrumb.scrubbedReason(""), "(none)")
     }
 
-    /// R4b. `objc_setExceptionPreprocessor` is process-wide, so it sees
-    /// exceptions raised at the boundaries where NoType hands Objective-C its
-    /// most sensitive values — the transcript into `NSPasteboard`, the Gemini
-    /// key into a URL request header. `reason` is authored by the raising
-    /// framework with arguments this app does not control, so it goes through
-    /// the same masker every other content-carrying path uses.
+    /// R4b, and the Keychain module's "never log the key" hard rule, against
+    /// the **real** Gemini key shape.
+    ///
+    /// The length is the whole point. A Gemini key is `AIza` + 35 characters =
+    /// 39, which is BELOW `SecureFieldMasker`'s generic 40-character
+    /// opaque-token catch-all (`\b[A-Za-z0-9_\-]{40,}\b`). `googleAPIKeyRegex`
+    /// (`\bAIza[0-9A-Za-z_\-]{35}\b`) is therefore the *only* rule standing
+    /// between a real key and a record the README asks the user to paste into a
+    /// public, search-indexed issue. An earlier version of this test used a
+    /// 40-character stand-in, which the catch-all redacted — so it went green
+    /// while proving nothing about the rule that actually protects the key.
+    func test_scrubbedReason_redactsARealShapedGeminiKey() {
+        let key = "AIza" + "SyA1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q"
+        XCTAssertEqual(
+            key.count, 39,
+            "Fixture drifted off the real Gemini key shape; it must stay below the 40-char catch-all."
+        )
+
+        let scrubbed = ExceptionBreadcrumb.scrubbedReason("Bad header value \(key) for request")
+
+        XCTAssertFalse(scrubbed.contains(key), "The Gemini key reached the log unscrubbed: \(scrubbed)")
+        XCTAssertFalse(scrubbed.contains("AIza"), "A Gemini key prefix survived: \(scrubbed)")
+        XCTAssertTrue(scrubbed.contains("[REDACTED — likely Google API key]"), scrubbed)
+    }
+
+    /// The generic catch-all, kept as its own case so the rule above is not the
+    /// only redaction path under test.
     func test_scrubbedReason_runsThroughSecureFieldMasker() {
-        let reason = "Bad header value AIzaSyA1234567890abcdefghijklmnopqrstuvw for request"
-        let scrubbed = ExceptionBreadcrumb.scrubbedReason(reason)
+        // Split, like the fixture above: a 40-char key-shaped literal assigned
+        // whole trips the repo's gitleaks pre-commit hook (generic-api-key).
+        let token = "AIzaSyA" + "1234567890abcdefghijklmnopqrstuvw"   // 40 chars — catch-all territory
+        XCTAssertEqual(token.count, 40, "Fixture must stay at/above the masker's 40-char catch-all floor.")
+
+        let scrubbed = ExceptionBreadcrumb.scrubbedReason("Bad header value \(token) for request")
 
         XCTAssertFalse(
-            scrubbed.contains("AIzaSyA1234567890abcdefghijklmnopqrstuvw"),
+            scrubbed.contains(token),
             "A key-shaped substring reached the log unscrubbed: \(scrubbed)"
         )
         XCTAssertTrue(scrubbed.contains("[REDACTED"), scrubbed)
     }
 
+    /// Pins the ORDER of the two steps inside `scrubbedReason`, which is a
+    /// security property and not a formatting one.
+    ///
+    /// Scrub-then-cap redacts the key and only then truncates. Cap-then-scrub
+    /// would slice the raw string at 512 characters first, cutting this key 12
+    /// characters in — a fragment far too short for `googleAPIKeyRegex`, which
+    /// needs exactly `AIza` + 35 — so an unredacted key prefix would ship in a
+    /// record destined for a public issue. Swapping those two lines leaves
+    /// every other assertion in this file green, so this is the only thing
+    /// holding that order in place.
+    func test_scrubbedReason_scrubsBeforeCapping_soAStraddlingKeyCannotSurvive() {
+        let key = "AIza" + "SyA1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q"
+        // 500 chars of prose-shaped filler: whitespace-separated 4-char tokens,
+        // so nothing here trips a masker rule and the key stays its own token.
+        let filler = String(repeating: "word ", count: 100)
+        XCTAssertEqual(filler.count, 500)
+        XCTAssertLessThan(filler.count, ExceptionBreadcrumb.maxReasonLength)
+        XCTAssertGreaterThan(filler.count + key.count, ExceptionBreadcrumb.maxReasonLength)
+
+        let scrubbed = ExceptionBreadcrumb.scrubbedReason(filler + key)
+
+        XCTAssertFalse(
+            scrubbed.contains("AIza"),
+            "A Gemini key fragment survived — scrubbedReason capped before it scrubbed: \(scrubbed)"
+        )
+        XCTAssertTrue(scrubbed.hasSuffix("…(truncated)"), String(scrubbed.suffix(32)))
+    }
+
     func test_scrubbedReason_isLengthCapped() {
-        let reason = String(repeating: "x", count: ExceptionBreadcrumb.maxReasonLength * 3)
+        // Prose-shaped filler, NOT a single long run of one character: a
+        // 1536-char `xxx…` run is one token, and it survives the masker only
+        // because `replaceLongOpaqueTokens` happens to require a digit
+        // alongside its letters. That made this test's green depend on an
+        // unrelated masker heuristic instead of on the length cap.
+        let reason = String(repeating: "word ", count: ExceptionBreadcrumb.maxReasonLength)
         let scrubbed = ExceptionBreadcrumb.scrubbedReason(reason)
 
         XCTAssertTrue(scrubbed.hasSuffix("…(truncated)"), String(scrubbed.suffix(32)))
@@ -246,7 +343,123 @@ final class ExceptionBreadcrumbTests: XCTestCase {
         )
     }
 
+    // MARK: - The launch-ordering rule, for a file the main scan cannot see
+
+    /// `LaunchOrderingTests` enforces "no `MainActor` scheduling and no `NSApp`
+    /// on the launch path", but its discovery walks **constructions** —
+    /// `LaunchPathScanner.constructedTypeNames` only records a capitalized
+    /// identifier immediately followed by `(`. `ExceptionBreadcrumb.install()`
+    /// is a static call through a `.`, so this type never enters
+    /// `launchPathTypes` and that scan never opens this file — even though it
+    /// runs as the *first* statement of `NoTypeApp.init()`, earlier than
+    /// anything the scan does cover. Scan it here instead.
+    ///
+    /// Whole-file on purpose. `LaunchPathScanner.violations(inSource:)` seeds
+    /// its traversal from `init` bodies, and `ExceptionBreadcrumb` declares no
+    /// initializer, so `violations` would inspect only stored-property
+    /// declaration lines and come back empty no matter what `install()`,
+    /// `observe(_:)`, `State` or the preprocessor closure body contained. That
+    /// is the failure mode in
+    /// `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`:
+    /// a guard that is green because it looked nowhere.
+    func test_breadcrumbSource_schedulesNoMainActorWork_andDoesNotTouchNSApp() throws {
+        let url = Self.repoRoot()
+            .appendingPathComponent("NoType")
+            .appendingPathComponent("Diagnostics")
+            .appendingPathComponent("ExceptionBreadcrumb.swift")
+        let code = LaunchPathScanner.strippingCommentsAndStrings(
+            try String(contentsOf: url, encoding: .utf8)
+        )
+
+        var violations: [String] = []
+        for line in code.split(separator: "\n", omittingEmptySubsequences: false) {
+            for needle in LaunchPathScanner.needles
+            where LaunchPathScanner.line(String(line), contains: needle) {
+                violations.append("\(needle) in `\(line.trimmingCharacters(in: .whitespaces))`")
+            }
+        }
+
+        XCTAssertEqual(
+            violations, [],
+            """
+            ExceptionBreadcrumb schedules MainActor work or touches NSApp. It runs \
+            as the first statement of NoTypeApp.init(), before NSApplicationMain has \
+            started the app, so this is the launch-ordering rule in \
+            `NoType/UI/CLAUDE.md` — move the work to a prime()-style method called \
+            from applicationDidFinishLaunching(_:).
+
+            Violations:
+            \(violations.joined(separator: "\n"))
+            """
+        )
+    }
+
+    // MARK: - The records must still be emitted, and findable
+
+    /// `armedLine(chained:)` and `unavailableLine()` have their formats pinned
+    /// above, but nothing pinned that `install()` still *emits* them. Delete
+    /// either `log.fault` call and every other assertion in this file stays
+    /// green while R4a — the line that makes an empty log mean *nothing threw*
+    /// rather than *nobody was watching* — silently stops being written, and the
+    /// helper becomes dead code that still has a passing test.
+    ///
+    /// Occurrence counting rather than exact call-site text, so reformatting the
+    /// call does not fail the guard: each helper must appear at least twice —
+    /// once declaring itself, at least once being called.
+    func test_install_stillEmitsTheArmedAndUnavailableRecords() throws {
+        let source = try String(contentsOf: Self.breadcrumbSourceURL(), encoding: .utf8)
+
+        for helper in ["armedLine(chained:", "unavailableLine()"] {
+            let uses = source.components(separatedBy: helper).count - 1
+            XCTAssertGreaterThanOrEqual(
+                uses, 2,
+                """
+                `\(helper)` appears \(uses)x in ExceptionBreadcrumb.swift — declaration \
+                only, no call site. install() must still log it; see R4a.
+                """
+            )
+        }
+    }
+
+    /// The README's `log show` recipe is this breadcrumb's entire user-facing
+    /// surface (KD6). It hard-codes the subsystem and category as strings, and
+    /// so does `ExceptionBreadcrumb` — in a different file, with nothing but
+    /// this test connecting them. Rename either side and the recipe silently
+    /// returns nothing, which costs an affected user a whole reporting round
+    /// and reads exactly like "nothing threw".
+    func test_readmeRetrievalRecipe_matchesTheLoggerTheCodeActuallyUses() throws {
+        let source = try String(contentsOf: Self.breadcrumbSourceURL(), encoding: .utf8)
+        let readme = try String(
+            contentsOf: Self.repoRoot().appendingPathComponent("README.md"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(
+            source.contains(#"Logger(subsystem: "app.notype", category: "exception")"#),
+            "The breadcrumb's Logger changed; the README's log show predicate no longer describes it."
+        )
+        XCTAssertTrue(
+            readme.contains(#"subsystem == "app.notype" AND category == "exception""#),
+            "README's log show predicate no longer matches the breadcrumb's Logger subsystem/category."
+        )
+        XCTAssertTrue(
+            readme.contains(ExceptionBreadcrumb.armedMarker),
+            "README no longer names the armed line, so a reporter cannot tell an unarmed launch from a quiet one."
+        )
+        XCTAssertTrue(
+            readme.contains(ExceptionBreadcrumb.throwMarker),
+            "README no longer names the throw marker a reporter is meant to look for."
+        )
+    }
+
     // MARK: - Helpers
+
+    private static func breadcrumbSourceURL() -> URL {
+        repoRoot()
+            .appendingPathComponent("NoType")
+            .appendingPathComponent("Diagnostics")
+            .appendingPathComponent("ExceptionBreadcrumb.swift")
+    }
 
     /// C function pointers have no `==`; compare their raw addresses.
     private static func address(_ fn: ExceptionBreadcrumb.Preprocessor) -> UnsafeRawPointer {

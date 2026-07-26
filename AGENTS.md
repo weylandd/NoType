@@ -61,6 +61,7 @@ Per-module guides (Claude Code auto-loads the relevant one when working in that 
 - **@NoType/Keychain/CLAUDE.md** — Gemini API key storage (`SecretStore`).
 - **@NoType/Updates/CLAUDE.md** — Sparkle 2 auto-updates with a custom `SPUUserDriver` that surfaces the "Update available" pill in the main-window sidebar instead of Sparkle's modal alert (ADR-017).
 - **@NoType/Onboarding/** — first-run wizard (steps in `NoType/Onboarding/Steps/`; no dedicated CLAUDE.md yet). Onboarding's `MicProbe` (mic-check step) is the app's *only* `AVAudioEngine` user — the recording path itself uses Core Audio HAL.
+- **@NoType/Diagnostics/** — the permanent `objc_setExceptionPreprocessor` breadcrumb (no dedicated CLAUDE.md yet). Installed as the first statement of `NoTypeApp.init()`; logs every Objective-C exception raised in the process at `.fault`, including the ones AppKit swallows. Its contract lives in the `ExceptionBreadcrumb.swift` doc-comment — chaining outward to the preprocessor it replaced is **load-bearing**, not ceremony. See `docs/solutions/runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md`.
 
 ---
 

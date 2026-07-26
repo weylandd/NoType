@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import os
 
@@ -114,30 +113,41 @@ enum ExceptionBreadcrumb {
     /// - Returns: the preprocessor now installed, or `nil` when the `dlsym`
     ///   lookup failed (in which case nothing was swapped and the
     ///   `unavailableMarker` line was logged instead of `armedMarker`). A
-    ///   non-`nil` return is therefore proof the process is armed.
+    ///   non-`nil` return proves the process is armed — but **not** that
+    ///   `NoTypeApp.init()` is what armed it, since this call arms it if
+    ///   nothing else has. Only the test named above pins that wiring.
     @discardableResult
     static func install() -> Preprocessor? {
-        guard state.claimInstallAttempt() else { return state.installedPreprocessor }
+        // Compile `SecureFieldMasker`'s thirteen lazily-initialised `try!`
+        // regex statics here, on the launch thread, BEFORE the swap publishes
+        // our hook to the whole process. `scrubbedReason(_:)` is the first
+        // thing to touch them, and it runs inside the preprocessor — so
+        // without this the `swift_once` initialisation of all thirteen lands
+        // on whichever arbitrary thread happens to raise first, possibly one
+        // already holding a framework lock. `scrubContent` reaches every regex
+        // regardless of input, so an empty string warms all of them.
+        _ = SecureFieldMasker.scrubContent("")
 
-        guard let symbol = dlsym(rtldDefault, "objc_setExceptionPreprocessor") else {
+        switch state.performInstall(ours: preprocessor, resolveSetter: resolveSetter) {
+        case .alreadyAttempted(let installed):
+            return installed
+        case .unavailable:
             log.fault("\(unavailableLine(), privacy: .public)")
             return nil
+        case .installed(let chained):
+            log.fault("\(armedLine(chained: chained != nil), privacy: .public)")
+            return preprocessor
         }
-
-        let setter = unsafeBitCast(symbol, to: SetPreprocessor.self)
-        let replaced = setter(preprocessor)
-        state.recordInstall(ours: preprocessor, chained: replaced)
-
-        log.fault("\(armedLine(chained: replaced != nil), privacy: .public)")
-        return preprocessor
     }
 
     /// The preprocessor `install()` replaced, retained so every record chains
     /// outward to it. `nil` only if nothing was installed before us.
     ///
     /// Exposed for `ExceptionBreadcrumbTests` — the "install twice" case
-    /// asserts this pointer is retained across the second call and is never
-    /// our own hook.
+    /// asserts this pointer is **non-nil**, retained across the second call,
+    /// and never our own hook. Non-nil first: a dropped chain is the outcome
+    /// that aborts the process, and it is the one an `Optional`-vs-non-optional
+    /// address comparison silently passes.
     static var chainedPreprocessor: Preprocessor? { state.chainedPreprocessor }
 
     // MARK: - Record formatting (pure)
@@ -190,6 +200,21 @@ enum ExceptionBreadcrumb {
     /// safety. `NoType/Keychain/CLAUDE.md` forbids the API key reaching a log
     /// at any level, and `NoType/Context/CLAUDE.md` already mandates this
     /// masker for every other path that carries user-visible content.
+    ///
+    /// **What this does and does not cover.** `scrubContent` is a token-*shape*
+    /// matcher: provider API keys, JWTs, bearer headers, card numbers, long
+    /// opaque runs. It does **not** redact free-form prose — see
+    /// `NoType/Context/CLAUDE.md` "Threats not in scope" — so a `reason` that
+    /// interpolated dictated transcript text would survive it and reach a
+    /// record the README then asks the user to post publicly. The README's
+    /// read-before-you-post warning and its private-email channel (R7a) are
+    /// the deliberate backstop for that class, not this function.
+    ///
+    /// Scrub first, cap second, and **not** the other way round: capping the
+    /// raw string first could slice a 39-character Gemini key at the boundary,
+    /// leaving a fragment too short for `googleAPIKeyRegex` to match — a
+    /// partial secret, published. Pinned by
+    /// `ExceptionBreadcrumbTests.test_scrubbedReason_scrubsBeforeCapping…`.
     static func scrubbedReason(_ raw: String?) -> String {
         guard let raw, !raw.isEmpty else { return "(none)" }
         let scrubbed = SecureFieldMasker.scrubContent(raw)
@@ -231,6 +256,31 @@ enum ExceptionBreadcrumb {
     /// C signature of `objc_setExceptionPreprocessor` itself: it takes the new
     /// preprocessor and returns the one it replaced.
     private typealias SetPreprocessor = @convention(c) (Preprocessor?) -> Preprocessor?
+
+    /// Outcome of one `install()` attempt, so `State` can own the whole
+    /// critical section and `install()` can still log outside the lock.
+    private enum InstallOutcome {
+        /// This call performed the swap; payload is the preprocessor replaced.
+        case installed(chained: Preprocessor?)
+        /// An earlier call already attempted the install; payload is whatever
+        /// it managed to install (`nil` if its `dlsym` lookup failed).
+        case alreadyAttempted(installed: Preprocessor?)
+        /// This call attempted the swap but `dlsym` returned nil, so nothing
+        /// was swapped.
+        case unavailable
+    }
+
+    /// Resolves `objc_setExceptionPreprocessor`. `nil` when the symbol is
+    /// absent — which is the only reason `install()` can come back unarmed.
+    ///
+    /// Deliberately a plain function rather than inline code: `State` invokes
+    /// it from inside its lock, and keeping it separate makes it obvious that
+    /// the only work under that lock is a symbol lookup and a pointer store,
+    /// neither of which can raise.
+    private static func resolveSetter() -> SetPreprocessor? {
+        guard let symbol = dlsym(rtldDefault, "objc_setExceptionPreprocessor") else { return nil }
+        return unsafeBitCast(symbol, to: SetPreprocessor.self)
+    }
 
     /// Captures nothing, so it converts to a C function pointer. It may run on
     /// any thread — every piece of shared state it touches is behind
@@ -274,30 +324,43 @@ enum ExceptionBreadcrumb {
         private var chained: Preprocessor?
         private var recordCount = 0
 
-        /// `true` for the first caller only — the one that performs the swap.
-        /// Every later caller gets `false`, which is what keeps our hook from
-        /// being chained to itself.
-        func claimInstallAttempt() -> Bool {
+        /// Performs the swap and publishes the replaced pointer **inside one
+        /// critical section**, and refuses to swap a second time so our hook
+        /// can never be chained to itself.
+        ///
+        /// The swap and the store have to be atomic with respect to
+        /// `chainedPreprocessor`. `objc_setExceptionPreprocessor` publishes our
+        /// hook to the entire process the instant it returns, so if the store
+        /// of `chained` happened after the lock was released — as it did when
+        /// this was a `claimInstallAttempt()` / `recordInstall(...)` pair — a
+        /// throw on another thread inside that window would read
+        /// `chained == nil` and skip the preprocessor we had just replaced.
+        /// That is not a missing breadcrumb: it is the measured
+        /// `HIExceptions.mm:45` `SIGABRT` described in the type's doc-comment.
+        /// Readers take this same lock, so they now block for the couple of
+        /// instructions the swap costs instead of observing the gap.
+        ///
+        /// Cannot self-deadlock on the non-recursive lock: everything under it
+        /// is a `dlsym` lookup and a single function-pointer store, neither of
+        /// which raises an Objective-C exception, so the installing thread
+        /// cannot re-enter through the preprocessor. `install()` keeps both
+        /// `log.fault` calls outside.
+        func performInstall(
+            ours: Preprocessor,
+            resolveSetter: () -> SetPreprocessor?
+        ) -> InstallOutcome {
             lock.lock()
             defer { lock.unlock() }
-            if didAttemptInstall { return false }
+
+            if didAttemptInstall { return .alreadyAttempted(installed: self.ours) }
             didAttemptInstall = true
-            return true
-        }
 
-        func recordInstall(ours: Preprocessor, chained: Preprocessor?) {
-            lock.lock()
+            guard let setter = resolveSetter() else { return .unavailable }
+
+            let replaced = setter(ours)
             self.ours = ours
-            self.chained = chained
-            lock.unlock()
-        }
-
-        /// `nil` when the `dlsym` lookup failed — deliberately not "whatever
-        /// `install()` would have set", so a repeat caller is told the truth.
-        var installedPreprocessor: Preprocessor? {
-            lock.lock()
-            defer { lock.unlock() }
-            return ours
+            self.chained = replaced
+            return .installed(chained: replaced)
         }
 
         var chainedPreprocessor: Preprocessor? {

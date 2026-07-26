@@ -55,7 +55,7 @@ The `CFGetTypeID` check is the real type test, so `unsafeDowncast` can't trap. F
 
 ### Logging
 
-- **Use `os.Logger`.** Subsystem = `app.notype`, category = module name (`hotkey`, `recording`, `gemini`, `context`, `injection`, `history`, `permissions`, `appstate`, `vad`, `audio.devices`, `secret`).
+- **Use `os.Logger`.** Subsystem = `app.notype`, category = module name (`hotkey`, `recording`, `gemini`, `context`, `injection`, `history`, `permissions`, `appstate`, `vad`, `audio.devices`, `secret`, `exception`).
 - **Never log:**
   - Raw audio bytes.
   - AX tree contents (PII).
