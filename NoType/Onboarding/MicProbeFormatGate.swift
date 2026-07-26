@@ -62,8 +62,13 @@ enum MicProbeFormatGate {
     ///
     /// `CaseIterable` exists for the exhaustiveness test — it asserts
     /// every case is produced by at least one shape pair, so adding a
-    /// case without a reachable input goes red instead of shipping dead
-    /// classification.
+    /// case without a *predicate-level* input goes red instead of
+    /// shipping dead classification. Production reachability is a
+    /// separate question and is what `positivityRejection(_:)` exists
+    /// to keep true for the two non-positive cases: run only from
+    /// `rejection(candidate:live:)`, they would be shadowed at the call
+    /// site by `AVAudioConverter(from:to:)` returning nil first, and a
+    /// diagnostic log would name the wrong reason.
     enum Rejection: Hashable, Sendable, CaseIterable, CustomStringConvertible {
         /// Node reports 0 Hz — typically no input device, or microphone
         /// permission not granted.
@@ -85,6 +90,25 @@ enum MicProbeFormatGate {
         }
     }
 
+    /// Returns `nil` when `shape` describes a live input node, otherwise
+    /// the reason it does not.
+    ///
+    /// Split out of `rejection(candidate:live:)` so the caller can run it
+    /// **before** constructing an `AVAudioConverter`. A 0 Hz / 0 ch shape
+    /// is a dead node (no input device, or microphone permission not
+    /// granted); handing it to `AVAudioConverter(from:to:)` — an
+    /// Objective-C initializer, called from inside a main-actor `Task` —
+    /// with only "verified empirically that it returns nil" behind it is
+    /// the same unvalidated-argument shape this gate exists to remove.
+    /// Checking first also keeps both non-positive cases reachable in
+    /// production, so the diagnostic log names the dead node rather than
+    /// a downstream converter failure.
+    static func positivityRejection(_ shape: Shape) -> Rejection? {
+        guard shape.sampleRate > 0 else { return .nonPositiveSampleRate }
+        guard shape.channelCount > 0 else { return .nonPositiveChannelCount }
+        return nil
+    }
+
     /// Returns `nil` when `candidate` is safe to hand to `installTap`,
     /// otherwise the first reason it is not.
     ///
@@ -97,8 +121,7 @@ enum MicProbeFormatGate {
     /// (0 Hz) fails the sample-rate comparison against a positive
     /// candidate.
     static func rejection(candidate: Shape, live: Shape) -> Rejection? {
-        guard candidate.sampleRate > 0 else { return .nonPositiveSampleRate }
-        guard candidate.channelCount > 0 else { return .nonPositiveChannelCount }
+        if let rejection = positivityRejection(candidate) { return rejection }
         guard candidate.sampleRate == live.sampleRate else { return .sampleRateMismatch }
         guard candidate.channelCount == live.channelCount else { return .channelCountMismatch }
         return nil

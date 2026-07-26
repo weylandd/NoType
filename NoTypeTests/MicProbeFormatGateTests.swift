@@ -101,11 +101,67 @@ final class MicProbeFormatGateTests: XCTestCase {
         )
     }
 
+    // MARK: - positivityRejection (the pre-converter limb)
+
+    // `installTapAndStart()` runs this one BEFORE building the
+    // `AVAudioConverter`, so a dead node never reaches an Objective-C
+    // initializer with an unvalidated argument. These pin that the split
+    // limb agrees with the full predicate rather than drifting from it.
+
+    func test_positivityRejection_passesALiveShape() {
+        XCTAssertNil(
+            MicProbeFormatGate.positivityRejection(.init(sampleRate: 48_000, channelCount: 2))
+        )
+    }
+
+    func test_positivityRejection_rejectsZeroSampleRate() {
+        XCTAssertEqual(
+            MicProbeFormatGate.positivityRejection(.init(sampleRate: 0, channelCount: 1)),
+            .nonPositiveSampleRate
+        )
+    }
+
+    func test_positivityRejection_rejectsZeroChannelCount() {
+        XCTAssertEqual(
+            MicProbeFormatGate.positivityRejection(.init(sampleRate: 48_000, channelCount: 0)),
+            .nonPositiveChannelCount
+        )
+    }
+
+    func test_positivityRejection_agreesWithFullPredicate_onSelfComparison() {
+        // The full predicate must stay a superset: whatever the split limb
+        // rejects, `rejection(candidate:live:)` rejects identically. If the
+        // two ever diverge, `installTapAndStart()` gets two different
+        // answers about the same node in the same call.
+        let shapes: [MicProbeFormatGate.Shape] = [
+            .init(sampleRate: 0, channelCount: 0),
+            .init(sampleRate: 0, channelCount: 1),
+            .init(sampleRate: 48_000, channelCount: 0),
+            .init(sampleRate: -1, channelCount: 1),
+            .init(sampleRate: 44_100, channelCount: 1),
+            .init(sampleRate: 48_000, channelCount: 2)
+        ]
+        for shape in shapes {
+            XCTAssertEqual(
+                MicProbeFormatGate.positivityRejection(shape),
+                MicProbeFormatGate.rejection(candidate: shape, live: shape),
+                "split limb and full predicate disagree on \(shape)"
+            )
+        }
+    }
+
     // MARK: - Exhaustiveness
 
     func test_everyRejectionCase_isProducedBySomeShapePair() {
-        // Guards the classification against rot: a case added without a
-        // reachable input fails here instead of shipping dead.
+        // Guards the classification against rot: a case added with no
+        // input that produces it fails here instead of shipping dead
+        // classification. Scope: this proves *predicate-level*
+        // producibility. Production reachability of the two non-positive
+        // cases is a separate property, and it is
+        // `positivityRejection(_:)` running before
+        // `AVAudioConverter(from:to:)` that keeps it true — run only from
+        // the full predicate, those two would be shadowed by the
+        // converter returning nil first.
         let producers: [MicProbeFormatGate.Rejection: (MicProbeFormatGate.Shape, MicProbeFormatGate.Shape)] = [
             .nonPositiveSampleRate: (.init(sampleRate: 0, channelCount: 1),
                                      .init(sampleRate: 48_000, channelCount: 1)),
@@ -139,6 +195,21 @@ final class MicProbeFormatGateTests: XCTestCase {
                 live: .init(sampleRate: 48_000, channelCount: 2)
             ),
             .nonPositiveSampleRate
+        )
+    }
+
+    func test_rejectionOrder_channelPositivityBeatsSampleRateMismatch() {
+        // The channel twin of the case above, and the one mutation the
+        // rest of the suite misses: demote `channelCount > 0` below the
+        // sample-rate equality guard and every other test still passes,
+        // while a dead node mid-device-switch gets logged as a race it
+        // isn't.
+        XCTAssertEqual(
+            MicProbeFormatGate.rejection(
+                candidate: .init(sampleRate: 44_100, channelCount: 0),
+                live: .init(sampleRate: 48_000, channelCount: 1)
+            ),
+            .nonPositiveChannelCount
         )
     }
 

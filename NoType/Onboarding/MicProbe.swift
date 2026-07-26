@@ -21,8 +21,17 @@ import OSLog
 /// invokes the `installTap` callback on its own realtime thread; if the
 /// owning class were main-actor-isolated, Swift 6's runtime isolation
 /// check would `dispatch_assert_queue_fail` the moment audio starts
-/// flowing. Same shape as `AudioRecorder`. All mutable state is guarded
-/// by `lock`.
+/// flowing. Same shape as `AudioRecorder`.
+///
+/// **Two different disciplines keep that sound, and neither is "every
+/// field takes `lock`".** `pcm` and `tapInstalled` are genuinely
+/// concurrent — the realtime thread appends to one, `deinit` on an
+/// arbitrary thread test-and-clears the other — so both take `lock`.
+/// `converter` and `outputFormat` do not: they are written only between
+/// `removeTapIfInstalled()` and `installTap(onBus:…)`, i.e. only while no
+/// tap block exists to read them, and `installTap` itself publishes the
+/// write to the realtime thread. Keep them inside that window or they
+/// need the lock too.
 final class MicProbe: @unchecked Sendable {
     private static let log = Logger(subsystem: "app.notype", category: "onboarding.mic")
 
@@ -82,39 +91,57 @@ final class MicProbe: @unchecked Sendable {
             _ = AudioDeviceManager.apply(device, to: engine)
         }
 
-        do {
-            try installTapAndStart()
-        } catch {
-            Self.log.error("mic probe start failed: \(error.localizedDescription, privacy: .public)")
-            return
-        }
-
-        configChangeObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: engine,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.rebuild() }
+        // **Both observers are installed BEFORE the tap goes in, and the
+        // ordering is load-bearing.** `AudioDeviceManager.apply` above is
+        // asynchronous, so the very first `installTapAndStart()` is the
+        // most likely moment for `MicProbeFormatGate` to reject — and
+        // `.AVAudioEngineConfigurationChange` is precisely the
+        // notification that fires when that switch finally lands. Wiring
+        // the observers only on the success path meant a rejected first
+        // install threw away its own recovery signal and left the user a
+        // dead spectrum meter for the rest of the screen, with even the
+        // device picker unable to revive it. Both are idempotent-guarded
+        // because a failed `start()` leaves the engine stopped, so a
+        // retry re-enters here.
+        if configChangeObserver == nil {
+            configChangeObserver = NotificationCenter.default.addObserver(
+                forName: .AVAudioEngineConfigurationChange,
+                object: engine,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.rebuild() }
+            }
         }
 
         // Restart the engine when the user picks a different input device
         // from the picker on the same screen. `AudioDeviceManager` is
         // `@Observable`, so we watch `selectedUID` via a
         // `withObservationTracking` loop instead of a Combine sink.
-        deviceObservationTask = Task { @MainActor [weak self] in
-            // Skip the initial value (matches the prior `.dropFirst()`).
-            _ = AudioDeviceManager.shared.selectedUID
-            while !Task.isCancelled {
-                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                    withObservationTracking {
-                        _ = AudioDeviceManager.shared.selectedUID
-                    } onChange: {
-                        cont.resume()
+        if deviceObservationTask == nil {
+            deviceObservationTask = Task { @MainActor [weak self] in
+                // Skip the initial value (matches the prior `.dropFirst()`).
+                _ = AudioDeviceManager.shared.selectedUID
+                while !Task.isCancelled {
+                    await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                        withObservationTracking {
+                            _ = AudioDeviceManager.shared.selectedUID
+                        } onChange: {
+                            cont.resume()
+                        }
                     }
+                    if Task.isCancelled { return }
+                    self?.rebuild()
                 }
-                if Task.isCancelled { return }
-                self?.rebuild()
             }
+        }
+
+        do {
+            try installTapAndStart()
+        } catch {
+            // Deliberately not a teardown: the observers above stay armed
+            // so the next config change or device pick retries.
+            Self.log.error("mic probe start failed: \(error.localizedDescription, privacy: .public)")
+            return
         }
     }
 
@@ -142,12 +169,22 @@ final class MicProbe: @unchecked Sendable {
     ///
     /// `deinit` runs nonisolated (MicProbe is `@unchecked Sendable`, not
     /// `@MainActor`), so it can't call the `@MainActor stop()`; it repeats
-    /// the same steps inline against this now-unreferenced instance. All
-    /// calls are deinit-safe: `Task.cancel()` and
-    /// `NotificationCenter.removeObserver` are thread-safe, and the engine
-    /// teardown touches only `self` (no concurrent access at dealloc).
-    /// Idempotent after `stop()` — every field is already cleared, so each
-    /// branch is a no-op on the normal path.
+    /// the same steps inline against this now-unreferenced instance.
+    /// `Task.cancel()` and `NotificationCenter.removeObserver` are
+    /// thread-safe. Idempotent after `stop()` — every field is already
+    /// cleared, so each branch is a no-op on the normal path, which is
+    /// also the only path this net is *expected* to run on.
+    ///
+    /// **Known pre-existing hazard, unchanged by the R10 fix.** The tap
+    /// block's `self?` upgrade is the one strong reference the realtime
+    /// thread ever holds, so if the main thread drops the `@State` box
+    /// while a tap callback is in flight, the realtime thread performs the
+    /// last release and `deinit` — hence `removeTap` and `engine.stop()` —
+    /// runs there. Reaching that needs a probe released *without* `stop()`
+    /// while audio is flowing; on the normal `.onDisappear` path `stop()`
+    /// has already cleared the gate and this is all no-ops. Do not "fix"
+    /// it by hopping to the main queue: that is KTD5's rejected
+    /// containment shape, and a deinit cannot outlive itself to await one.
     ///
     /// **The tap gate goes through `removeTapIfInstalled()`, which takes
     /// `lock` (R10).** Dealloc can land on any thread — SwiftUI holds the
@@ -213,21 +250,27 @@ final class MicProbe: @unchecked Sendable {
             throw MicProbe.Error.converterCreateFailed
         }
 
-        // A stale tap has to come off before a new one goes on, and
-        // `removeTap` on an untapped bus is itself a raise site — so it
-        // goes through the gate like every other call.
-        removeTapIfInstalled()
-
         // THE single read. Both the converter and the tap are built from
         // this exact value: re-reading for one of them would trade the
         // crash for a permanently dead meter, because `handleTap` feeds
         // every buffer through `converter`.
         let inFmt = input.outputFormat(forBus: 0)
+        let candidate = MicProbeFormatGate.Shape(inFmt)
 
-        // Returns nil for a dead node (0 Hz / 0 ch — no input device, or
-        // microphone permission not granted), which is how the no-input
-        // case exits before anything touches the tap. Verified: AVFAudio
-        // returns nil here rather than raising.
+        // Positivity is validated BEFORE the converter, not after. A dead
+        // node (0 Hz / 0 ch — no input device, or microphone permission
+        // not granted) handed to `AVAudioConverter(from:to:)` is an
+        // Objective-C initializer called with an unvalidated argument
+        // from inside a main-actor `Task` — the exact shape this fix
+        // exists to remove, and "verified empirically that it returns
+        // nil" is an observation, not a precondition. Checking here also
+        // keeps the two non-positive rejections reachable in production,
+        // so the log names the dead node instead of a downstream
+        // converter failure.
+        if let rejection = MicProbeFormatGate.positivityRejection(candidate) {
+            throw Self.notInstallable(rejection, candidate: candidate, live: candidate)
+        }
+
         guard let conv = AVAudioConverter(from: inFmt, to: outFmt) else {
             throw MicProbe.Error.converterCreateFailed
         }
@@ -236,22 +279,21 @@ final class MicProbe: @unchecked Sendable {
         // landed while the converter above was being built. This shrinks
         // the race window to one call; it does not close it (see
         // `MicProbeFormatGate`).
-        let live = input.outputFormat(forBus: 0)
-        if let rejection = MicProbeFormatGate.rejection(
-            candidate: .init(inFmt),
-            live: .init(live)
-        ) {
-            Self.log.error(
-                """
-                mic probe tap skipped: \(rejection.description, privacy: .public) \
-                (candidate \(inFmt.sampleRate, privacy: .public) Hz / \
-                \(inFmt.channelCount, privacy: .public) ch, live \
-                \(live.sampleRate, privacy: .public) Hz / \
-                \(live.channelCount, privacy: .public) ch)
-                """
-            )
-            throw MicProbe.Error.inputFormatNotInstallable(rejection)
+        let live = MicProbeFormatGate.Shape(input.outputFormat(forBus: 0))
+        if let rejection = MicProbeFormatGate.rejection(candidate: candidate, live: live) {
+            throw Self.notInstallable(rejection, candidate: candidate, live: live)
         }
+
+        // **Nothing above this line mutates the tap.** Every throw path
+        // so far leaves an already-running probe exactly as it was, which
+        // is what makes a rejection recoverable: `rebuild()` stops the
+        // engine before calling in, and a stopped engine posts no further
+        // `.AVAudioEngineConfigurationChange`, so tearing the old tap down
+        // first would strand the meter on the one signal that could not
+        // arrive. A stale tap still has to come off before a new one goes
+        // on, and `removeTap` on an untapped bus is its own raise site —
+        // hence the gate rather than a bare call.
+        removeTapIfInstalled()
 
         // Written between `removeTap` and `installTap`, so the realtime
         // tap callback can never observe a half-updated converter /
@@ -271,6 +313,27 @@ final class MicProbe: @unchecked Sendable {
             removeTapIfInstalled()
             throw MicProbe.Error.engineStartFailed(error)
         }
+    }
+
+    /// Log the rejection with the numbers behind it, then hand back the
+    /// error to throw. One shape of log line for both gate call sites —
+    /// the `errorDescription` the caller logs carries the reason but not
+    /// the rates, and the rates are what a Step 9 diagnostic read needs.
+    private static func notInstallable(
+        _ rejection: MicProbeFormatGate.Rejection,
+        candidate: MicProbeFormatGate.Shape,
+        live: MicProbeFormatGate.Shape
+    ) -> MicProbe.Error {
+        log.error(
+            """
+            mic probe tap skipped: \(rejection.description, privacy: .public) \
+            (candidate \(candidate.sampleRate, privacy: .public) Hz / \
+            \(candidate.channelCount, privacy: .public) ch, live \
+            \(live.sampleRate, privacy: .public) Hz / \
+            \(live.channelCount, privacy: .public) ch)
+            """
+        )
+        return .inputFormatNotInstallable(rejection)
     }
 
     /// Test-and-clear the tap gate, then remove the tap iff one was
