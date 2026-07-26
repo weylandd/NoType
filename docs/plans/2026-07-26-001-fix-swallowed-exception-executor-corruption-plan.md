@@ -18,7 +18,7 @@ supersedes: docs/plans/2026-07-25-001-fix-macos-26-executor-crash-plan.md
 - **Authority.** `docs/solutions/runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md` is the source of truth for the mechanism. Success is defined by the reporter on issue #82 — the only machine known to reproduce.
 - **Confidence boundary, and it must not drift.** The **mechanism is proven** (reproduced locally on Swift 6.3.3 / macOS 26 SDK). **Which of NoType's calls throws is not.** Every thrower named below is a ranked suspect from a static + runtime audit, and none has been observed firing in the wild. There may be more than one.
 - **Stop condition.** The reporter completes onboarding and operates the UI without a crash, and the interceptor logs nothing. A round that still crashes is a completed round with a negative result — record it and move on, do not retry it in variations.
-- **Open blockers.** None. Two maintainer call-outs are listed under Outstanding Questions; neither blocks Step 1.
+- **Open blockers.** None. Both maintainer call-outs are settled: the breadcrumb gets no user-facing surface (KD6) and the fixes ship in a single hand-off round (KTD1).
 
 ---
 
@@ -45,6 +45,7 @@ The process failure cost more than the bug. The answer — a parked background t
 - KD3. **The executor check stays enabled.** No runtime knob, no build setting, no suppression. It has already earned its keep by catching a genuine actor-isolation violation on the Core Audio HAL thread. Suppressing it would trade a loud crash for a silent data race — and it could not work anyway, because the fault happens before the check-mode options word is read. Governs R14.
 - KD4. **"Fixed" means the reporter stops crashing.** Proving which exception fired is desirable and is what Step 1 buys, but it is not the completion bar. Governs R17.
 - KD5. **No reporter build reaches the appcast.** Hand-off builds go to the reporter directly; publishing an rc to `docs/appcast.xml` would serve it to every installed copy. Governs R21.
+- KD6. **The breadcrumb gets no user-facing surface — documentation only.** (session-settled: user-approved — chosen over a Settings → About "Copy diagnostics" button that dumps the last `.fault` lines to the clipboard: the interceptor already writes to the system log, so the README's `log show` recipe, sitting next to the existing `NSApplicationCrashOnExceptions` one, costs zero new UI to design, test and maintain, and the population that files GitHub issues can run a command. Revisitable if a non-technical reporter ever needs it.) Governs R8.
 
 ### Requirements
 
@@ -141,10 +142,12 @@ The process failure cost more than the bug. The answer — a parked background t
 
 ### Outstanding Questions
 
-Both are **deferred**, not blocking. Step 1 proceeds regardless.
+**Settled by the maintainer** — both prior call-outs took the plan's own default and are now recorded as decisions:
 
-- **Does the diagnostic breadcrumb get a user-facing surface?** The default in this plan is documentation only: the README already carries the `NSApplicationCrashOnExceptions` recipe, and Step 2 adds the `log show` retrieval command next to it. The alternative is a Settings → About "Copy diagnostics" button that dumps the last `.fault` lines to the clipboard. That is user-visible surface area, so it is a maintainer call — the plan proceeds with documentation only unless told otherwise.
-- **One hand-off round or two?** The default is one round carrying the interceptor plus every unconditional fix (KTD1). The alternative — interceptor first, fixes second — buys a cleaner attribution record at the cost of one extra reporter round-trip. Reporter patience is the scarce resource here; the maintainer knows it better than the plan does.
+- Does the diagnostic breadcrumb get a user-facing surface? Resolved as **documentation only** — no Settings → About "Copy diagnostics" button (KD6).
+- One hand-off round or two? Resolved as **one**, carrying the interceptor plus every unconditional fix (KTD1).
+
+None open.
 
 ---
 
@@ -152,7 +155,7 @@ Both are **deferred**, not blocking. Step 1 proceeds regardless.
 
 ### Key Technical Decisions
 
-- KTD1. **Ship the interceptor and the unconditional fixes in one hand-off round.** The superseded plan's "one lever per round" discipline existed because a bundled build could not be attributed. The interceptor removes that constraint: if a throw survives the bundle, it names itself; if it does not, Step 1's zero-build result already said which one it was. Reporter round-trips are the scarce resource at n=1. The discipline is superseded by better instrumentation, not abandoned — R3 still stands. Governs R3, R9–R12.
+- KTD1. **Ship the interceptor and the unconditional fixes in one hand-off round.** (session-settled: user-approved — chosen over interceptor first / fixes second: the interceptor makes a bundled round self-attributing, because its `.fault` log names which raise site actually fired, so the superseded plan's "one lever per stage" discipline is *superseded by better instrumentation*, not abandoned. Secondary: the reporter has already spent one round on a build that did not fix anything and cannot use the app at all, so their patience is a real constraint.) If a throw survives the bundle, it names itself; if it does not, Step 1's zero-build result already said which one it was. R3 still stands — a round that still crashes is a completed round with a negative result. Governs R3, R9–R12.
 - KTD2. **Reach `objc_setExceptionPreprocessor` through `dlsym(RTLD_DEFAULT, …)`, not a bridging header.** The repo is pure Swift; adding an Objective-C compilation unit and a bridging header for one symbol is disproportionate, and `@_silgen_name` against a public C API is worse. Validated from Swift on this toolchain. Governs R4.
 - KTD3. **Log at `.fault`.** `.info` is not persisted to the unified log store, so a user could not retrieve it after the fact — the repo already learned this (see `reference-log-binary-shadowed`). `.fault` lands in the persistent store and survives until the reporter runs `log show`. Governs R5.
 - KTD4. **The interceptor is always on in release, with no flag.** It is a single function-pointer swap costing nothing when nothing throws, it is public API since 10.5, it is process-local (no code injection, no `DYLD_INSERT_LIBRARIES`), and it needs no entitlement — non-sandboxed hardened runtime is irrelevant to it. Gating it behind a debug flag would guarantee it is off on exactly the machines that need it. Governs R5, R7, R8.
@@ -220,7 +223,7 @@ Driven as an **Execution Sequence** — Steps are numbered in execution order, e
 ### Step 2 — U2. Permanent Objective-C exception interceptor
 
 - **Goal:** every exception this app raises names itself in the log, including the ones AppKit swallows.
-- **Requirements:** R4, R5, R6, R7, R8. Implements KD2, KTD2, KTD3, KTD4.
+- **Requirements:** R4, R5, R6, R7, R8. Implements KD2, KD6, KTD2, KTD3, KTD4.
 - **Dependencies:** none. Independent of U1.
 - **Files:** `NoType/Diagnostics/ExceptionBreadcrumb.swift` (new), `NoType/NoTypeApp.swift`, `README.md`, `NoTypeTests/ExceptionBreadcrumbTests.swift` (new), `project.yml` (only if a new folder needs declaring — the target globs `NoType/`, so verify before touching it)
 - **Approach:**
@@ -228,7 +231,7 @@ Driven as an **Execution Sequence** — Steps are numbered in execution order, e
   2. Resolve `objc_setExceptionPreprocessor` via `dlsym` against `RTLD_DEFAULT` (KTD2) and install a preprocessor that logs and returns its argument unchanged (R6).
   3. Log `name`, `reason`, `Thread.isMainThread`, and a bounded prefix of `Thread.callStackSymbols` at `.fault` under subsystem `app.notype`, category `exception`, with `privacy: .public` on the fields so they are readable in `log show`. Bound the stack depth — an unbounded symbol join in a preprocessor that may fire repeatedly is its own hazard.
   4. Call `ExceptionBreadcrumb.install()` as the **first statement of `NoTypeApp.init()`**. That is before every type the initializer constructs, and well before the T+3.5 s throw observed in the reporter's report.
-  5. Add the retrieval command to the README's `## Known issues` block, next to the existing `NSApplicationCrashOnExceptions` recipe: `/usr/bin/log show --last 30m --predicate 'subsystem == "app.notype" AND category == "exception"' --style compact`. Use the absolute path — `log` is shadowed on at least one dev machine's shell profile, and a user hitting the same is a lost report.
+  5. Add the retrieval command to the README's `## Known issues` block, next to the existing `NSApplicationCrashOnExceptions` recipe: `/usr/bin/log show --last 30m --predicate 'subsystem == "app.notype" AND category == "exception"' --style compact`. Use the absolute path — `log` is shadowed on at least one dev machine's shell profile, and a user hitting the same is a lost report. **This README recipe is the breadcrumb's entire user-facing surface (KD6)** — no Settings → About affordance ships with it.
 - **Patterns to follow:** `AppState.prime()`'s single `.info` breadcrumb (`NoType/AppState.swift`) — the same "one line that distinguishes *never ran* from *ran and found nothing*" reasoning, one level up.
 - **Risk — do not let this trip the launch-ordering guard.** `NoTypeTests/LaunchOrderingTests.swift` scans every type reachable by construction from `NoTypeApp.init()`, transitively through same-file calls and stored-property defaults, for `Task {`-family literals and `NSApp` references. `install()` contains neither, and it is a static call rather than a construction, so it should not be discovered at all — confirm by running the suite, not by reading the test.
 - **Test scenarios:**
@@ -344,7 +347,7 @@ Driven as an **Execution Sequence** — Steps are numbered in execution order, e
 - **Dependencies:** none. Can run any time.
 - **Files:** `docs/plans/2026-07-25-001-fix-macos-26-executor-crash-plan.md`, `NoTypeTests/LaunchOrderingTests.swift`, `NoType/Info.plist`
 - **Approach:**
-  1. **Supersede (R19).** Add a superseded banner at the top of the old plan pointing here, naming what shipped from it (stage B′ = `bfcec4a`, U9, U15) and what is retired (stage C's SDK pin, stage A's `Button` migration) with the reason: its premise — "Apple broke SwiftUI, work around it" — is disproven. Do not delete it; it holds the KD6 check-mode disproof, which is correct reasoning even though it answers the wrong question.
+  1. **Supersede (R19).** Add a superseded banner at the top of the old plan pointing here, naming what shipped from it (stage B′ = `bfcec4a`, U9, U15) and what is retired (stage C's SDK pin, stage A's `Button` migration) with the reason: its premise — "Apple broke SwiftUI, work around it" — is disproven. Do not delete it; it holds **that plan's own KD6** check-mode disproof (not this plan's KD6), which is correct reasoning even though it answers the wrong question.
   2. **Correct the test doc-comment (R20).** `NoTypeTests/LaunchOrderingTests.swift`'s class doc-comment calls the launch-ordering rule "the leading hypothesis for the macOS 26.2 executor-identity crash family." It is disproven. Rewrite to match the framing already live in `NoType/UI/CLAUDE.md` "Launch ordering": the rule stands on its own merits as a latent-ordering fix, and it is **not** coverage of this crash. Change only the doc-comment — the scan's depth and needle-list rationale in the same comment is load-bearing and stays.
   3. **Version (R21).** Keep `CFBundleShortVersionString` at `0.1.13-rc1`; bump `CFBundleVersion` from `15` for the hand-off build. `v0.1.13-rc1` was never tagged or released, so the string is free to reuse. Edit `NoType/Info.plist` with the Edit tool — `PlistBuddy` reorders keys and drops the file's XML comments.
 - **Test expectation:** none — documentation and metadata only. The `LaunchOrderingTests` suite must still pass after the comment edit.
@@ -357,10 +360,10 @@ Driven as an **Execution Sequence** — Steps are numbered in execution order, e
 - **Dependencies:** U2, U3, U4, U5, U8 (and U6 when it fired).
 - **Files:** `README.md`, `docs/solutions/runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md` — plus the issue.
 - **Approach:**
-  1. Build a signed artifact the reporter can launch. `scripts/release.sh` is run by the **human**, not by an agent — it talks to Apple's notary service and ships a real binary.
+  1. Build a signed artifact the reporter can launch — **one** build carrying U2–U5 (and U6 when it fired), per KTD1. `scripts/release.sh` is run by the **human**, not by an agent — it talks to Apple's notary service and ships a real binary.
   2. Ask them to complete onboarding, exercise buttons across the main window and popover, and then run the README's `log show` command **whether or not it crashed**. The log is a result in both directions: silence after a clean run is the strongest confirmation available; an `OBJC THROW` line after a clean run means a thrower survives that this plan did not enumerate (AE3).
   3. Record the outcome on issue #82 with their macOS build and the app build (R2). A crash is a completed round with a negative result and the interceptor's log names the next target (R3).
-  4. **On confirmation (R18):** remove the `## Known issues` block from `README.md` — but keep the `log show` retrieval command somewhere durable, since the interceptor is permanent. Rewrite the family entry's "Suspected throwers — NOT confirmed" section into the named cause, keeping the ranked list as history so a future recurrence starts from evidence. Cross-link the closing commit. Close issue #82.
+  4. **On confirmation (R18):** remove the `## Known issues` block from `README.md` — but keep the `log show` retrieval command in the README, since the interceptor is permanent and that command stays its only surface (KD6; do not substitute an in-app affordance on the way out). Rewrite the family entry's "Suspected throwers — NOT confirmed" section into the named cause, keeping the ranked list as history so a future recurrence starts from evidence. Cross-link the closing commit. Close issue #82.
   5. **State the limit plainly in the closing note.** The maintainer's machine does not reproduce the crash. Local gates proved only that behaviour did not regress; the reporter's result is the only evidence that matters, and it is n=1.
 - **Test expectation:** none — the verification is the reporter's report, captured by F1.
 - **Done when:** issue #82 carries the verification outcome with both build strings, and either the issue is closed with the README note removed and the family entry updated, or the negative result is recorded and the interceptor's log has named the next target.
@@ -389,13 +392,13 @@ Do not launch the built app from an agent (it installs a `CGEventTap`, a mic rec
 ## Definition of Done
 
 - The zero-build diagnostic result, the reporter's macOS build, their onboarding step, and their audio device list are recorded on issue #82.
-- `ExceptionBreadcrumb.install()` is the first statement of `NoTypeApp.init()`, ships in release, logs at `.fault`, returns exceptions unchanged, and is pinned by a presence assertion so deleting the call goes red.
+- `ExceptionBreadcrumb.install()` is the first statement of `NoTypeApp.init()`, ships in release, logs at `.fault`, returns exceptions unchanged, and is pinned by a presence assertion so deleting the call goes red. Its only user-facing surface is the README's `log show` recipe — no in-app diagnostics affordance ships (KD6).
 - Every `installTap` / `removeTap` in `MicProbe.swift`, every geometry call in `HUDPanel.swift`, and `FixedSizeWindowConfigurator.lock` are behind a validated precondition; `MicProbe.deinit` reads no lock-guarded state unguarded.
 - U6 either fired on U1's evidence or is recorded as intentionally skipped for lack of it.
 - The main-actor-job convention and its audit list are in `NoType/UI/CLAUDE.md`; the rejection of a general source scan and the containment escalation are recorded in the family entry; the U7 guard was observed failing red before being trusted.
 - The superseded plan carries a banner pointing here, and `LaunchOrderingTests`' doc-comment no longer calls the launch-ordering rule a live hypothesis for this family.
 - `CFBundleVersion` is incremented for the hand-off build, and no rc build reached `docs/appcast.xml`.
-- The verification round is recorded on issue #82 — and on confirmation, the README known-issue note is removed, the family entry's suspect list is replaced by the named cause, and the issue is closed.
+- The verification round — a single hand-off build carrying U2–U5, and U6 when it fired (KTD1) — is recorded on issue #82; and on confirmation, the README known-issue note is removed while its `log show` retrieval command stays, the family entry's suspect list is replaced by the named cause, and the issue is closed.
 - No dead-end or experimental code from an abandoned approach remains in the diff.
 
 ---
