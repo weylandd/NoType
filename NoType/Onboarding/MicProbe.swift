@@ -35,19 +35,25 @@ final class MicProbe: @unchecked Sendable {
     enum Error: Swift.Error, LocalizedError {
         case engineStartFailed(Swift.Error)
         case converterCreateFailed
+        /// The input node's live format wasn't installable as a tap
+        /// format — see `MicProbeFormatGate`. Surfaces as a flat
+        /// spectrum meter, this screen's documented failure mode, in
+        /// place of an Objective-C raise out of a main-actor `Task`.
+        case inputFormatNotInstallable(MicProbeFormatGate.Rejection)
 
         var errorDescription: String? {
             switch self {
             case .engineStartFailed(let e): "Couldn't start audio engine: \(e.localizedDescription)"
             case .converterCreateFailed:    "Couldn't create audio converter."
+            case .inputFormatNotInstallable(let reason): "Couldn't tap the microphone: \(reason)."
             }
         }
     }
 
     private let engine = AVAudioEngine()
+    /// Guards `pcm` and `tapInstalled`.
     private let lock = NSLock()
     private var converter: AVAudioConverter?
-    private var inputFormat: AVAudioFormat?
     private var outputFormat: AVAudioFormat?
     private var pcm: [Float] = []
     /// 4 × AudioSpectrum.fftLength (1024) — hardcoded because reading
@@ -55,6 +61,9 @@ final class MicProbe: @unchecked Sendable {
     /// non-isolated class's stored-property initializer is rejected
     /// under strict concurrency.
     private let bufferCapacity = 4096
+    /// Sole gate on every `removeTap` call. Guarded by `lock` because
+    /// `deinit` runs nonisolated on whatever thread drops the last
+    /// reference — see `removeTapIfInstalled()`.
     private var tapInstalled = false
     private var deviceObservationTask: Task<Void, Never>?
     private var configChangeObserver: NSObjectProtocol?
@@ -117,10 +126,7 @@ final class MicProbe: @unchecked Sendable {
             NotificationCenter.default.removeObserver(observer)
             configChangeObserver = nil
         }
-        if tapInstalled {
-            engine.inputNode.removeTap(onBus: 0)
-            tapInstalled = false
-        }
+        removeTapIfInstalled()
         if engine.isRunning {
             engine.stop()
         }
@@ -143,6 +149,17 @@ final class MicProbe: @unchecked Sendable {
     /// Idempotent after `stop()` — every field is already cleared, so each
     /// branch is a no-op on the normal path.
     ///
+    /// **The tap gate goes through `removeTapIfInstalled()`, which takes
+    /// `lock` (R10).** Dealloc can land on any thread — SwiftUI holds the
+    /// probe in `@State`, so `OnboardingMicCheckStep` allocates and drops
+    /// throwaway instances on body passes — and reading `tapInstalled`
+    /// without the lock has no acquire edge against the main thread's
+    /// write. A stale `false` leaks the tap and leaves the mic light on; a
+    /// stale `true` double-removes and raises out of AVFAudio. The other
+    /// two fields read here are not lock-guarded state: they are written
+    /// on the main actor only and, with no live reference left, nothing
+    /// can be writing them concurrently.
+    ///
     /// We deliberately do NOT resume the device-observation continuation
     /// from here: the `Task` captures `self` weakly and holds no mic, so a
     /// still-parked continuation is a benign leak that resolves on the next
@@ -153,9 +170,7 @@ final class MicProbe: @unchecked Sendable {
         if let observer = configChangeObserver {
             NotificationCenter.default.removeObserver(observer)
         }
-        if tapInstalled {
-            engine.inputNode.removeTap(onBus: 0)
-        }
+        removeTapIfInstalled()
         if engine.isRunning {
             engine.stop()
         }
@@ -172,12 +187,23 @@ final class MicProbe: @unchecked Sendable {
 
     // MARK: - Internals
 
+    /// Build the converter, install the tap, start the engine.
+    ///
+    /// **Statement order is load-bearing.** `AudioDeviceManager.apply`'s
+    /// `AudioUnitSetProperty(CurrentDevice)` is asynchronous, so the node's
+    /// format can change under us mid-setup; `installTap` with a format the
+    /// node no longer reports raises an Objective-C exception, and this
+    /// method is reachable from two `Task { @MainActor }` bodies where such
+    /// a raise corrupts the thread's executor identity (see
+    /// `MicProbeFormatGate`). So: everything device-independent is built
+    /// first, the node format is read **once**, both the converter and the
+    /// tap are derived from that one read, and the read is re-validated
+    /// against the live node immediately before the tap goes in.
     private func installTapAndStart() throws {
         let input = engine.inputNode
-        let inFmt = input.outputFormat(forBus: 0)
-        guard inFmt.sampleRate > 0, inFmt.channelCount > 0 else {
-            throw MicProbe.Error.converterCreateFailed
-        }
+
+        // Device-independent — built before the node-format read so it
+        // isn't work sitting between that read and the tap install.
         guard let outFmt = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: 16_000,
@@ -186,30 +212,87 @@ final class MicProbe: @unchecked Sendable {
         ) else {
             throw MicProbe.Error.converterCreateFailed
         }
+
+        // A stale tap has to come off before a new one goes on, and
+        // `removeTap` on an untapped bus is itself a raise site — so it
+        // goes through the gate like every other call.
+        removeTapIfInstalled()
+
+        // THE single read. Both the converter and the tap are built from
+        // this exact value: re-reading for one of them would trade the
+        // crash for a permanently dead meter, because `handleTap` feeds
+        // every buffer through `converter`.
+        let inFmt = input.outputFormat(forBus: 0)
+
+        // Returns nil for a dead node (0 Hz / 0 ch — no input device, or
+        // microphone permission not granted), which is how the no-input
+        // case exits before anything touches the tap. Verified: AVFAudio
+        // returns nil here rather than raising.
         guard let conv = AVAudioConverter(from: inFmt, to: outFmt) else {
             throw MicProbe.Error.converterCreateFailed
         }
-        self.inputFormat = inFmt
+
+        // Re-validated as late as possible: a device switch may have
+        // landed while the converter above was being built. This shrinks
+        // the race window to one call; it does not close it (see
+        // `MicProbeFormatGate`).
+        let live = input.outputFormat(forBus: 0)
+        if let rejection = MicProbeFormatGate.rejection(
+            candidate: .init(inFmt),
+            live: .init(live)
+        ) {
+            Self.log.error(
+                """
+                mic probe tap skipped: \(rejection.description, privacy: .public) \
+                (candidate \(inFmt.sampleRate, privacy: .public) Hz / \
+                \(inFmt.channelCount, privacy: .public) ch, live \
+                \(live.sampleRate, privacy: .public) Hz / \
+                \(live.channelCount, privacy: .public) ch)
+                """
+            )
+            throw MicProbe.Error.inputFormatNotInstallable(rejection)
+        }
+
+        // Written between `removeTap` and `installTap`, so the realtime
+        // tap callback can never observe a half-updated converter /
+        // output-format pair.
         self.outputFormat = outFmt
         self.converter = conv
 
-        if tapInstalled {
-            input.removeTap(onBus: 0)
-            tapInstalled = false
-        }
         input.installTap(onBus: 0, bufferSize: 1024, format: inFmt) { [weak self] buffer, _ in
             self?.handleTap(buffer)
         }
-        tapInstalled = true
+        lock.lock(); tapInstalled = true; lock.unlock()
 
         do {
             engine.prepare()
             try engine.start()
         } catch {
-            input.removeTap(onBus: 0)
-            tapInstalled = false
+            removeTapIfInstalled()
             throw MicProbe.Error.engineStartFailed(error)
         }
+    }
+
+    /// Test-and-clear the tap gate, then remove the tap iff one was
+    /// installed. **The only place `removeTap` is called** — mutating a
+    /// bus that carries no tap is its own AVFAudio raise site, so the
+    /// gate has to be structural rather than local reasoning about the
+    /// two lines above the call (which is what the `engine.start()`
+    /// failure path used to rely on).
+    ///
+    /// `tapInstalled` is read and cleared in a single `lock` acquisition
+    /// so two callers can't both decide to remove, and so `deinit` —
+    /// which runs nonisolated on whatever thread drops the last
+    /// reference — never reads it unguarded (R10). `engine.inputNode` is
+    /// touched only after the gate opens, i.e. only on a probe that
+    /// already reached it once.
+    private func removeTapIfInstalled() {
+        lock.lock()
+        let wasInstalled = tapInstalled
+        tapInstalled = false
+        lock.unlock()
+        guard wasInstalled else { return }
+        engine.inputNode.removeTap(onBus: 0)
     }
 
     @MainActor
