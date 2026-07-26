@@ -16,12 +16,20 @@ Early beta. The core push-to-talk → transcribe → paste loop works end-to-end
 
 ## Known issues
 
-**macOS 26.2 (build 25C56) — clicking anything inside NoType crashes it.** On this macOS build a Swift concurrency runtime check faults inside SwiftUI's own button-gesture code, so every button tap in NoType's windows takes the app down. It isn't specific to one screen or one button.
+**On macOS 26, clicking inside NoType can crash it — and it can block setup.** Reported so far only on macOS 26.2 (build 25C56), and not on every Mac.
 
-- **New installs are blocked.** The onboarding wizard's primary control is a stock SwiftUI button, so a new user can't finish setup at all.
-- **Existing installs can still dictate.** Push-to-talk runs through `CGEventTap`, not SwiftUI's button dispatch — hold the hotkey, talk, release, and the transcript still pastes. Only clicking inside NoType's own windows crashes.
+- **Setting up can be impossible.** The onboarding wizard is driven by ordinary buttons, so if the crash hits you, you may not be able to finish setup at all.
+- **If you're already set up, dictation still works.** Push-to-talk doesn't go through the code path that crashes — hold the hotkey, talk, release, and the transcript still pastes. Only clicking inside NoType's own windows is affected.
 
-**Possible workaround: update macOS past 26.2.** Unconfirmed — every report so far is from build 25C56, and the crash doesn't reproduce on any machine we can test on, so we can't say whether a later build actually fixes it. It's still the first thing worth trying. Tracked in [issue #82](https://github.com/weylandd/NoType/issues/82) — please report your macOS build there either way, especially if you hit this on something other than 25C56, because that changes the diagnosis.
+**This is our bug, not macOS's.** An earlier version of this note blamed the macOS build and suggested updating macOS. That was wrong: NoType raises an internal error that macOS quietly absorbs, which leaves the app in a broken state until it falls over a moment later at some unrelated click. We've now reproduced that mechanism and know what to look for. Updating macOS is not expected to fix it, and we don't have a workaround to offer yet — we'd rather say that than send you chasing one. A fix is in progress; we won't put a date on it.
+
+**If it's hitting you, one thing genuinely helps.** Run this in Terminal, reproduce the crash, and attach the new crash report to [issue #82](https://github.com/weylandd/NoType/issues/82) along with your macOS build:
+
+```bash
+defaults write app.notype NSApplicationCrashOnExceptions -bool YES
+```
+
+That makes NoType crash *at* the underlying error instead of hiding it, so the report names the real culprit. Undo it any time with `defaults delete app.notype NSApplicationCrashOnExceptions`. NoType has no telemetry, so reports like this are the only way we see the problem at all.
 
 ---
 
