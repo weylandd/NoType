@@ -1,6 +1,7 @@
 ---
 title: The macOS 26 executor-identity crash family is a swallowed ObjC exception, not a bad call site
 date: 2026-07-25
+last_updated: 2026-07-26
 category: runtime-errors
 module: UI
 problem_type: best_practice
@@ -67,7 +68,14 @@ Then, in order:
 
    The process now dies *at the throw*. Revert with `defaults delete app.notype NSApplicationCrashOnExceptions`. Caveat: it only affects exceptions that reach AppKit's top-level handler — one caught by an intermediate `@try` (Sparkle, CoreML internals) stays invisible, which is itself informative.
 
-2. **If that isn't enough, install `objc_setExceptionPreprocessor` as the first statement of app startup.** It runs at `objc_exception_throw` time, before any unwinding, so `Thread.callStackSymbols` inside it captures the throwing stack. Public API since 10.5, process-local (a function-pointer swap — no code injection, no `DYLD_INSERT_LIBRARIES`), no entitlement, fine under non-sandboxed hardened runtime, zero cost when nothing throws. Log at `.fault` so it lands in the persistent store and the reporter can retrieve it with `/usr/bin/log show`.
+2. **If that isn't enough, install `objc_setExceptionPreprocessor` as the first statement of app startup.** It runs at `objc_exception_throw` time, before any unwinding, so `Thread.callStackSymbols` inside it captures the throwing stack. Public API since 10.5, process-local (a function-pointer swap — no code injection, no `DYLD_INSERT_LIBRARIES`), no entitlement, fine under non-sandboxed hardened runtime, zero cost when nothing throws. Log at `.fault` so it lands in the persistent store and the reporter can retrieve it with `/usr/bin/log show`. Shipped for NoType as `NoType/Diagnostics/ExceptionBreadcrumb.swift`, installed as the first statement of `NoTypeApp.init()`.
+
+   Two properties of that install are load-bearing, and both look like tidiness if you don't know better:
+
+   - **Chain outward to whatever you replaced. This is correctness, not hygiene.** `objc_setExceptionPreprocessor` returns the preprocessor it displaced, and Foundation already has one installed — so an interceptor that discards the returned pointer is not merely losing a hop. Foundation's preprocessor is what populates `NSException.callStackReturnAddresses`, and HIToolbox asserts on that field: `Assertion failed: (callStackReturnAddresses), -[NSException(HIServices) hashString], HIExceptions.mm:45` → `SIGABRT`. Measured, not argued — a freshly constructed `NSException` carries **0** return addresses, and non-empty (3, in the probe) after passing through the chained hook. Dropping the chain therefore converts every exception AppKit currently swallows into an instant crash on every machine, which is strictly worse than the latent bug the interceptor was added to diagnose.
+   - **The swap and the store of the replaced pointer must share one critical section.** `objc_setExceptionPreprocessor` publishes your hook to the whole process the instant it returns. Publishing first and storing the previous pointer one statement later leaves a window in which a throw on another thread reads the chain as `nil` and skips the preprocessor you just replaced — which lands on the same `HIExceptions.mm:45` abort above, not on a merely-missing breadcrumb. `ExceptionBreadcrumb.State.performInstall` does the `dlsym`, the swap and the store under one `NSLock`; readers of the chained pointer take that same lock, so they block for the couple of instructions the swap costs instead of observing the gap.
+
+   Neither property is visible from a passing test suite by default — see [`source-scan-guard-fidelity`](../conventions/source-scan-guard-fidelity-2026-07-25.md), whose hook-guard section is drawn from this interceptor's own review.
 
 3. **`NSSetUncaughtExceptionHandler` does NOT work here.** AppKit catches the exception before it reaches the top-level handler. That is precisely why this went unseen across three incidents — the obvious hook is the one that never fires.
 
@@ -177,7 +185,10 @@ SwiftUI _ButtonGesture fires MainActor.assumeIsolated
 - [`onhover-mainactor-inheritance-crash-2026-05-19.md`](./onhover-mainactor-inheritance-crash-2026-05-19.md) — second same-signature incident (`0x1`); also the source of the `dsOnHover` shape and of the rejection of `MainActor.assumeIsolated` as its bridge. Its `.ips` is the report that carried the breadcrumb.
 - [`audio-ioproc-mainactor-inheritance-crash-2026-05-19.md`](./audio-ioproc-mainactor-inheritance-crash-2026-05-19.md) — the **counter-example**, not a member. Different thread, different signal, deterministic, no breadcrumb; genuine isolation violation, correctly and permanently fixed.
 - [`sender-respawn-race-2026-05-16.md`](./sender-respawn-race-2026-05-16.md) — sibling macOS 26 concurrency-runtime oddity from the same discovery window; different mechanism.
+- `NoType/Diagnostics/ExceptionBreadcrumb.swift` + `NoTypeTests/ExceptionBreadcrumbTests.swift` — the shipped interceptor from *Guidance* step 2, and the guards that pin its chaining and redaction contracts. Its user-facing surface is the README's `## Known issues` retrieval recipe.
+- [`conventions/source-scan-guard-fidelity-2026-07-25.md`](../conventions/source-scan-guard-fidelity-2026-07-25.md) — why three of that interceptor's guards were green for reasons unrelated to their claim, including the one that passed on the chain-dropped `SIGABRT` outcome.
 - `docs/plans/2026-07-25-001-fix-macos-26-executor-crash-plan.md` — the staged investigation this entry came out of. Its stage B′ shipped and returned a negative result; its KD6 check-mode disproof is correct but moot. Read it as history, not as the current plan.
+- `docs/plans/2026-07-26-001-fix-swallowed-exception-executor-corruption-plan.md` — the current plan, replanned from the proven mechanism above. Step 2 / U2 shipped the interceptor.
 - `GitHub issue weylandd/NoType#82` — the third incident, and where reporter results are recorded.
 - `NoType/UI/CLAUDE.md` — the two UI hard rules (`TimelineView` closure contents, `dsOnHover`) that mitigate the first two incidents, and the "Launch ordering" rule that stage B′ produced.
 - Upstream, same mechanism, Apple's own words: [swiftlang/swift#89197](https://github.com/swiftlang/swift/issues/89197) and [swiftlang/swift#86083](https://github.com/swiftlang/swift/issues/86083).

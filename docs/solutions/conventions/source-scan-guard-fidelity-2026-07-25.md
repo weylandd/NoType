@@ -1,6 +1,7 @@
 ---
 title: A source-scan guard that only asserts absence stays green while the feature is dead
 date: 2026-07-25
+last_updated: 2026-07-26
 category: conventions
 module: cross-cutting
 problem_type: convention
@@ -11,8 +12,10 @@ applies_when:
   - Moving work out of one place and into another, and adding a test to keep it out of the old place
   - Reviewing an existing source-scan test before relying on it as coverage
   - A convention-only rule keeps regressing and someone proposes a mechanical check
-tags: [testing, source-scan, convention-tests, guard-fidelity, launch-ordering, false-negative]
-related_components: [NoTypeApp, UI, Permissions]
+  - "Writing a guard whose subject is an installed hook, a swapped function pointer, a redaction rule, or the order of two steps"
+  - "A test fixture is chosen for convenience rather than for the real shape of the thing being matched"
+tags: [testing, source-scan, convention-tests, guard-fidelity, launch-ordering, false-negative, hook-installation]
+related_components: [NoTypeApp, UI, Permissions, Diagnostics]
 ---
 
 # A source-scan guard that only asserts absence stays green while the feature is dead
@@ -62,6 +65,16 @@ Four more ways the same guard was green while the rule was violable. Walk these 
 
 Two more that generalise beyond this file: **path filters must be anchored, not substring-matched** (`guard url.path.contains("/NoType/")`, commented "never index the test target", excluded nothing — the repo root is itself named `NoType`, so the filter's behaviour depended on what the clone directory was called), and **overloads must not collapse on name** (a `Task` in a second overload reachable from `init` was walked past).
 
+### The same trap one step out: a guard whose subject is an installed hook
+
+A source scan is the *clearest* instance because its subject is literally text, but the failure class is wider: **any guard whose subject is an installed thing — a swapped function pointer, a redaction rule, an ordering between two steps — can pass on the exact outcome it exists to prevent.** `ExceptionBreadcrumb` (the process-wide `objc_setExceptionPreprocessor` hook from the [executor-identity family](../runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md)) shipped with three such guards. All three were green; none was green for the reason it claimed.
+
+1. **An `Optional`-vs-non-optional comparison collapses on the failure case.** `test_install_isIdempotent_andRetainsTheReplacedPreprocessor` asserted that the hook is not chained to itself and that a second `install()` does not overwrite the captured pointer — both written as `chainedBefore.map(address)` comparisons. When the chain is dropped *entirely*, that expression is `nil`, so "is it our own hook?" reduces to `nil != Optional(ptr)` (true) and "was it retained?" to `nil == nil` (true). The one outcome that turns every swallowed exception into an immediate `HIExceptions.mm:45` `SIGABRT` satisfied all three assertions. The fix is two-part: assert the precondition (`XCTAssertNotNil(chainedBefore)`) *before* any comparison that can degenerate, and add an end-to-end proof the chain **runs** rather than merely being retained — a fresh `NSException` carries 0 `callStackReturnAddresses`, and non-empty after passing through the hook, because populating them is precisely what the replaced preprocessor does.
+2. **A fixture caught by a broader rule never exercises the specific rule the test names.** The Gemini-key scrub test used a 40-character stand-in, which `SecureFieldMasker`'s generic opaque-token catch-all (`\b[A-Za-z0-9_\-]{40,}\b`, `NoType/Context/SecureFieldMasker.swift:342`) redacts on its own. The rule the test claimed to pin — `googleAPIKeyRegex` (`\bAIza[0-9A-Za-z_\-]{35}\b`, `:241`) — never fired. And a real key is `AIza` + 35 = **39** characters, one *below* the catch-all, so the only rule standing between a live key and the log was the one the test never reached. Fix: fixture corrected to the real 39-char shape, and the *specific* redaction label (`[REDACTED — likely Google API key]`) asserted rather than a generic "something was redacted."
+3. **Ordering between two individually-correct steps needs its own test.** Nothing pinned that `scrubbedReason` scrubs *before* it length-caps. Swapping those two lines leaves 16 of 17 tests in the file green while slicing a 39-character key 12 characters in — publishing an unredacted key prefix into a record the README asks users to paste into a public issue. Tests that assert each step works in isolation are structurally blind to their composition order; the guard has to straddle the boundary (`test_scrubbedReason_scrubsBeforeCapping_soAStraddlingKeyCannotSurvive`).
+
+The through-line is the same as the absence-only trap above: each guard's green state was **compatible with the defect**, so its passing carried no information. Ask of any guard, not just a source scan: *what is the worst outcome in this area, and would this test be green under it?*
+
 ### Prove the guard red
 
 None of the above is discoverable by reading the test. The only reliable check is to **break the thing on purpose and watch the test fail** — revert the fix, delete the wiring line, add the needle you think is covered — then restore. Both new assertions in this arc were verified red that way before being trusted. A guard never observed failing is a guard whose fidelity is unmeasured.
@@ -86,7 +99,8 @@ The concrete cost here: the shipped artifact would have been a menu-bar app that
 - **Writing any new source-scan / convention test.** Walk the four checklist items plus the anchor-and-overload notes, then prove it red.
 - **Any refactor that relocates work** — init → launch hook, view → controller, sync → async, one module to another. Ask: *if the destination were deleted, which test goes red?* If the answer is none, the guard is absence-only.
 - **Reviewing a diff that adds "and a test pins this."** Check what the test would do if the feature were entirely removed rather than merely misplaced.
-- **Not applicable** to behavioural tests that construct the object and assert on its output — they fail loudly when the subject disappears. This is specifically about tests whose subject is *source text*.
+- **Writing a guard for an installed hook, a swapped pointer, a redaction rule, or an ordering between two steps.** Apply the hook-guard section: name the worst outcome in that area, then check whether the assertion would be green under it.
+- **Narrower than it looks — but not only source text.** A behavioural test that constructs the object and asserts on its output does fail loudly when the subject *disappears*; that much still holds. What it does not catch is a subject that is present and wrong in a way the assertion cannot tell from correct — a comparison that degenerates to `nil == nil`, a fixture matched by a broader rule than the one named, two correct steps composed backwards. Source scans are the worst case of this class, not the whole of it.
 
 ## Examples
 
@@ -124,10 +138,10 @@ func startPollingIfNeeded()  { Task { … } }   // two hops down
 
 - [`architecture-patterns/scene-task-is-not-a-launch-hook-2026-07-25.md`](../architecture-patterns/scene-task-is-not-a-launch-hook-2026-07-25.md) — the sibling failure one level out: work correctly wired, to a hook that never fires. Its guard (`test_sparkleAndTerminationHandler_areWiredFromInit_notAWindowTask`) is a presence assertion for the same reason.
 - [`design-patterns/observation-loop-swallows-initial-state-2026-07-25.md`](../design-patterns/observation-loop-swallows-initial-state-2026-07-25.md) — the other near-miss from the same arc; a behavioural hazard the source scan could not have caught, which is the limit of this instrument.
-- [`runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md`](../runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md) — why the launch-ordering rule exists at all, and why a runtime assertion was rejected as the mechanism.
+- [`runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md`](../runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md) — why the launch-ordering rule exists at all, why a runtime assertion was rejected as the mechanism, and the interceptor whose three guards supplied the hook-guard section above (its *Guidance* step 2 carries the chaining and atomic-install rules those guards failed to protect).
 - [`documentation-gaps/positive-spelling-ax-fixture-2026-05-18.md`](../documentation-gaps/positive-spelling-ax-fixture-2026-05-18.md) — the same absence-only trap in the prompt-eval domain, still open. The clearest prior statement of this failure class in the repo.
 - [`conventions/verify-subagent-test-reports-2026-05-18.md`](./verify-subagent-test-reports-2026-05-18.md) — sibling principle at a different boundary: a green signal that reports something narrower than what you concluded from it.
 - [`conventions/testing-spm-and-git-2026-05-15.md`](./testing-spm-and-git-2026-05-15.md) — the base testing convention this refines; its tautological-fixture bullet is the fixture-level instance of the same class.
 - [`runtime-errors/onhover-mainactor-inheritance-crash-2026-05-19.md`](../runtime-errors/onhover-mainactor-inheritance-crash-2026-05-19.md) — where `DSComponentsHoverTests` came from; its Prevention section presents the scan as an unqualified win, which this entry qualifies.
-- `NoTypeTests/LaunchOrderingTests.swift`, `NoTypeTests/DSComponentsHoverTests.swift` — the two source-scan guards in the project.
+- `NoTypeTests/LaunchOrderingTests.swift`, `NoTypeTests/DSComponentsHoverTests.swift` — the two general source-scan guards in the project. `NoTypeTests/ExceptionBreadcrumbTests.swift` carries a third, file-scoped one (`test_breadcrumbSource_schedulesNoMainActorWork_andDoesNotTouchNSApp`) added because `LaunchOrderingTests`' discovery walks constructions (`TypeName(`) and so cannot see a type reached only through a static `install()` call — an instance of checklist item 1 at the discovery layer rather than the needle layer.
 - `NoType/UI/CLAUDE.md` "Launch ordering" — the rule these guards pin.
