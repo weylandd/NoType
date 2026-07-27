@@ -80,7 +80,7 @@ final class LaunchOrderingTests: XCTestCase {
             literal or an `NSApp` reference in its initializer, or in a same-file \
             method that initializer calls. Move the work into a `prime()`-style \
             method called from `applicationDidFinishLaunching(_:)` — see \
-            `docs/solutions/runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md`.
+            `docs/solutions/architecture-patterns/scene-task-is-not-a-launch-hook-2026-07-25.md`.
 
             Violations:
             \(violations.joined(separator: "\n"))
