@@ -376,6 +376,14 @@ Driven as an **Execution Sequence** — Steps are numbered in execution order, e
 
 ### Step 6 — U6. Move the Silero load off the main actor (conditional)
 
+> **SKIPPED 2026-07-27 — deferred pending evidence, NOT rejected. No code was written for this step.**
+>
+> **The trigger that did not fire.** This step is authorised by a diagnosis naming a **CoreML / Espresso** exception, from either source the Dependencies line names: U1's `.ips`, or an `OBJC THROW` record from the Step 2 breadcrumb. Neither exists. **Step 1 (U1) was cancelled at the project owner's decision** — the reporter is not being contacted — so no `.ips` diagnosis exists and none is coming, and Step 9 has not yet produced a breadcrumb round. That is verbatim the second branch of the **Done when** below: *"recorded as intentionally skipped for lack of that evidence — which explicitly includes U1 returning inconclusive, or returning no result at all because the reporter never replied."*
+>
+> **This step re-arms the moment a breadcrumb names a CoreML/Espresso thrower.** Deferral is not rejection. The Dependencies line was keyed on *the evidence* rather than on U1 as its source precisely so a later `OBJC THROW` record from a Step 9 round re-opens this step with no replanning. If that record ever names an Espresso / CoreML exception, implement the Approach below unchanged — including **both** load sites (`AppState.swift:454` in `prime()`, and the lazy hotkey-path retry at `AppState.swift:927`); moving only the first defeats the step.
+>
+> **Doing it anyway, without the trigger, is the confidence drift this plan exists to avoid** — see the Gating rationale below. The independent launch-hitch argument for the same change stays where it belongs, in *Deferred to Follow-Up Work*, to be decided on its own evidence rather than smuggled in as crash coverage. The suspect is also carried in the family entry's ranked list (`docs/solutions/runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md`, *Suspected throwers — NOT confirmed*) with the same re-arm condition, so a future recurrence starts from it instead of re-deriving it.
+
 - **Goal:** remove a throwing CoreML load from a main-actor concurrency job — **only if** the evidence points there.
 - **Requirements:** R13.
 - **Dependencies:** **the diagnosis** — U1's `.ips` **or** the interceptor's `OBJC THROW` record from a Step 9 round — naming a CoreML / Espresso exception. Keyed on the evidence, not on one source of it: Step 1 has an explicit inconclusive branch in which the interceptor *becomes* the diagnostic, and keying U6 on U1 alone would leave a later Espresso name with no step to re-open.
