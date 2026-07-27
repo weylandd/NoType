@@ -628,6 +628,63 @@ final class HUDPanelGeometryTests: XCTestCase {
         XCTAssertTrue(kinds.contains(.chokepointNeverCalled), "Got: \(kinds)")
     }
 
+    /// The overload-collapse hole. `applyValidated` is *already* overloaded in
+    /// `HUDPanel` (contentSize / frameOrigin), so "some body named the
+    /// chokepoint contains the check" is satisfied for a second, un-validating
+    /// overload by its sibling — and the absence half sees the correct scope
+    /// name and is happy. `source-scan-guard-fidelity-2026-07-25.md` names this
+    /// exact shape ("overloads must not collapse on name"); the fix is to
+    /// require the check in each body that performs the mutation.
+    func test_scanner_presenceFlagsAnUnvalidatingSecondOverloadOfTheChokepoint() {
+        let source = """
+        final class Fixture {
+            func position() {
+                applyValidated(frameOrigin: .zero)
+                applyValidated(uncheckedOrigin: .zero)
+            }
+            private func applyValidated(frameOrigin origin: NSPoint) {
+                if Geometry.originRejection(origin) != nil { return }
+                setFrameOrigin(origin)
+            }
+            private func applyValidated(uncheckedOrigin origin: NSPoint) {
+                setFrameOrigin(origin)
+            }
+        }
+        """
+        XCTAssertEqual(
+            RaiseSiteScanner.unguardedCalls(inSource: source, rules: Self.fixtureRules), [],
+            "the absence half cannot see this — both calls sit in a function named `applyValidated`"
+        )
+        XCTAssertEqual(
+            RaiseSiteScanner.presenceFailures(inSource: source, rules: Self.fixtureRules).map(\.kind),
+            [.chokepointNotValidating],
+            "the un-validating overload must not be excused by its validating sibling"
+        )
+    }
+
+    /// Needle-list rot, checklist item 1. `setFrameTopLeftPoint` is the direct
+    /// substitute for `setFrameOrigin` in a method named `positionTopRight`,
+    /// and raises on the same non-finite input. An un-needled mutator passes
+    /// silently, so the list has to carry every geometry API that reaches the
+    /// rule, not only the two the file happens to use today.
+    func test_scanner_flagsAnAlternativeGeometryMutatorOutsideTheChokepoint() {
+        let source = """
+        final class Fixture {
+            func positionTopRight() {
+                applyValidated(frameOrigin: .zero)
+                setFrameTopLeftPoint(NSPoint(x: 1, y: 2))
+            }
+            private func applyValidated(frameOrigin origin: NSPoint) {
+                if HUDPanelGeometry.originRejection(origin) != nil { return }
+                setFrameOrigin(origin)
+            }
+        }
+        """
+        let hits = RaiseSiteScanner.unguardedCalls(inSource: source, rules: RaiseSiteScanner.hudPanelRules)
+        XCTAssertEqual(hits.map(\.mutator), ["setFrameTopLeftPoint ("], "Got: \(hits)")
+        XCTAssertEqual(hits.first?.scope, "positionTopRight")
+    }
+
     /// `setFrame` is a prefix of `setFrameOrigin`, and `removeTap` of
     /// `removeTapIfInstalled`. Either collapse breaks the scan in a different
     /// direction: the first makes a guarded `setFrameOrigin` look like an
@@ -732,7 +789,7 @@ final class HUDPanelGeometryTests: XCTestCase {
 ///
 /// | File | Mutator | Chokepoint |
 /// |---|---|---|
-/// | `NoType/UI/HUDPanel.swift` | `setContentSize` / `setFrameOrigin` / `setFrame` | `applyValidated` |
+/// | `NoType/UI/HUDPanel.swift` | `setContentSize` / `setFrameOrigin` / `setFrame` / `setFrameTopLeftPoint` / `setFrameSize` | `applyValidated` |
 /// | `NoType/Onboarding/MicProbe.swift` | `installTap` | `installTapAndStart` |
 /// | `NoType/Onboarding/MicProbe.swift` | `removeTap` | `removeTapIfInstalled` |
 ///
@@ -740,6 +797,25 @@ final class HUDPanelGeometryTests: XCTestCase {
 /// precondition ("AppKit is not currently reconfiguring this window") has no
 /// API, so there is nothing for a chokepoint to validate — see that method's
 /// doc-comment and the audit table in `NoType/UI/CLAUDE.md`.
+///
+/// **Known limits, measured by trying to defeat this scanner rather than
+/// guessed.** Recorded because a source scan's failure mode is a *passing*
+/// test, so an unrecorded limit is indistinguishable from coverage:
+///
+/// - **The mutator list is an enumeration, not a closed set.** Every geometry
+///   API on the list is caught anywhere in the file; one that is *not* on it
+///   passes silently. The `frame` property setter (`self.frame = …`) is the
+///   known un-needled case: `frame =` would also match every `let frame = …`,
+///   and the noise is not worth it for a spelling nothing in the file uses.
+/// - **A new mutator kind inside an existing wrapper passes** — see the
+///   comment on ``hudPanelRules``.
+/// - **`mustValidate` is a substring test, not a dataflow one.** A body that
+///   calls the predicate and discards the result (`_ = sizeRejection(size)`)
+///   satisfies it. It pins that the check is still *there*, which is the
+///   deletion this guard exists to catch; it cannot pin that it still gates.
+/// - **Not a limit, checked:** a call whose callee and argument list sit on
+///   different lines is not matched — but Swift does not parse that as a call
+///   at all (`error: function is unused`), so it is unreachable.
 ///
 /// **A plain absence needle cannot express this rule**, which is the whole
 /// reason this is positional rather than a `contains` check: a *guarded* call
@@ -824,13 +900,21 @@ enum RaiseSiteScanner {
             chokepoint: "applyValidated",
             mustValidate: ["HUDPanelGeometry.originRejection ("]
         ),
-        // Not present today. Listed so that adding a whole-frame mutation
-        // outside the wrapper fails rather than shipping unvalidated — and
-        // note the limit: adding one *inside* `applyValidated(frameOrigin:)`
-        // would pass, because that wrapper validates a point, not a rect. A
-        // new mutator kind needs a new `HUDPanelGeometry` predicate and a
-        // rule beside this one.
-        Rule(mutator: "setFrame (", chokepoint: "applyValidated", mustValidate: [], mustOccur: false)
+        // None of the three below is present today. They are listed because
+        // fidelity checklist item 1 — "the needle list rots toward the
+        // original example" — is the failure mode here: each is an AppKit
+        // geometry mutator a maintainer could reach for *instead of* the two
+        // above, and an un-needled one passes silently. `setFrameTopLeftPoint`
+        // in particular is the direct substitute for `setFrameOrigin` in a
+        // method literally named `positionTopRight`.
+        //
+        // Note the residual limit: adding one *inside* an existing wrapper
+        // still passes, because `applyValidated(frameOrigin:)` validates a
+        // point, not a rect or a size. A new mutator kind needs a new
+        // `HUDPanelGeometry` predicate as well as a rule beside these.
+        Rule(mutator: "setFrame (", chokepoint: "applyValidated", mustValidate: [], mustOccur: false),
+        Rule(mutator: "setFrameTopLeftPoint (", chokepoint: "applyValidated", mustValidate: [], mustOccur: false),
+        Rule(mutator: "setFrameSize (", chokepoint: "applyValidated", mustValidate: [], mustOccur: false)
     ]
 
     static let micProbeRules: [Rule] = [
@@ -927,14 +1011,25 @@ enum RaiseSiteScanner {
                 ))
             }
 
-            for needle in rule.mustValidate
-            where !bodies.contains(where: { LaunchPathScanner.line($0.body, contains: needle) }) {
-                findings.append(Finding(
-                    kind: .chokepointNotValidating,
-                    mutator: label,
-                    scope: rule.chokepoint,
-                    detail: "no `\(rule.chokepoint)` body contains `\(needle.trimmingCharacters(in: .whitespaces))` — the wrapper is now a passthrough"
-                ))
+            // Checked per *body*, not "some body named the chokepoint has it".
+            // `applyValidated` is already overloaded (contentSize / frameOrigin),
+            // so an any-body test is satisfied for a second, un-validating
+            // overload by its sibling — the overload-collapse failure named in
+            // `source-scan-guard-fidelity-2026-07-25.md` ("overloads must not
+            // collapse on name"). Only the bodies that actually perform the
+            // mutation are required to validate, which is also what keeps the
+            // frameOrigin wrapper from being asked for a size check.
+            let guardingBodies = bodies.filter { LaunchPathScanner.line($0.body, contains: rule.mutator) }
+            for guarding in guardingBodies {
+                for needle in rule.mustValidate
+                where !LaunchPathScanner.line(guarding.body, contains: needle) {
+                    findings.append(Finding(
+                        kind: .chokepointNotValidating,
+                        mutator: label,
+                        scope: rule.chokepoint,
+                        detail: "a `\(rule.chokepoint)` body performs `\(label)` without `\(needle.trimmingCharacters(in: .whitespaces))` — that wrapper is a passthrough"
+                    ))
+                }
             }
         }
         return findings
