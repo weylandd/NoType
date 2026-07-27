@@ -63,6 +63,38 @@ final class AudioRecorderHALTests: XCTestCase {
         XCTAssertTrue(msg.contains("couldn't connect"), "underlying description must surface: \(msg)")
     }
 
+    /// `MicProbe.Error.inputFormatNotInstallable` is the only case whose
+    /// message is assembled from a payload's `CustomStringConvertible`
+    /// rather than a literal. Two ways that breaks silently: dropping the
+    /// `Rejection: CustomStringConvertible` conformance makes the
+    /// interpolation fall back to the bare case name (`sampleRateMismatch`
+    /// instead of a sentence), and a blank `description` makes the message
+    /// collapse to punctuation. Pin every case's rendered text — these
+    /// same strings are what the `mic probe tap skipped:` log line carries
+    /// into a diagnostic read.
+    func test_micProbeError_inputFormatNotInstallable_rendersEachRejectionReason() {
+        let expected: [MicProbeFormatGate.Rejection: String] = [
+            .nonPositiveSampleRate: "input reports a zero sample rate",
+            .nonPositiveChannelCount: "input reports zero channels",
+            .sampleRateMismatch: "input sample rate changed mid-setup",
+            .channelCountMismatch: "input channel count changed mid-setup"
+        ]
+
+        for rejection in MicProbeFormatGate.Rejection.allCases {
+            guard let reason = expected[rejection] else {
+                XCTFail("no expected copy for \(rejection) — add it or drop the case")
+                continue
+            }
+            XCTAssertEqual(rejection.description, reason)
+
+            // `reason` is a literal, so this equality also catches the
+            // dropped-conformance case: the message would render the raw
+            // case name and stop matching.
+            let msg = MicProbe.Error.inputFormatNotInstallable(rejection).errorDescription ?? ""
+            XCTAssertEqual(msg, "Couldn't tap the microphone: \(reason).")
+        }
+    }
+
     func test_outputSampleRate_is16kHz() {
         // Non-negotiable per `Recording/CLAUDE.md` invariant 1 (Silero
         // requires 16 kHz). If a refactor ever changes this constant,

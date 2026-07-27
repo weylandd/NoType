@@ -21,8 +21,17 @@ import OSLog
 /// invokes the `installTap` callback on its own realtime thread; if the
 /// owning class were main-actor-isolated, Swift 6's runtime isolation
 /// check would `dispatch_assert_queue_fail` the moment audio starts
-/// flowing. Same shape as `AudioRecorder`. All mutable state is guarded
-/// by `lock`.
+/// flowing. Same shape as `AudioRecorder`.
+///
+/// **Two different disciplines keep that sound, and neither is "every
+/// field takes `lock`".** `pcm` and `tapInstalled` are genuinely
+/// concurrent — the realtime thread appends to one, `deinit` on an
+/// arbitrary thread test-and-clears the other — so both take `lock`.
+/// `converter` and `outputFormat` do not: they are written only between
+/// `removeTapIfInstalled()` and `installTap(onBus:…)`, i.e. only while no
+/// tap block exists to read them, and `installTap` itself publishes the
+/// write to the realtime thread. Keep them inside that window or they
+/// need the lock too.
 final class MicProbe: @unchecked Sendable {
     private static let log = Logger(subsystem: "app.notype", category: "onboarding.mic")
 
@@ -35,19 +44,25 @@ final class MicProbe: @unchecked Sendable {
     enum Error: Swift.Error, LocalizedError {
         case engineStartFailed(Swift.Error)
         case converterCreateFailed
+        /// The input node's live format wasn't installable as a tap
+        /// format — see `MicProbeFormatGate`. Surfaces as a flat
+        /// spectrum meter, this screen's documented failure mode, in
+        /// place of an Objective-C raise out of a main-actor `Task`.
+        case inputFormatNotInstallable(MicProbeFormatGate.Rejection)
 
         var errorDescription: String? {
             switch self {
             case .engineStartFailed(let e): "Couldn't start audio engine: \(e.localizedDescription)"
             case .converterCreateFailed:    "Couldn't create audio converter."
+            case .inputFormatNotInstallable(let reason): "Couldn't tap the microphone: \(reason)."
             }
         }
     }
 
     private let engine = AVAudioEngine()
+    /// Guards `pcm` and `tapInstalled`.
     private let lock = NSLock()
     private var converter: AVAudioConverter?
-    private var inputFormat: AVAudioFormat?
     private var outputFormat: AVAudioFormat?
     private var pcm: [Float] = []
     /// 4 × AudioSpectrum.fftLength (1024) — hardcoded because reading
@@ -55,6 +70,9 @@ final class MicProbe: @unchecked Sendable {
     /// non-isolated class's stored-property initializer is rejected
     /// under strict concurrency.
     private let bufferCapacity = 4096
+    /// Sole gate on every `removeTap` call. Guarded by `lock` because
+    /// `deinit` runs nonisolated on whatever thread drops the last
+    /// reference — see `removeTapIfInstalled()`.
     private var tapInstalled = false
     private var deviceObservationTask: Task<Void, Never>?
     private var configChangeObserver: NSObjectProtocol?
@@ -73,39 +91,57 @@ final class MicProbe: @unchecked Sendable {
             _ = AudioDeviceManager.apply(device, to: engine)
         }
 
-        do {
-            try installTapAndStart()
-        } catch {
-            Self.log.error("mic probe start failed: \(error.localizedDescription, privacy: .public)")
-            return
-        }
-
-        configChangeObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: engine,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.rebuild() }
+        // **Both observers are installed BEFORE the tap goes in, and the
+        // ordering is load-bearing.** `AudioDeviceManager.apply` above is
+        // asynchronous, so the very first `installTapAndStart()` is the
+        // most likely moment for `MicProbeFormatGate` to reject — and
+        // `.AVAudioEngineConfigurationChange` is precisely the
+        // notification that fires when that switch finally lands. Wiring
+        // the observers only on the success path meant a rejected first
+        // install threw away its own recovery signal and left the user a
+        // dead spectrum meter for the rest of the screen, with even the
+        // device picker unable to revive it. Both are idempotent-guarded
+        // because a failed `start()` leaves the engine stopped, so a
+        // retry re-enters here.
+        if configChangeObserver == nil {
+            configChangeObserver = NotificationCenter.default.addObserver(
+                forName: .AVAudioEngineConfigurationChange,
+                object: engine,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.rebuild() }
+            }
         }
 
         // Restart the engine when the user picks a different input device
         // from the picker on the same screen. `AudioDeviceManager` is
         // `@Observable`, so we watch `selectedUID` via a
         // `withObservationTracking` loop instead of a Combine sink.
-        deviceObservationTask = Task { @MainActor [weak self] in
-            // Skip the initial value (matches the prior `.dropFirst()`).
-            _ = AudioDeviceManager.shared.selectedUID
-            while !Task.isCancelled {
-                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                    withObservationTracking {
-                        _ = AudioDeviceManager.shared.selectedUID
-                    } onChange: {
-                        cont.resume()
+        if deviceObservationTask == nil {
+            deviceObservationTask = Task { @MainActor [weak self] in
+                // Skip the initial value (matches the prior `.dropFirst()`).
+                _ = AudioDeviceManager.shared.selectedUID
+                while !Task.isCancelled {
+                    await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                        withObservationTracking {
+                            _ = AudioDeviceManager.shared.selectedUID
+                        } onChange: {
+                            cont.resume()
+                        }
                     }
+                    if Task.isCancelled { return }
+                    self?.rebuild()
                 }
-                if Task.isCancelled { return }
-                self?.rebuild()
             }
+        }
+
+        do {
+            try installTapAndStart()
+        } catch {
+            // Deliberately not a teardown: the observers above stay armed
+            // so the next config change or device pick retries.
+            Self.log.error("mic probe start failed: \(error.localizedDescription, privacy: .public)")
+            return
         }
     }
 
@@ -117,10 +153,7 @@ final class MicProbe: @unchecked Sendable {
             NotificationCenter.default.removeObserver(observer)
             configChangeObserver = nil
         }
-        if tapInstalled {
-            engine.inputNode.removeTap(onBus: 0)
-            tapInstalled = false
-        }
+        removeTapIfInstalled()
         if engine.isRunning {
             engine.stop()
         }
@@ -136,12 +169,33 @@ final class MicProbe: @unchecked Sendable {
     ///
     /// `deinit` runs nonisolated (MicProbe is `@unchecked Sendable`, not
     /// `@MainActor`), so it can't call the `@MainActor stop()`; it repeats
-    /// the same steps inline against this now-unreferenced instance. All
-    /// calls are deinit-safe: `Task.cancel()` and
-    /// `NotificationCenter.removeObserver` are thread-safe, and the engine
-    /// teardown touches only `self` (no concurrent access at dealloc).
-    /// Idempotent after `stop()` — every field is already cleared, so each
-    /// branch is a no-op on the normal path.
+    /// the same steps inline against this now-unreferenced instance.
+    /// `Task.cancel()` and `NotificationCenter.removeObserver` are
+    /// thread-safe. Idempotent after `stop()` — every field is already
+    /// cleared, so each branch is a no-op on the normal path, which is
+    /// also the only path this net is *expected* to run on.
+    ///
+    /// **Known pre-existing hazard, unchanged by the R10 fix.** The tap
+    /// block's `self?` upgrade is the one strong reference the realtime
+    /// thread ever holds, so if the main thread drops the `@State` box
+    /// while a tap callback is in flight, the realtime thread performs the
+    /// last release and `deinit` — hence `removeTap` and `engine.stop()` —
+    /// runs there. Reaching that needs a probe released *without* `stop()`
+    /// while audio is flowing; on the normal `.onDisappear` path `stop()`
+    /// has already cleared the gate and this is all no-ops. Do not "fix"
+    /// it by hopping to the main queue: that is KTD5's rejected
+    /// containment shape, and a deinit cannot outlive itself to await one.
+    ///
+    /// **The tap gate goes through `removeTapIfInstalled()`, which takes
+    /// `lock` (R10).** Dealloc can land on any thread — SwiftUI holds the
+    /// probe in `@State`, so `OnboardingMicCheckStep` allocates and drops
+    /// throwaway instances on body passes — and reading `tapInstalled`
+    /// without the lock has no acquire edge against the main thread's
+    /// write. A stale `false` leaks the tap and leaves the mic light on; a
+    /// stale `true` double-removes and raises out of AVFAudio. The other
+    /// two fields read here are not lock-guarded state: they are written
+    /// on the main actor only and, with no live reference left, nothing
+    /// can be writing them concurrently.
     ///
     /// We deliberately do NOT resume the device-observation continuation
     /// from here: the `Task` captures `self` weakly and holds no mic, so a
@@ -153,9 +207,7 @@ final class MicProbe: @unchecked Sendable {
         if let observer = configChangeObserver {
             NotificationCenter.default.removeObserver(observer)
         }
-        if tapInstalled {
-            engine.inputNode.removeTap(onBus: 0)
-        }
+        removeTapIfInstalled()
         if engine.isRunning {
             engine.stop()
         }
@@ -172,12 +224,23 @@ final class MicProbe: @unchecked Sendable {
 
     // MARK: - Internals
 
+    /// Build the converter, install the tap, start the engine.
+    ///
+    /// **Statement order is load-bearing.** `AudioDeviceManager.apply`'s
+    /// `AudioUnitSetProperty(CurrentDevice)` is asynchronous, so the node's
+    /// format can change under us mid-setup; `installTap` with a format the
+    /// node no longer reports raises an Objective-C exception, and this
+    /// method is reachable from two `Task { @MainActor }` bodies where such
+    /// a raise corrupts the thread's executor identity (see
+    /// `MicProbeFormatGate`). So: everything device-independent is built
+    /// first, the node format is read **once**, both the converter and the
+    /// tap are derived from that one read, and the read is re-validated
+    /// against the live node immediately before the tap goes in.
     private func installTapAndStart() throws {
         let input = engine.inputNode
-        let inFmt = input.outputFormat(forBus: 0)
-        guard inFmt.sampleRate > 0, inFmt.channelCount > 0 else {
-            throw MicProbe.Error.converterCreateFailed
-        }
+
+        // Device-independent — built before the node-format read so it
+        // isn't work sitting between that read and the tap install.
         guard let outFmt = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: 16_000,
@@ -186,30 +249,113 @@ final class MicProbe: @unchecked Sendable {
         ) else {
             throw MicProbe.Error.converterCreateFailed
         }
+
+        // THE single read. Both the converter and the tap are built from
+        // this exact value: re-reading for one of them would trade the
+        // crash for a permanently dead meter, because `handleTap` feeds
+        // every buffer through `converter`.
+        let inFmt = input.outputFormat(forBus: 0)
+        let candidate = MicProbeFormatGate.Shape(inFmt)
+
+        // Positivity is validated BEFORE the converter, not after. A dead
+        // node (0 Hz / 0 ch — no input device, or microphone permission
+        // not granted) handed to `AVAudioConverter(from:to:)` is an
+        // Objective-C initializer called with an unvalidated argument
+        // from inside a main-actor `Task` — the exact shape this fix
+        // exists to remove, and "verified empirically that it returns
+        // nil" is an observation, not a precondition. Checking here also
+        // keeps the two non-positive rejections reachable in production,
+        // so the log names the dead node instead of a downstream
+        // converter failure.
+        if let rejection = MicProbeFormatGate.positivityRejection(candidate) {
+            throw Self.notInstallable(rejection, candidate: candidate, live: candidate)
+        }
+
         guard let conv = AVAudioConverter(from: inFmt, to: outFmt) else {
             throw MicProbe.Error.converterCreateFailed
         }
-        self.inputFormat = inFmt
+
+        // Re-validated as late as possible: a device switch may have
+        // landed while the converter above was being built. This shrinks
+        // the race window to one call; it does not close it (see
+        // `MicProbeFormatGate`).
+        let live = MicProbeFormatGate.Shape(input.outputFormat(forBus: 0))
+        if let rejection = MicProbeFormatGate.rejection(candidate: candidate, live: live) {
+            throw Self.notInstallable(rejection, candidate: candidate, live: live)
+        }
+
+        // **Nothing above this line mutates the tap.** Every throw path
+        // so far leaves an already-running probe exactly as it was, which
+        // is what makes a rejection recoverable: `rebuild()` stops the
+        // engine before calling in, and a stopped engine posts no further
+        // `.AVAudioEngineConfigurationChange`, so tearing the old tap down
+        // first would strand the meter on the one signal that could not
+        // arrive. A stale tap still has to come off before a new one goes
+        // on, and `removeTap` on an untapped bus is its own raise site —
+        // hence the gate rather than a bare call.
+        removeTapIfInstalled()
+
+        // Written between `removeTap` and `installTap`, so the realtime
+        // tap callback can never observe a half-updated converter /
+        // output-format pair.
         self.outputFormat = outFmt
         self.converter = conv
 
-        if tapInstalled {
-            input.removeTap(onBus: 0)
-            tapInstalled = false
-        }
         input.installTap(onBus: 0, bufferSize: 1024, format: inFmt) { [weak self] buffer, _ in
             self?.handleTap(buffer)
         }
-        tapInstalled = true
+        lock.lock(); tapInstalled = true; lock.unlock()
 
         do {
             engine.prepare()
             try engine.start()
         } catch {
-            input.removeTap(onBus: 0)
-            tapInstalled = false
+            removeTapIfInstalled()
             throw MicProbe.Error.engineStartFailed(error)
         }
+    }
+
+    /// Log the rejection with the numbers behind it, then hand back the
+    /// error to throw. One shape of log line for both gate call sites —
+    /// the `errorDescription` the caller logs carries the reason but not
+    /// the rates, and the rates are what a Step 9 diagnostic read needs.
+    private static func notInstallable(
+        _ rejection: MicProbeFormatGate.Rejection,
+        candidate: MicProbeFormatGate.Shape,
+        live: MicProbeFormatGate.Shape
+    ) -> MicProbe.Error {
+        log.error(
+            """
+            mic probe tap skipped: \(rejection.description, privacy: .public) \
+            (candidate \(candidate.sampleRate, privacy: .public) Hz / \
+            \(candidate.channelCount, privacy: .public) ch, live \
+            \(live.sampleRate, privacy: .public) Hz / \
+            \(live.channelCount, privacy: .public) ch)
+            """
+        )
+        return .inputFormatNotInstallable(rejection)
+    }
+
+    /// Test-and-clear the tap gate, then remove the tap iff one was
+    /// installed. **The only place `removeTap` is called** — mutating a
+    /// bus that carries no tap is its own AVFAudio raise site, so the
+    /// gate has to be structural rather than local reasoning about the
+    /// two lines above the call (which is what the `engine.start()`
+    /// failure path used to rely on).
+    ///
+    /// `tapInstalled` is read and cleared in a single `lock` acquisition
+    /// so two callers can't both decide to remove, and so `deinit` —
+    /// which runs nonisolated on whatever thread drops the last
+    /// reference — never reads it unguarded (R10). `engine.inputNode` is
+    /// touched only after the gate opens, i.e. only on a probe that
+    /// already reached it once.
+    private func removeTapIfInstalled() {
+        lock.lock()
+        let wasInstalled = tapInstalled
+        tapInstalled = false
+        lock.unlock()
+        guard wasInstalled else { return }
+        engine.inputNode.removeTap(onBus: 0)
     }
 
     @MainActor

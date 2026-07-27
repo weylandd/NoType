@@ -67,6 +67,7 @@ Solid arrows = audio / text path. Dotted arrows = control / async signal.
 | `NoType/Updates/` | Sparkle 2 controller + custom `SPUUserDriver` (in-sidebar banner) | `Updates/CLAUDE.md` |
 | `NoType/Permissions/` | Microphone / Accessibility / Screen Recording TCC state | `Permissions/CLAUDE.md` |
 | `NoType/Onboarding/` | First-launch wizard | `NoType/Onboarding/` (no CLAUDE.md) |
+| `NoType/Diagnostics/` | Process-wide ObjC exception breadcrumb (`objc_setExceptionPreprocessor`), installed first in `NoTypeApp.init()` | `ExceptionBreadcrumb.swift` doc-comment (no CLAUDE.md) |
 | `NoType/UI/` | SwiftUI surfaces: menu-bar, popover, main window, HUDs, settings | `UI/CLAUDE.md` |
 
 ---

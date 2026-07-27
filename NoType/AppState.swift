@@ -355,11 +355,20 @@ final class AppState {
     ///
     /// **Why this is not in `init`.** `NoTypeApp.init()` runs before
     /// `NSApplicationMain` has started the application. Scheduling
-    /// `MainActor` work in that window is a latent ordering bug in its own
-    /// right, and it is the leading hypothesis for the macOS 26.2
-    /// executor-identity crash — see
-    /// `docs/solutions/runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md`.
+    /// `MainActor` work in that window is a latent ordering bug, and that
+    /// is the whole justification — it stands on its own merits. The move
+    /// also fixed two real shipped defects: Sparkle's update check never
+    /// ran for menu-bar-only users, and the un-mute-on-quit handler was
+    /// never wired. See
+    /// `docs/solutions/architecture-patterns/scene-task-is-not-a-launch-hook-2026-07-25.md`.
     /// The rule is pinned mechanically by `NoTypeTests/LaunchOrderingTests.swift`.
+    ///
+    /// This rule is **not** coverage of the macOS 26 executor-identity
+    /// crash family. It was once the leading theory there; the reordering
+    /// shipped as v0.1.13-rc1 (`bfcec4a`) and did not fix the crash. The
+    /// proven cause is a swallowed ObjC exception — see
+    /// `docs/solutions/runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md`.
+    /// Don't cite this rule as a crash mitigation.
     ///
     /// Idempotent — mirrors `UpdateController.start()`'s `didStart` latch.
     func prime() {
