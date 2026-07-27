@@ -6,12 +6,22 @@ import XCTest
 ///
 /// Background: `NoTypeApp.init()` runs *before* `NSApplicationMain` has
 /// started the application. Scheduling `MainActor` work or touching
-/// `NSApp` in that window is a latent ordering bug, and it is the leading
-/// hypothesis for the macOS 26.2 executor-identity crash family — see
-/// `docs/solutions/runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md`.
+/// `NSApp` in that window is a latent ordering bug, and that is the whole
+/// justification for this rule — it stands on its own merits. The move
+/// also fixed two real shipped defects: Sparkle's update check never ran
+/// for menu-bar-only users, and the un-mute-on-quit handler was never
+/// wired. See
+/// `docs/solutions/architecture-patterns/scene-task-is-not-a-launch-hook-2026-07-25.md`.
 /// The remediation moved that work into `AppState.prime()` /
 /// `PermissionsViewModel.prime()` / `AppearanceController.apply()`, all
 /// called from `applicationDidFinishLaunching(_:)`.
+///
+/// This rule is **not** coverage of the macOS 26 executor-identity crash
+/// family. It was once the leading theory there; the reordering shipped as
+/// v0.1.13-rc1 (`bfcec4a`) and did not fix the crash. The proven cause is
+/// a swallowed ObjC exception — see
+/// `docs/solutions/runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md`.
+/// Don't read a green run here as a crash mitigation.
 ///
 /// A runtime assertion is deliberately NOT the mechanism: the maintainer's
 /// machine does not reproduce the crash, so an assertion would never fire

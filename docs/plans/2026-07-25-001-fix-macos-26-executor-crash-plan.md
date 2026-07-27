@@ -7,9 +7,23 @@ artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: ce-brainstorm
 execution: code
+superseded_by: docs/plans/2026-07-26-001-fix-swallowed-exception-executor-corruption-plan.md
 ---
 
 # macOS 26 Executor-Check Crash - Plan
+
+> **SUPERSEDED 2026-07-26 by [`docs/plans/2026-07-26-001-fix-swallowed-exception-executor-corruption-plan.md`](2026-07-26-001-fix-swallowed-exception-executor-corruption-plan.md). Read that plan, not this one.**
+>
+> **The central premise below is disproven.** This plan is built on "Apple broke SwiftUI on macOS 26.2 — work around it", with early-launch `MainActor` use as the leading hypothesis for what corrupts the executor identity. Stage B′ shipped as [`bfcec4a`](https://github.com/weylandd/NoType/commit/bfcec4a) (v0.1.13-rc1) and was tested on the reporter's machine: **it did not fix the crash.** The proven cause is a swallowed Objective-C exception — an `NSException` raised inside a `Task { @MainActor }` unwinds through `libswift_Concurrency`, whose `ExecutorTrackingInfo` pop is not exception-safe, orphaning the main thread's executor identity; AppKit swallows the exception and execution resumes, so the *next* executor check anywhere in the process SIGSEGVs. The crash **site** is incidental, which is why three per-call-site fixes each relocated the crash instead of ending it. See [`docs/solutions/runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md`](../solutions/runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md) — the source of truth for the mechanism.
+>
+> **What shipped from this plan and stays:**
+> - **Stage B′ (U1–U3) — `bfcec4a`.** Launch work moved out of `NoTypeApp.init()` onto the AppKit launch hooks, pinned by `NoTypeTests/LaunchOrderingTests.swift`. It is not coverage of this crash, but it **stands on its own merits**: scheduling into the pre-`NSApplicationMain` window is a latent ordering bug, and the move incidentally fixed two real shipped defects — Sparkle's update check never ran for menu-bar-only users, and the un-mute-on-quit handler was never wired. Recorded in [`docs/solutions/architecture-patterns/scene-task-is-not-a-launch-hook-2026-07-25.md`](../solutions/architecture-patterns/scene-task-is-not-a-launch-hook-2026-07-25.md) and [`docs/solutions/design-patterns/observation-loop-swallows-initial-state-2026-07-25.md`](../solutions/design-patterns/observation-loop-swallows-initial-state-2026-07-25.md).
+> - **U9** — the `dsOnHover` documentation correction and the family solutions entry (since rewritten around the proven cause).
+> - **U15** — the README known-issue note. The superseding plan removes it on confirmation.
+>
+> **What is retired unbuilt:** stage C (U5, pin an older macOS SDK) and stage A (U6–U8, migrate off stock SwiftUI `Button`). Both are workarounds for an Apple-side defect that is not the cause. The `Button` in `_ButtonGesture` is a *reader* of the poisoned identity, not its source, so migrating away from it would have relocated the crash a fourth time.
+>
+> **Why this file is kept rather than deleted.** It holds **its own KD6** — the check-mode disproof, traced to the Swift runtime source, showing that `SWIFT_IS_CURRENT_EXECUTOR_LEGACY_MODE_OVERRIDE` and the linked-on-or-after bincompat gate both resolve to an options word the runtime reads *after* the faulting `isMainExecutor()` call. That reasoning is correct; it simply answers the wrong question. (Note: KD6 here is unrelated to the superseding plan's KD6.) Losing it is how the next investigation re-runs a dead end.
 
 ## Goal Capsule
 

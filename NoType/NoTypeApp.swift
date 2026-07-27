@@ -35,8 +35,12 @@ final class NoTypeAppDelegate: NSObject, NSApplicationDelegate {
     /// `NSApplicationMain` has actually started the application. Every
     /// piece of launch work that *schedules* `MainActor` work hangs off
     /// this, because doing any of it from `NoTypeApp.init()` is a latent
-    /// ordering bug and the leading suspect for the macOS 26.2
-    /// executor-identity crash. (The one thing that rides the earlier
+    /// ordering bug — which is the whole reason, and reason enough. It is
+    /// **not** coverage of the macOS 26 executor-identity crash family:
+    /// that theory shipped as v0.1.13-rc1 (`bfcec4a`) and did not fix the
+    /// crash. See
+    /// `docs/solutions/runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md`.
+    /// (The one thing that rides the earlier
     /// `willFinishLaunchingHandler` instead is the appearance write,
     /// which schedules nothing — see that property.) Assigned in
     /// `NoTypeApp.init()` (assigning a closure schedules nothing) so the
