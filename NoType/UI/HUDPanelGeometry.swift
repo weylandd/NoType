@@ -35,15 +35,20 @@ import AppKit
 ///   seeds its `contentRect` at the origin, so a skipped first
 ///   positioning pass parks the HUD in the bottom-left corner of the
 ///   screen for the rest of the session. Instead ``topRightOrigin(visibleFrame:panelSize:topInset:rightInset:)``
-///   sanitises each contributing term and still returns a screen-derived
-///   top-right point — a stale-but-placed HUD beats both a crash and a
-///   HUD in the wrong corner. It returns `nil` only when the *screen's*
-///   visible frame is itself unusable, because that is the one input no
-///   fallback can be derived from.
+///   substitutes each non-finite contributing term and still returns a
+///   screen-derived top-right point — a placed HUD beats both a crash and
+///   a HUD in the wrong corner — **and reports which terms it had to
+///   substitute** so the caller can log it. It returns `nil` only when the
+///   *screen's* visible frame is itself unusable, because that is the one
+///   input no fallback can be derived from.
 ///
-/// Every rejection is logged at a persisted level by the caller
-/// (`HUDPanel`); a silently mispositioned HUD with no log line is the
-/// failure shape this whole work stream exists to stop.
+/// Every rejection **and every substitution** is logged at a persisted
+/// level by the caller (`HUDPanel`); a silently mispositioned HUD with no
+/// log line is the failure shape this whole work stream exists to stop.
+/// That is why ``topRightOrigin(visibleFrame:panelSize:topInset:rightInset:)``
+/// returns a ``Placement`` rather than a bare point: a substituted origin
+/// is arithmetically valid, so ``originRejection(_:)`` waves it through and
+/// the caller would otherwise have no way to tell it from a clean one.
 ///
 /// Pure function namespace: deterministic, no AppKit calls, no `NSWindow`.
 /// Pinned by `NoTypeTests/HUDPanelGeometryTests.swift`.
@@ -121,7 +126,47 @@ enum HUDPanelGeometry {
         return nil
     }
 
-    /// Top-right anchored origin for a panel of `panelSize` inside
+    /// A term ``topRightOrigin(visibleFrame:panelSize:topInset:rightInset:)``
+    /// had to substitute because the caller's value was not finite.
+    ///
+    /// This type exists so the substitution is **reportable**. A substituted
+    /// origin is arithmetically valid, so ``originRejection(_:)`` accepts it
+    /// and no rejection is ever logged — without naming the term, a HUD that
+    /// moved because one card's frame was corrupt is indistinguishable from
+    /// a correctly placed one. Silent degradation is precisely the shape
+    /// this work stream exists to stop.
+    enum SanitisedTerm: Hashable, Sendable, CaseIterable, CustomStringConvertible {
+        /// `panelSize.width` was NaN or infinite.
+        case panelWidth
+        /// `panelSize.height` was NaN or infinite.
+        case panelHeight
+        /// `topInset` was NaN or infinite — the `HUDController` accumulator case.
+        case topInset
+        /// `rightInset` was NaN or infinite.
+        case rightInset
+
+        var description: String {
+            switch self {
+            case .panelWidth:  "panel width"
+            case .panelHeight: "panel height"
+            case .topInset:    "top inset"
+            case .rightInset:  "right inset"
+            }
+        }
+    }
+
+    /// Where to put the panel, plus whatever had to be substituted to get
+    /// there.
+    ///
+    /// `sanitised` is empty on the clean path and is listed in
+    /// ``SanitisedTerm`` declaration order otherwise, so the caller's log
+    /// line is stable.
+    struct Placement: Equatable, Sendable {
+        let origin: NSPoint
+        let sanitised: [SanitisedTerm]
+    }
+
+    /// Top-right anchored placement for a panel of `panelSize` inside
     /// `visibleFrame`, with CSS-style `top` / `right` insets.
     ///
     /// Extracted from `HUDPanel.positionTopRight` for the same reason
@@ -129,38 +174,57 @@ enum HUDPanelGeometry {
     /// extracted from its window lock: the arithmetic is the part worth
     /// testing and the `NSWindow` around it is not testable at all.
     ///
-    /// - Returns: a finite point, or `nil` when `visibleFrame` is itself
-    ///   not finite — the one input for which no screen-derived fallback
-    ///   exists. The caller logs and skips in that case.
+    /// - Returns: a ``Placement`` whose origin is finite, or `nil` when
+    ///   `visibleFrame` is itself not finite — the one input for which no
+    ///   screen-derived fallback exists. The caller logs and skips in that
+    ///   case.
     ///
-    /// **Non-finite terms are sanitised to zero rather than propagated.**
+    /// **Non-finite terms are substituted with zero rather than propagated.**
     /// A NaN in `panelSize` or in an inset would otherwise poison the
-    /// subtraction and produce exactly the NaN origin this helper exists
-    /// to keep away from AppKit. `HUDController.repositionPermissionPanels`
-    /// accumulates `topInset` from `panel.frame.height`, so a corrupt
-    /// frame on one card would otherwise travel into the next card's
-    /// origin. Zeroing parks the panel flush in the corner — visibly
-    /// wrong, logged, and not a crash.
+    /// subtraction and produce exactly the NaN origin this helper exists to
+    /// keep away from AppKit. `HUDController.repositionPermissionPanels`
+    /// accumulates `topInset` from `panel.frame.height`, so a corrupt frame
+    /// on one card would otherwise travel into the next card's origin.
+    ///
+    /// Substituting zero anchors the arithmetic back to the screen, but the
+    /// resulting point is **not a good placement**: the panel's real frame is
+    /// unchanged, so zeroing its width leaves it overhanging the visible area
+    /// by that width rather than sitting flush in the corner. It is placed,
+    /// logged, and not a crash — not correct. That is exactly why the
+    /// substitution is returned in `Placement.sanitised` instead of being
+    /// swallowed here.
     static func topRightOrigin(
         visibleFrame: NSRect,
         panelSize: NSSize,
         topInset: CGFloat,
         rightInset: CGFloat
-    ) -> NSPoint? {
+    ) -> Placement? {
         guard visibleFrame.origin.x.isFinite,
               visibleFrame.origin.y.isFinite,
               visibleFrame.size.width.isFinite,
               visibleFrame.size.height.isFinite
         else { return nil }
 
-        let width  = panelSize.width.isFinite  ? panelSize.width  : 0
-        let height = panelSize.height.isFinite ? panelSize.height : 0
-        let right  = rightInset.isFinite ? rightInset : 0
-        let top    = topInset.isFinite   ? topInset   : 0
+        var sanitised: [SanitisedTerm] = []
+        func substitutingNonFinite(_ value: CGFloat, _ term: SanitisedTerm) -> CGFloat {
+            guard value.isFinite else {
+                sanitised.append(term)
+                return 0
+            }
+            return value
+        }
 
-        return NSPoint(
-            x: visibleFrame.maxX - width - right,
-            y: visibleFrame.maxY - height - top
+        let width  = substitutingNonFinite(panelSize.width,  .panelWidth)
+        let height = substitutingNonFinite(panelSize.height, .panelHeight)
+        let top    = substitutingNonFinite(topInset,         .topInset)
+        let right  = substitutingNonFinite(rightInset,       .rightInset)
+
+        return Placement(
+            origin: NSPoint(
+                x: visibleFrame.maxX - width - right,
+                y: visibleFrame.maxY - height - top
+            ),
+            sanitised: sanitised
         )
     }
 }

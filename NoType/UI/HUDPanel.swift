@@ -95,7 +95,14 @@ final class HUDPanel: NSPanel {
     /// Place the panel anchored to the top-right of the active screen, with
     /// CSS-style `top` and `right` insets relative to the visible frame.
     func positionTopRight(topInset: CGFloat, rightInset: CGFloat) {
-        guard let screen = NSScreen.main else { return }
+        guard let screen = NSScreen.main else {
+            // Same silent-skip class as the two branches below, so it gets
+            // the same log line: without one, a HUD parked at its seeded
+            // bottom-left `contentRect` origin is indistinguishable from a
+            // HUD that was never asked to move.
+            Self.log.error("HUD panel position skipped: no main screen")
+            return
+        }
         // Make sure the panel has been sized to its current content first.
         layoutIfNeeded()
         applyValidated(contentSize: hostingView.fittingSize)
@@ -106,7 +113,7 @@ final class HUDPanel: NSPanel {
         // too would leave the panel at its seeded `contentRect` origin —
         // the bottom-left corner of the screen, silently, for the rest of
         // the session.
-        guard let origin = HUDPanelGeometry.topRightOrigin(
+        guard let placement = HUDPanelGeometry.topRightOrigin(
             visibleFrame: screen.visibleFrame,
             panelSize: frame.size,
             topInset: topInset,
@@ -117,7 +124,16 @@ final class HUDPanel: NSPanel {
             Self.log.error("HUD panel position skipped: screen visible frame is not finite")
             return
         }
-        applyValidated(frameOrigin: origin)
+        if !placement.sanitised.isEmpty {
+            // The origin is finite, so `applyValidated(frameOrigin:)` will
+            // accept it and nothing downstream would ever mention this. The
+            // panel is about to be placed off its intended anchor — say so.
+            let terms = placement.sanitised.map(\.description).joined(separator: ", ")
+            Self.log.error(
+                "HUD panel origin computed from substituted geometry: \(terms, privacy: .public) not finite"
+            )
+        }
+        applyValidated(frameOrigin: placement.origin)
     }
 
     func show() {
@@ -155,11 +171,13 @@ final class HUDPanel: NSPanel {
 
     /// The only call to `setFrameOrigin` in the project.
     ///
-    /// `HUDPanelGeometry.topRightOrigin` already sanitises every term it
-    /// composes, so `positionTopRight` cannot reach the rejection branch
-    /// today. The check stays because it is the chokepoint's contract, not
-    /// a guard on one caller — a future call site that computes an origin
-    /// some other way inherits it for free.
+    /// `HUDPanelGeometry.topRightOrigin` substitutes every non-finite term
+    /// it composes, so `positionTopRight` reaches the rejection branch only
+    /// if the arithmetic itself saturates — `visibleFrame` values finite but
+    /// large enough that `maxX` / `maxY` overflow to infinity, which no real
+    /// `NSScreen` produces. The check stays because it is the chokepoint's
+    /// contract, not a guard on one caller — a future call site that computes
+    /// an origin some other way inherits it for free.
     private func applyValidated(frameOrigin origin: NSPoint) {
         if let rejection = HUDPanelGeometry.originRejection(origin) {
             Self.log.error(

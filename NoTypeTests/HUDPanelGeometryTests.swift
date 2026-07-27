@@ -96,6 +96,16 @@ final class HUDPanelGeometryTests: XCTestCase {
         )
     }
 
+    func test_size_negativeInfiniteWidth_isRejectedAsNonFinite() {
+        // Symmetry with the height case above: without it, a width-only
+        // guard reordered to positivity-first still classifies -inf as
+        // `.nonPositiveWidth` with nothing to catch it.
+        XCTAssertEqual(
+            HUDPanelGeometry.sizeRejection(NSSize(width: -CGFloat.infinity, height: 148)),
+            .nonFiniteWidth
+        )
+    }
+
     // MARK: - Size: zero and negative
 
     func test_size_zero_isRejected() {
@@ -180,28 +190,33 @@ final class HUDPanelGeometryTests: XCTestCase {
     private static let laptopVisibleFrame = NSRect(x: 0, y: 0, width: 1440, height: 875)
 
     func test_topRightOrigin_plausibleVisibleFrame() {
-        let origin = HUDPanelGeometry.topRightOrigin(
+        let placement = HUDPanelGeometry.topRightOrigin(
             visibleFrame: Self.laptopVisibleFrame,
             panelSize: NSSize(width: 300, height: 148),
             topInset: 38,
             rightInset: 16
         )
-        XCTAssertEqual(origin?.x, 1440 - 300 - 16)
-        XCTAssertEqual(origin?.y, 875 - 148 - 38)
+        XCTAssertEqual(placement?.origin.x, 1440 - 300 - 16)
+        XCTAssertEqual(placement?.origin.y, 875 - 148 - 38)
+        XCTAssertEqual(
+            placement?.sanitised, [],
+            "the clean path must report no substitutions — otherwise the caller logs an error on every normal placement"
+        )
     }
 
     func test_topRightOrigin_offsetVisibleFrame_secondaryDisplay() {
         // A display arranged to the left of the primary: the visible
         // frame's own origin is negative and must be honoured, which is
         // what `maxX` / `maxY` (not `width` / `height`) buy.
-        let origin = HUDPanelGeometry.topRightOrigin(
+        let placement = HUDPanelGeometry.topRightOrigin(
             visibleFrame: NSRect(x: -1920, y: 100, width: 1920, height: 1000),
             panelSize: NSSize(width: 300, height: 148),
             topInset: 38,
             rightInset: 16
         )
-        XCTAssertEqual(origin?.x, 0 - 300 - 16)
-        XCTAssertEqual(origin?.y, 1100 - 148 - 38)
+        XCTAssertEqual(placement?.origin.x, 0 - 300 - 16)
+        XCTAssertEqual(placement?.origin.y, 1100 - 148 - 38)
+        XCTAssertEqual(placement?.sanitised, [])
     }
 
     // MARK: - topRightOrigin: the no-prior-position case
@@ -213,77 +228,132 @@ final class HUDPanelGeometryTests: XCTestCase {
         // must still be computed — a skip here parks the HUD at the
         // seeded (0, 0) contentRect, i.e. the bottom-left corner of the
         // screen, silently, for the rest of the session.
-        let origin = try XCTUnwrap(HUDPanelGeometry.topRightOrigin(
+        let placement = try XCTUnwrap(HUDPanelGeometry.topRightOrigin(
             visibleFrame: Self.laptopVisibleFrame,
             panelSize: HUDPanelGeometry.seedContentSize,
             topInset: 38,
             rightInset: 16
         ))
-        XCTAssertEqual(origin.x, 1440 - 300 - 16)
-        XCTAssertEqual(origin.y, 875 - 100 - 38)
-        XCTAssertNotEqual(origin, .zero, "the fallback must be screen-derived, not the seeded origin")
+        XCTAssertEqual(placement.origin.x, 1440 - 300 - 16)
+        XCTAssertEqual(placement.origin.y, 875 - 100 - 38)
+        XCTAssertNotEqual(placement.origin, .zero, "the fallback must be screen-derived, not the seeded origin")
         XCTAssertNil(
-            HUDPanelGeometry.originRejection(origin),
+            HUDPanelGeometry.originRejection(placement.origin),
             "the fallback origin must itself pass the origin gate"
+        )
+        XCTAssertEqual(
+            placement.sanitised, [],
+            "seedContentSize is finite, so falling back to it is not a substitution and must not log as one"
         )
     }
 
-    // MARK: - topRightOrigin: sanitising non-finite terms
+    // MARK: - topRightOrigin: substituting non-finite terms
 
     func test_topRightOrigin_nonFinitePanelSize_isSanitisedToZero_notPropagated() throws {
         // A NaN in the panel size must not travel into the subtraction —
         // that is precisely how a NaN origin reaches setFrameOrigin.
-        let origin = try XCTUnwrap(HUDPanelGeometry.topRightOrigin(
+        let placement = try XCTUnwrap(HUDPanelGeometry.topRightOrigin(
             visibleFrame: Self.laptopVisibleFrame,
             panelSize: NSSize(width: CGFloat.nan, height: CGFloat.infinity),
             topInset: 38,
             rightInset: 16
         ))
-        XCTAssertEqual(origin.x, 1440 - 0 - 16)
-        XCTAssertEqual(origin.y, 875 - 0 - 38)
+        XCTAssertEqual(placement.origin.x, 1440 - 0 - 16)
+        XCTAssertEqual(placement.origin.y, 875 - 0 - 38)
         XCTAssertNil(
-            HUDPanelGeometry.originRejection(origin),
-            "a sanitised origin must pass the origin gate"
+            HUDPanelGeometry.originRejection(placement.origin),
+            "a substituted origin must pass the origin gate"
+        )
+        XCTAssertEqual(
+            placement.sanitised, [.panelWidth, .panelHeight],
+            "the substitution must be reported — an origin the origin gate accepts is one nothing downstream can log"
         )
     }
 
-    func test_topRightOrigin_nonFiniteInsets_areSanitisedToZero() {
+    func test_topRightOrigin_nonFiniteInsets_areSanitisedToZero() throws {
         // `HUDController.repositionPermissionPanels` accumulates
         // `topInset` from `panel.frame.height`, so one corrupt card's
         // frame would otherwise travel into the next card's origin.
-        let origin = HUDPanelGeometry.topRightOrigin(
+        let placement = try XCTUnwrap(HUDPanelGeometry.topRightOrigin(
             visibleFrame: Self.laptopVisibleFrame,
             panelSize: NSSize(width: 300, height: 148),
             topInset: CGFloat.nan,
             rightInset: CGFloat.infinity
-        )
-        XCTAssertEqual(origin?.x, 1440 - 300)
-        XCTAssertEqual(origin?.y, 875 - 148)
+        ))
+        XCTAssertEqual(placement.origin.x, 1440 - 300)
+        XCTAssertEqual(placement.origin.y, 875 - 148)
+        XCTAssertEqual(placement.sanitised, [.topInset, .rightInset])
+    }
+
+    /// Each of the four substitutable terms, driven independently and in
+    /// **both** polarities.
+    ///
+    /// Two mutations this kills that the combined cases above do not: a
+    /// per-term guard that handles NaN but not infinity (or vice versa),
+    /// and a mis-wired `SanitisedTerm` that reports the wrong term because
+    /// every combined case substitutes two terms at once.
+    func test_topRightOrigin_eachTermIsSubstitutedIndependently_inBothPolarities() throws {
+        let base = NSSize(width: 300, height: 148)
+        for bad in [CGFloat.nan, .infinity, -.infinity] {
+            let cases: [(HUDPanelGeometry.Placement?, HUDPanelGeometry.SanitisedTerm, CGFloat, CGFloat)] = [
+                (HUDPanelGeometry.topRightOrigin(
+                    visibleFrame: Self.laptopVisibleFrame,
+                    panelSize: NSSize(width: bad, height: base.height),
+                    topInset: 38, rightInset: 16
+                ), .panelWidth, 1440 - 0 - 16, 875 - 148 - 38),
+
+                (HUDPanelGeometry.topRightOrigin(
+                    visibleFrame: Self.laptopVisibleFrame,
+                    panelSize: NSSize(width: base.width, height: bad),
+                    topInset: 38, rightInset: 16
+                ), .panelHeight, 1440 - 300 - 16, 875 - 0 - 38),
+
+                (HUDPanelGeometry.topRightOrigin(
+                    visibleFrame: Self.laptopVisibleFrame,
+                    panelSize: base,
+                    topInset: bad, rightInset: 16
+                ), .topInset, 1440 - 300 - 16, 875 - 148 - 0),
+
+                (HUDPanelGeometry.topRightOrigin(
+                    visibleFrame: Self.laptopVisibleFrame,
+                    panelSize: base,
+                    topInset: 38, rightInset: bad
+                ), .rightInset, 1440 - 300 - 0, 875 - 148 - 38)
+            ]
+
+            for (result, term, expectedX, expectedY) in cases {
+                let placement = try XCTUnwrap(result, "\(term) with \(bad) must still yield a placement")
+                XCTAssertEqual(placement.sanitised, [term], "\(bad) in \(term) reported the wrong term")
+                XCTAssertEqual(placement.origin.x, expectedX, "\(term) / \(bad)")
+                XCTAssertEqual(placement.origin.y, expectedY, "\(term) / \(bad)")
+                XCTAssertNil(HUDPanelGeometry.originRejection(placement.origin))
+            }
+        }
     }
 
     // MARK: - topRightOrigin: the one unrecoverable input
 
-    func test_topRightOrigin_nonFiniteVisibleFrameSize_returnsNil() {
-        XCTAssertNil(
-            HUDPanelGeometry.topRightOrigin(
-                visibleFrame: NSRect(x: 0, y: 0, width: CGFloat.nan, height: 875),
-                panelSize: NSSize(width: 300, height: 148),
-                topInset: 38,
-                rightInset: 16
-            ),
-            "with no usable screen geometry there is no screen-derived fallback to return"
-        )
-    }
-
-    func test_topRightOrigin_nonFiniteVisibleFrameOrigin_returnsNil() {
-        XCTAssertNil(
-            HUDPanelGeometry.topRightOrigin(
-                visibleFrame: NSRect(x: 0, y: CGFloat.infinity, width: 1440, height: 875),
-                panelSize: NSSize(width: 300, height: 148),
-                topInset: 38,
-                rightInset: 16
+    /// All four `visibleFrame` components, each driven to non-finite on its
+    /// own. The guard ANDs them, so a case only ever exercised alongside
+    /// another leaves its own limb free to be deleted.
+    func test_topRightOrigin_eachNonFiniteVisibleFrameComponent_returnsNil() {
+        let frames: [(String, NSRect)] = [
+            ("origin.x",    NSRect(x: CGFloat.nan, y: 0, width: 1440, height: 875)),
+            ("origin.y",    NSRect(x: 0, y: CGFloat.infinity, width: 1440, height: 875)),
+            ("size.width",  NSRect(x: 0, y: 0, width: CGFloat.nan, height: 875)),
+            ("size.height", NSRect(x: 0, y: 0, width: 1440, height: -CGFloat.infinity))
+        ]
+        for (label, frame) in frames {
+            XCTAssertNil(
+                HUDPanelGeometry.topRightOrigin(
+                    visibleFrame: frame,
+                    panelSize: NSSize(width: 300, height: 148),
+                    topInset: 38,
+                    rightInset: 16
+                ),
+                "non-finite visibleFrame \(label): with no usable screen geometry there is no screen-derived fallback to return"
             )
-        )
+        }
     }
 
     // MARK: - Exhaustiveness
@@ -308,6 +378,50 @@ final class HUDPanelGeometryTests: XCTestCase {
                 continue
             }
             XCTAssertEqual(produce(), expected, "\(expected) is not produced by its documented input")
+        }
+    }
+
+    func test_everySanitisedTermCase_isProducedBySomeInput() {
+        // Same discipline as the Rejection exhaustiveness test above: a
+        // term the caller can never be told about is a term whose
+        // substitution is silent, which is the defect this type exists to
+        // prevent.
+        let base = NSSize(width: 300, height: 148)
+        let producers: [HUDPanelGeometry.SanitisedTerm: () -> [HUDPanelGeometry.SanitisedTerm]?] = [
+            .panelWidth: {
+                HUDPanelGeometry.topRightOrigin(
+                    visibleFrame: Self.laptopVisibleFrame,
+                    panelSize: NSSize(width: CGFloat.nan, height: base.height),
+                    topInset: 38, rightInset: 16
+                )?.sanitised
+            },
+            .panelHeight: {
+                HUDPanelGeometry.topRightOrigin(
+                    visibleFrame: Self.laptopVisibleFrame,
+                    panelSize: NSSize(width: base.width, height: CGFloat.nan),
+                    topInset: 38, rightInset: 16
+                )?.sanitised
+            },
+            .topInset: {
+                HUDPanelGeometry.topRightOrigin(
+                    visibleFrame: Self.laptopVisibleFrame,
+                    panelSize: base, topInset: CGFloat.nan, rightInset: 16
+                )?.sanitised
+            },
+            .rightInset: {
+                HUDPanelGeometry.topRightOrigin(
+                    visibleFrame: Self.laptopVisibleFrame,
+                    panelSize: base, topInset: 38, rightInset: CGFloat.nan
+                )?.sanitised
+            }
+        ]
+
+        for expected in HUDPanelGeometry.SanitisedTerm.allCases {
+            guard let produce = producers[expected] else {
+                XCTFail("no input produces \(expected) — add one or drop the case")
+                continue
+            }
+            XCTAssertEqual(produce(), [expected], "\(expected) is not produced by its documented input")
         }
     }
 }
