@@ -169,7 +169,14 @@ round repeating the superseded plan's failure.
 | | interceptor **silent** | interceptor **logged an `OBJC THROW`** |
 |---|---|---|
 | **no crash** | Plan confirmed → §5. | **AE3** — issue still closes, *and* a thrower survives that this plan did not enumerate. Name it and extend the audit in `NoType/UI/CLAUDE.md`. |
-| **crash** | **THIS PLAN IS WRONG** — see below. | **AE4** — completed round, negative result. The log names the next target. Do not retry the same round in variations. |
+| **crash** | **AE4 — THIS PLAN IS WRONG.** See below. | **R3** — completed round, negative result. The log names the next target. Do not retry the same round in variations. |
+
+> **ID note.** The plan's summary table (`…-plan.md` §26) puts the `AE4` label on
+> the crash + *logged* cell. Its normative `AE4` block (§139, "Covers R3, R4a")
+> and its Step 9 text (§445) both put it on crash + *silent* — the falsifier —
+> and assign `R3` to crash + logged. Two of three plan locations agree, so this
+> table follows them. The plan's §26 is the outlier and should be corrected to
+> match; the four branches themselves are not in dispute.
 
 **Crash + silent interceptor is the falsifier.** Handle it in this order:
 

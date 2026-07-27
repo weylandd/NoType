@@ -20,10 +20,13 @@ import AppKit
 /// **Scope — do not overclaim this helper.** It closes a latent
 /// NaN-geometry bug. It is a *ranked suspect* for the crash family above,
 /// not a confirmed culprit: no call in this file has been observed
-/// raising in the wild, and `HUDController.presentMissing` is gated on
-/// `onboarding.isComplete`, so this path is dead for a user parked
-/// mid-onboarding. What names the actual thrower is
-/// `NoType/Diagnostics/ExceptionBreadcrumb.swift`, not this file.
+/// raising in the wild, and this path is *mostly* dead for a user parked
+/// mid-onboarding — two of the three `presentMissing` callers are gated
+/// on `onboarding.isComplete`, but `AppState.handleHotkeyPress` is not,
+/// so a stray hotkey press with the microphone ungranted still builds a
+/// panel mid-wizard. Do not read that as an exclusion. What names the
+/// actual thrower is `NoType/Diagnostics/ExceptionBreadcrumb.swift`, not
+/// this file.
 ///
 /// **Rejection policy — deliberate, and asymmetric between the two.**
 ///

@@ -114,7 +114,7 @@ Only one of {recording, transcribing} is visible at a time. Permission cards sta
 
 Wizard lives in `NoType/Onboarding/` (separate folder so the step files don't drown out the regular UI). Five screens — Welcome → API key → Permissions → Mic check → Hotkey check.
 
-- **Permission HUDs are suppressed during onboarding** — `AppState`'s launch auto-show and `handleMenuBarOpened` both gate on `onboarding.isComplete`. The wizard's permissions step drives its own prompts.
+- **Permission HUDs are suppressed during onboarding — with one gap.** `AppState`'s launch auto-show and `handleMenuBarOpened` both gate on `onboarding.isComplete`; the wizard's permissions step drives its own prompts. **`handleHotkeyPress` does not gate on it**: once Accessibility is granted (wizard step 3) the tap is live, and a press with the microphone still ungranted calls `hud.presentMissing([.microphone])`. `onboardingHotkeyPressObserver` short-circuits that only on the hotkey-check step, so the permissions and mic-check steps are exposed. Don't cite "HUDs are suppressed during onboarding" as if it were total — it is the reason the crash-family entry can't call `HUDPanel` and `MicProbe` mutually exclusive.
 - **Hotkey-test isolation** — the hotkey-check step sets `appState.onboardingHotkeyPressObserver` (and release sibling) on `.appear`. While set, `handleHotkeyPress` short-circuits before starting a `RecordingSession`.
 - **Mic check uses `MicProbe`** (`NoType/Onboarding/MicProbe.swift`) — its own `AVAudioEngine` instance, no VAD, no `RecordingSession`. Spectrum renderer duplicated as a step-local `OnboardingSpectrumMeter` (sized 360 × 80 vs the HUD's 36 pt strip).
 
