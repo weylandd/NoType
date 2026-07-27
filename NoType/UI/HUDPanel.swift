@@ -22,7 +22,11 @@ final class HUDPanel: NSPanel {
     private static let cornerRadius: CGFloat = 14
     private static let log = Logger(subsystem: "app.notype", category: "ui.hud")
 
-    private let blurView: NSVisualEffectView
+    // Only the hosting view is retained: `positionTopRight` re-measures its
+    // `fittingSize` on every placement. The blur view needs no stored
+    // reference — assigning it to `contentView` below is what owns it, and a
+    // second strong reference from the panel to a view its own `contentView`
+    // already retains bought nothing.
     private let hostingView: NSView
 
     init(rootView: some View) {
@@ -39,7 +43,6 @@ final class HUDPanel: NSPanel {
         blur.layer?.cornerRadius = HUDPanel.cornerRadius
         blur.layer?.masksToBounds = true
         blur.translatesAutoresizingMaskIntoConstraints = false
-        self.blurView = blur
 
         let host = NSHostingView(rootView: rootView)
         host.translatesAutoresizingMaskIntoConstraints = false

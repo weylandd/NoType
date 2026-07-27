@@ -465,9 +465,23 @@ enum LaunchPathScanner {
     /// character must not be followed by one (so `NSApp` does not match
     /// `NSAppearance`).
     static func line(_ line: String, contains needle: String) -> Bool {
+        matchIndex(line, of: needle) != nil
+    }
+
+    /// The character offset of the first match of `needle` in `line`, under
+    /// exactly the semantics ``line(_:contains:)`` documents, or `nil`.
+    ///
+    /// Non-private, and separate from the `Bool` form, because
+    /// `RaiseSiteScanner` (`HUDPanelGeometryTests.swift`) needs the *position*
+    /// of a match to resolve which function encloses it — and re-implementing
+    /// the whitespace-normalisation and identifier-boundary rules there would
+    /// be a second needle matcher to keep in sync, which is the failure mode
+    /// `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`
+    /// warns about at the needle layer.
+    static func matchIndex(_ line: String, of needle: String) -> Int? {
         let hay = Array(line)
         let pat = Array(needle)
-        guard !pat.isEmpty else { return false }
+        guard !pat.isEmpty else { return nil }
         let lastIsIdent = pat[pat.count - 1].isLetter || pat[pat.count - 1].isNumber || pat[pat.count - 1] == "_"
 
         var start = 0
@@ -493,11 +507,11 @@ enum LaunchPathScanner {
                     start += 1
                     continue
                 }
-                return true
+                return start
             }
             start += 1
         }
-        return false
+        return nil
     }
 
     // MARK: Discovery
@@ -722,19 +736,30 @@ enum LaunchPathScanner {
 
     // MARK: Parsing primitives
 
-    private struct Function {
+    /// Non-private for the same reason ``needles`` and ``matchIndex(_:of:)``
+    /// are: `RaiseSiteScanner` (`HUDPanelGeometryTests.swift`) resolves which
+    /// function encloses a raise-prone call, and a second brace matcher is a
+    /// second thing to keep correct.
+    struct Function {
         let name: String
         let body: String
         /// Character range of the body (excluding braces) in the stripped
         /// source. Used to subtract function bodies when isolating the
-        /// stored-property declarations that run during construction.
+        /// stored-property declarations that run during construction, and to
+        /// resolve the innermost function enclosing a given offset.
         let range: Range<Int>
     }
 
     /// All `func <name>(…) { … }` and `init(…) { … }` bodies, via brace
     /// matching. Input must already have comments and string literals
     /// stripped so the brace count is trustworthy.
-    private static func functionBodies(in code: String) -> [Function] {
+    ///
+    /// `deinit` is deliberately **not** matched: the `init` branch rejects a
+    /// match preceded by an identifier character, so `deinit`'s body resolves
+    /// to no enclosing function. That is the conservative direction for
+    /// `RaiseSiteScanner` — a raise-prone call written directly in a `deinit`
+    /// is reported as sitting outside every chokepoint, which is true.
+    static func functionBodies(in code: String) -> [Function] {
         var result: [Function] = []
         let chars = Array(code)
 
