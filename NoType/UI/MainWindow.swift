@@ -334,7 +334,15 @@ struct FixedSizeWindowConfigurator: NSViewRepresentable {
     /// case is produced by at least one state, so adding a case without an
     /// input that reaches it goes red instead of shipping dead
     /// classification. Same discipline as `HUDPanelGeometry.Rejection`.
-    enum LockReason: Hashable, Sendable, CaseIterable, CustomStringConvertible {
+    ///
+    /// Deliberately *not* `CustomStringConvertible`, which is where this
+    /// diverges from `HUDPanelGeometry.Rejection` and
+    /// `MicProbeFormatGate.Rejection`: both of those interpolate their
+    /// rejection into a `Logger` line, so a `description` has a consumer.
+    /// ``lock(window:to:)`` only tests the result against `nil` and logs
+    /// nothing, so the conformance would be dead code. Add it back together
+    /// with the logging caller, not ahead of it.
+    enum LockReason: Hashable, Sendable, CaseIterable {
         /// SwiftUI is still forwarding a resizable style mask to AppKit —
         /// the fresh-window case, and the case every re-configuration
         /// (Mission Control, Space switch, display add/remove) restores.
@@ -345,15 +353,6 @@ struct FixedSizeWindowConfigurator: NSViewRepresentable {
         case maxSizeMismatch
         /// The window is not sitting at the target size.
         case frameSizeMismatch
-
-        var description: String {
-            switch self {
-            case .resizable:         "style mask still carries .resizable"
-            case .minSizeMismatch:   "minSize is not the target size"
-            case .maxSizeMismatch:   "maxSize is not the target size"
-            case .frameSizeMismatch: "frame size is not the target size"
-            }
-        }
     }
 
     /// Returns `nil` when `state` already matches `target` — nothing for
@@ -363,8 +362,10 @@ struct FixedSizeWindowConfigurator: NSViewRepresentable {
     /// safe?".** See ``lock(window:to:)`` for why those are different
     /// questions here and why only the first one is answerable.
     ///
-    /// Limb order is fixed so a caller that ever logs the reason gets a
-    /// stable line: resizable → minSize → maxSize → frame size.
+    /// Limb order is fixed — resizable → minSize → maxSize → frame size — so
+    /// which reason a multi-mismatch state reports is deterministic rather
+    /// than whichever limb happened to be evaluated. Pinned by
+    /// `FixedSizeWindowConfiguratorTests`.
     static func lockReason(for state: WindowState, target: NSSize) -> LockReason? {
         if state.isResizable { return .resizable }
         if state.minSize != target { return .minSizeMismatch }
@@ -415,11 +416,21 @@ struct FixedSizeWindowConfigurator: NSViewRepresentable {
     ///    That has not been checked.
     ///
     /// So what this buys is narrower exposure plus a real latent-performance
-    /// fix (no AppKit round-trip on every body update). If evidence ever
-    /// names `NSInternalInconsistencyException` from this site, the fix is
-    /// the containment escalation — bridging the mutation off the
-    /// concurrency job so there is no `ExecutorTrackingInfo` node to unwind
-    /// through — not a sharper predicate.
+    /// fix (no AppKit round-trip on every body update) — **conditional on the
+    /// window actually settling at `size`.** `minSize` / `maxSize` / `frame`
+    /// are frame-space, and AppKit's `constrainFrameRect(_:to:)` clamps the
+    /// frame to the screen's visible area, so on a display too short for
+    /// `size` the frame limb never matches, `lockReason` returns
+    /// `.frameSizeMismatch` on every call, and nothing is ever skipped. That
+    /// degrades to exactly the pre-guard behaviour — never worse — but it is
+    /// why "the repeats are cheap" is not an unconditional claim. No test
+    /// covers it: `MutationCountingWindow` overrides `constrainFrameRect` to
+    /// the identity so the acceptance test stays machine-independent.
+    ///
+    /// If evidence ever names `NSInternalInconsistencyException` from this
+    /// site, the fix is the containment escalation — bridging the mutation
+    /// off the concurrency job so there is no `ExecutorTrackingInfo` node to
+    /// unwind through — not a sharper predicate.
     static func lock(window: NSWindow, to size: NSSize) {
         guard lockReason(for: WindowState(window), target: size) != nil else { return }
         window.styleMask.remove(.resizable)

@@ -181,6 +181,30 @@ final class FixedSizeWindowConfiguratorTests: XCTestCase {
         XCTAssertEqual(FixedSizeWindowConfigurator.lockReason(for: state, target: target), .resizable)
     }
 
+    func test_lockReason_minAndMaxAndFrameAllDiffer_reportsMinSizeFirst() {
+        // `lockReason`'s doc-comment pins the FULL limb order, not just
+        // "resizable wins". Without these two cases only the first limb's
+        // precedence is proven, so reordering minSize/maxSize/frameSize
+        // would ship green.
+        let state = FixedSizeWindowConfigurator.WindowState(
+            isResizable: false,
+            minSize: NSSize(width: 1, height: 1),
+            maxSize: NSSize(width: 2, height: 2),
+            frameSize: NSSize(width: 3, height: 3)
+        )
+        XCTAssertEqual(FixedSizeWindowConfigurator.lockReason(for: state, target: target), .minSizeMismatch)
+    }
+
+    func test_lockReason_maxAndFrameDiffer_reportsMaxSizeFirst() {
+        let state = FixedSizeWindowConfigurator.WindowState(
+            isResizable: false,
+            minSize: target,
+            maxSize: NSSize(width: 2, height: 2),
+            frameSize: NSSize(width: 3, height: 3)
+        )
+        XCTAssertEqual(FixedSizeWindowConfigurator.lockReason(for: state, target: target), .maxSizeMismatch)
+    }
+
     func test_everyLockReasonCase_isProducedBySomeState() {
         // Guards the classification against rot: a case added with no state
         // that produces it fails here instead of shipping dead
@@ -298,6 +322,43 @@ final class FixedSizeWindowConfiguratorTests: XCTestCase {
         XCTAssertFalse(window.styleMask.contains(.resizable))
         XCTAssertEqual(window.minSize, target)
         XCTAssertEqual(window.maxSize, target)
+    }
+
+    func test_lock_afterReconfigurationReassertsResizable_mutatesAgain() {
+        // The other half of the containment claim, and the regression an
+        // over-eager future predicate would introduce: the guard may skip the
+        // steady-state repeats, never a genuine re-lock. `lock`'s doc-comment
+        // states that Mission Control / Space switch / display add-remove
+        // re-assert `.resizable` and therefore still pass the predicate —
+        // asserted here through `lock`, not just at the pure-predicate level.
+        // If this goes red, the window silently stops being fixed-size after
+        // the user's first Space switch.
+        let window = MutationCountingWindow.makeResizable()
+        FixedSizeWindowConfigurator.lock(window: window, to: target)
+        FixedSizeWindowConfigurator.lock(window: window, to: target)
+        let settled = window.mutationCount
+
+        window.styleMask.insert(.resizable)   // stand-in for an AppKit re-configuration
+        let afterReassert = window.mutationCount
+        XCTAssertTrue(
+            window.styleMask.contains(.resizable),
+            "Precondition: the simulated reconfiguration re-asserted .resizable."
+        )
+        XCTAssertGreaterThan(
+            afterReassert, settled,
+            "Precondition: the simulated re-assert is itself a counted write."
+        )
+
+        FixedSizeWindowConfigurator.lock(window: window, to: target)
+
+        XCTAssertGreaterThan(
+            window.mutationCount, afterReassert,
+            "A window whose .resizable bit came back must be re-locked, not skipped."
+        )
+        XCTAssertFalse(
+            window.styleMask.contains(.resizable),
+            "The re-lock must strip the bit again."
+        )
     }
 }
 
