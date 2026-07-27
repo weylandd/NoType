@@ -14,16 +14,104 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
 - **Found the actual cause of the macOS 26 crash** ([#82](https://github.com/weylandd/NoType/issues/82)), and corrected the documentation that named the wrong one. NoType raises an internal Objective-C error inside a background job; macOS absorbs it and keeps running, but the concurrency runtime is left corrupted and the app falls over shortly afterwards at an unrelated click. The three previous incidents — a timeline view, a hover handler, a button — were all innocent bystanders, which is why fixing each of them only moved the crash. The mechanism was reproduced locally rather than inferred.
 - Two things this retires: the start-up rework shipped in 0.1.13-rc1 was tested and **did not** fix the crash (it remains correct for its own reasons), and the README no longer suggests updating macOS as a workaround — the trigger is in NoType, not in the OS.
 - `docs/solutions/runtime-errors/` now records the proven mechanism, the diagnostic breadcrumb that identifies it in any crash report, and every hypothesis that was disproven along the way.
+- The code that came out of that — the exception watcher and the three raise-prone call sites it was written around — is listed under the **0.1.13-rc1 build 16** section below. It is on `main` and rolls into the next ordinary release; the rc section is where it is written up because that is the build the two affected users are testing.
 
 ---
 
-## [0.1.13-rc1] — 2026-07-25
+## [0.1.13-rc1] — build 16 — 2026-07-27
+
+Second test build under the same version string, handed out directly —
+still not in the auto-update feed, and installed copies will not be
+offered it. **The version string is reused on purpose**: `0.1.13-rc1` was
+never tagged or released, so the *build number* is the only thing that
+tells the two rounds apart. This is **build 16**; the **build 15** entry
+below is a different build with different contents. Check
+"0.1.13-rc1 (16)" in About before reporting anything against it.
+
+Build 15 tested one idea — the start-up rework — and it did **not** fix
+the macOS 26 crash
+([#82](https://github.com/weylandd/NoType/issues/82)). Build 16 tests a
+different one, arrived at by reproducing the crash locally instead of
+guessing at it: NoType raises an internal Objective-C error inside a
+background job, macOS absorbs it silently and keeps going, and the app
+falls over at an unrelated click some time afterwards. **Which** of
+NoType's own calls raises that error is still not known — so this build
+does two things at once: it closes the likeliest candidates, and it adds
+a watcher that names the culprit if one of them still fires. Nothing
+here is confirmed to fix the crash.
+
+### Added
+- **A permanent watcher for the internal errors macOS hides.** NoType now
+  writes a line to the macOS system log every time an Objective-C error
+  is raised anywhere in the process — including the ones macOS absorbs
+  without ever showing a crash. It records the error's name and where it
+  came from, changes nothing about what the app does, and sends nothing
+  anywhere: the records sit on your Mac until you choose to post them.
+  Anything key- or password-shaped is stripped before writing, and it
+  stops after 20 records per launch so it can't crowd other apps out of
+  the shared system log. README → "Known issues" carries the one-line
+  command for reading it back, and a note to read the output before
+  posting it.
+
+### Fixed
+- **The onboarding mic check no longer risks taking the app down when
+  your audio device changes mid-check.** Switching input devices while
+  the mic-check screen is open could hand the audio engine a format that
+  disagreed with the hardware, which raises exactly the kind of internal
+  error described above. NoType now checks the format immediately before
+  use and declines the unsafe attempt instead. **If the spectrum meter
+  stays flat, that is this guard declining — not a broken microphone.**
+  Carry on through onboarding either way.
+- **Floating panels can no longer be positioned with an invalid size or
+  origin.** The permission / recording / transcribing / error panels
+  measure themselves before macOS has given them a screen to sit on, and
+  that measurement can come back as "not a number". Handing that to macOS
+  raises an internal error. NoType now validates it first, falls back to
+  a screen-derived top-right position rather than dropping the panel in
+  the bottom-left corner for the rest of the session, and logs whenever
+  it had to substitute anything.
+
+### Changed
+- **The main window stops re-applying its fixed-size lock when nothing
+  changed.** It re-ran on every redraw; it now skips when the window
+  already matches. This narrows how often a risky window mutation runs —
+  it deliberately does **not** claim to remove it, and the first lock,
+  the one most likely to misfire, still runs unchanged.
+
+### Internal
+- `CFBundleVersion` 15 → 16. `CFBundleShortVersionString` stays
+  `0.1.13-rc1` — never tagged, so the string is free to reuse — which is
+  why the build integer is what distinguishes the rounds in the issue
+  log.
+- New `docs/solutions/` material: the exception-preprocessor chaining
+  rule (dropping the chain converts a silently absorbed error into an
+  immediate abort on every machine — measured, not argued), and the
+  convention that a raise-prone AppKit / AVFoundation / CoreAudio call
+  inside a main-actor job is made only after validating its
+  preconditions, with the audit of the sites that reach it split by
+  whether the precondition is checkable at all.
+- A source-scan guard pins that every geometry call in `HUDPanel.swift`
+  and every tap mutation in `MicProbe.swift` stays inside its validating
+  wrapper, carrying the presence complement that stops the scan passing
+  green over a deleted wrapper.
+- Corrected the crash entry's claim that the HUD reposition loop runs
+  "roughly once per second by the permission poll". It is event-driven:
+  the 1 s poll wakes the observation loop but the loop only acts on an
+  actual permission-status change.
+
+---
+
+## [0.1.13-rc1] — build 15 — 2026-07-25
 
 Test build, handed out directly rather than published — it is not in the
 auto-update feed and installed copies will not be offered it. The point
 of this RC is to find out whether the start-up rework below fixes the
 macOS 26.2 crash reported in
 [issue #82](https://github.com/weylandd/NoType/issues/82).
+
+**Outcome: it did not.** Kept here as the record of what was tested;
+build 16 above is the follow-on round. Nothing in this section has been
+edited beyond the heading and this note.
 
 ### Fixed
 - **Auto-updates now actually run for menu-bar-only users.** NoType's
