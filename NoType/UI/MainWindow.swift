@@ -274,6 +274,11 @@ struct MainWindowView: View {
 // view to a window; SwiftUI may update the body without a re-attach.
 // `updateNSView` re-strips the bit on every body update so the lock
 // recovers without an actual re-attach event.
+//
+// Both call sites stay. `lock(window:to:)` is guarded by
+// `lockReason(for:target:)` so the steady-state repeats are cheap rather
+// than absent — see that method's doc-comment for why the guard narrows
+// exposure to a raise-prone mutation and does not remove it.
 
 struct FixedSizeWindowConfigurator: NSViewRepresentable {
     let size: NSSize
@@ -292,7 +297,131 @@ struct FixedSizeWindowConfigurator: NSViewRepresentable {
         Self.lock(window: window, to: size)
     }
 
+    /// The four window facts `lock(window:to:)` would mutate, snapshotted
+    /// so "does this window still need locking?" can be asked as a pure
+    /// function with no `NSWindow` in the test.
+    ///
+    /// Same shape as `MicProbeFormatGate.Shape`: an explicit memberwise
+    /// initializer for tests, plus a convenience initializer that reads the
+    /// live object.
+    struct WindowState: Equatable, Sendable {
+        let isResizable: Bool
+        let minSize: NSSize
+        let maxSize: NSSize
+        let frameSize: NSSize
+
+        init(isResizable: Bool, minSize: NSSize, maxSize: NSSize, frameSize: NSSize) {
+            self.isResizable = isResizable
+            self.minSize = minSize
+            self.maxSize = maxSize
+            self.frameSize = frameSize
+        }
+
+        @MainActor
+        init(_ window: NSWindow) {
+            self.init(
+                isResizable: window.styleMask.contains(.resizable),
+                minSize: window.minSize,
+                maxSize: window.maxSize,
+                frameSize: window.frame.size
+            )
+        }
+    }
+
+    /// Why the window still needs the fixed-size lock applied.
+    ///
+    /// `CaseIterable` exists for the exhaustiveness test — it asserts every
+    /// case is produced by at least one state, so adding a case without an
+    /// input that reaches it goes red instead of shipping dead
+    /// classification. Same discipline as `HUDPanelGeometry.Rejection`.
+    enum LockReason: Hashable, Sendable, CaseIterable, CustomStringConvertible {
+        /// SwiftUI is still forwarding a resizable style mask to AppKit —
+        /// the fresh-window case, and the case every re-configuration
+        /// (Mission Control, Space switch, display add/remove) restores.
+        case resizable
+        /// `minSize` is not pinned to the target.
+        case minSizeMismatch
+        /// `maxSize` is not pinned to the target.
+        case maxSizeMismatch
+        /// The window is not sitting at the target size.
+        case frameSizeMismatch
+
+        var description: String {
+            switch self {
+            case .resizable:         "style mask still carries .resizable"
+            case .minSizeMismatch:   "minSize is not the target size"
+            case .maxSizeMismatch:   "maxSize is not the target size"
+            case .frameSizeMismatch: "frame size is not the target size"
+            }
+        }
+    }
+
+    /// Returns `nil` when `state` already matches `target` — nothing for
+    /// ``lock(window:to:)`` to do — otherwise the first fact that differs.
+    ///
+    /// **This answers "is the mutation needed?", never "is the mutation
+    /// safe?".** See ``lock(window:to:)`` for why those are different
+    /// questions here and why only the first one is answerable.
+    ///
+    /// Limb order is fixed so a caller that ever logs the reason gets a
+    /// stable line: resizable → minSize → maxSize → frame size.
+    static func lockReason(for state: WindowState, target: NSSize) -> LockReason? {
+        if state.isResizable { return .resizable }
+        if state.minSize != target { return .minSizeMismatch }
+        if state.maxSize != target { return .maxSizeMismatch }
+        if state.frameSize != target { return .frameSizeMismatch }
+        return nil
+    }
+
+    /// Apply the fixed-size lock, skipping the AppKit mutations entirely
+    /// when the window already matches `size`.
+    ///
+    /// **The guard is containment. It narrows exposure to a raise-prone
+    /// mutation; it does not remove the raise, and must not be counted as
+    /// removing it.** Mutating `styleMask` on a window AppKit is still
+    /// configuring can raise `NSInternalInconsistencyException`, and
+    /// `setFrame(_:display: true)` right behind it forces a synchronous
+    /// display pass. An Objective-C exception unwinding out of a main-actor
+    /// Swift-concurrency job orphans the thread's `ExecutorTrackingInfo`,
+    /// so the *next* "am I on the main executor?" check SIGSEGVs somewhere
+    /// unrelated — see
+    /// `docs/solutions/runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md`.
+    ///
+    /// `MicProbeFormatGate` and `HUDPanelGeometry` validate the argument
+    /// that would make their call raise, so their raise never happens. This
+    /// guard cannot do the equivalent, for three separate reasons — stated
+    /// here so a later reader does not file this under "raise removed":
+    ///
+    /// 1. **The precondition is not checkable.** It is *"AppKit is not
+    ///    currently reconfiguring this window"*, and no API answers that.
+    ///    ``lockReason(for:target:)`` decides only whether the mutation is
+    ///    *needed*.
+    /// 2. **The predicate skips the safe calls and never the dangerous
+    ///    one.** The first `lock` arrives from
+    ///    `WindowAwareView.viewDidMoveToWindow` — while AppKit is attaching
+    ///    the window, precisely the mid-configure moment a raise needs. At
+    ///    that instant the style mask still carries `.resizable`, so the
+    ///    predicate says "needed" and the mutation runs unchanged. The
+    ///    genuine re-lock events (Mission Control, Space switch, display
+    ///    add/remove) are re-configurations too and re-assert `.resizable`,
+    ///    so they pass as well. What is skipped is the steady-state
+    ///    `updateNSView` repeats — the calls least likely to raise.
+    /// 3. **Neither caller is established as a Swift-concurrency job.**
+    ///    `updateNSView` and `viewDidMoveToWindow` are synchronous
+    ///    SwiftUI / AppKit callbacks. The mechanism above requires the raise
+    ///    to unwind through `libswift_Concurrency`; if these are not reached
+    ///    from inside a `Task { @MainActor }`, a raise here cannot orphan
+    ///    the executor identity at all and this site is not in that family.
+    ///    That has not been checked.
+    ///
+    /// So what this buys is narrower exposure plus a real latent-performance
+    /// fix (no AppKit round-trip on every body update). If evidence ever
+    /// names `NSInternalInconsistencyException` from this site, the fix is
+    /// the containment escalation — bridging the mutation off the
+    /// concurrency job so there is no `ExecutorTrackingInfo` node to unwind
+    /// through — not a sharper predicate.
     static func lock(window: NSWindow, to size: NSSize) {
+        guard lockReason(for: WindowState(window), target: size) != nil else { return }
         window.styleMask.remove(.resizable)
         window.minSize = size
         window.maxSize = size
