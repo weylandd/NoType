@@ -1,4 +1,4 @@
-# Hand-off round checklist — executor-corruption fix (build 16)
+# Hand-off round checklist — executor-corruption fix (0.1.13-rc2, build 17)
 
 Operational companion to
 [`2026-07-26-001-fix-swallowed-exception-executor-corruption-plan.md`](./2026-07-26-001-fix-swallowed-exception-executor-corruption-plan.md),
@@ -31,8 +31,8 @@ That mechanism is proven end to end (reproduced locally, 2026-07-26).
 **Which of NoType's calls throws is not.** `MicProbe`'s tap format,
 `HUDPanel`'s geometry, the fixed-size window lock and the SileroVAD /
 CoreML load are **ranked suspects** — none has been observed firing in the
-wild, and there may be more than one. Build 16 closes the checkable ones
-and ships an interceptor that names whatever still fires.
+wild, and there may be more than one. `0.1.13-rc2` closes the checkable
+ones and ships an interceptor that names whatever still fires.
 
 ---
 
@@ -69,9 +69,22 @@ What the lines mean:
 This is the Step 2 verification that is still outstanding. Do it on the
 build that is going out, not on a scratch build.
 
-- [ ] `CFBundleShortVersionString` is `0.1.13-rc1` and `CFBundleVersion`
-      is **16**. (Already committed — re-confirm in the built bundle's
+- [ ] `CFBundleShortVersionString` is `0.1.13-rc2` and `CFBundleVersion`
+      is **17**. (Already committed — re-confirm in the built bundle's
       `Info.plist`, not just in the repo.)
+
+      > **Deviation from the plan's KTD7, on the record.** KTD7 said to
+      > keep the string at `0.1.13-rc1` and let the build integer
+      > separate the rounds. It was overridden here: `Settings → About`
+      > renders only `CFBundleShortVersionString`
+      > (`NoType/UI/Settings/Components/VersionBlock.swift`), and the
+      > DMG is named from the same string — so a second hand-off build
+      > reusing `0.1.13-rc1` would be indistinguishable *to the tester
+      > holding it*, which is exactly the attribution a hand-off round
+      > exists to produce. KTD7's surviving half stands: bump
+      > `CFBundleVersion` once per hand-off build. So does KD5 — a
+      > hand-off rc artefact is **never** published to the appcast.
+      > The plan's KTD7 entry carries the same note.
 - [ ] Launch the build. Run the command in §1. Confirm **exactly one**
       `EXC BREADCRUMB armed` record for that launch, and that it says
       **`chained=true`**.
@@ -134,7 +147,10 @@ kind of evidence this plan has.
 
 ### 3c. Arm 2 — the hand-off build
 
-- [ ] Install build 16. Confirm the tester sees **0.1.13-rc1 (16)**.
+- [ ] Install the hand-off build. Confirm the tester sees
+      **0.1.13-rc2** in Settings → About. (About shows the version
+      string only, not the build integer — `0.1.13-rc2` is the whole
+      string they should read back.)
 - [ ] Complete onboarding end to end.
 - [ ] Exercise buttons across the main window and the popover.
 - [ ] Run the §1 command **whether or not it crashed**. This is not
@@ -147,8 +163,8 @@ kind of evidence this plan has.
 Every entry carries all of:
 
 - [ ] macOS build (e.g. `26.4.1 / 25E253`).
-- [ ] **Both** app build strings — the pre-fix build from arm 1, and
-      `0.1.13-rc1 (16)` from arm 2.
+- [ ] **Both** app build strings — the pre-fix build from arm 1 (for the
+      #82 reporter this is `0.1.13-rc1`), and `0.1.13-rc2` from arm 2.
 - [ ] Arm 1 result: still crashes / no longer crashes.
 - [ ] Arm 2 result: crashed / clean.
 - [ ] The `log show` output, **regardless of outcome**, including
