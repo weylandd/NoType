@@ -14,24 +14,25 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
 - **Found the actual cause of the macOS 26 crash** ([#82](https://github.com/weylandd/NoType/issues/82)), and corrected the documentation that named the wrong one. NoType raises an internal Objective-C error inside a background job; macOS absorbs it and keeps running, but the concurrency runtime is left corrupted and the app falls over shortly afterwards at an unrelated click. The three previous incidents — a timeline view, a hover handler, a button — were all innocent bystanders, which is why fixing each of them only moved the crash. The mechanism was reproduced locally rather than inferred.
 - Two things this retires: the start-up rework shipped in 0.1.13-rc1 was tested and **did not** fix the crash (it remains correct for its own reasons), and the README no longer suggests updating macOS as a workaround — the trigger is in NoType, not in the OS.
 - `docs/solutions/runtime-errors/` now records the proven mechanism, the diagnostic breadcrumb that identifies it in any crash report, and every hypothesis that was disproven along the way.
-- The code that came out of that — the exception watcher and the three raise-prone call sites it was written around — is listed under the **0.1.13-rc1 build 16** section below. It is on `main` and rolls into the next ordinary release; the rc section is where it is written up because that is the build the two affected users are testing.
+- The code that came out of that — the exception watcher and the three raise-prone call sites it was written around — is listed under the **0.1.13-rc2** section below. It is on `main` and rolls into the next ordinary release; the rc section is where it is written up because that is the build the two affected users are testing.
 
 ---
 
-## [0.1.13-rc1] — build 16 — 2026-07-27
+## [0.1.13-rc2] — 2026-07-27
 
-Second test build under the same version string, handed out directly —
-still not in the auto-update feed, and installed copies will not be
-offered it. **The version string is reused on purpose**: `0.1.13-rc1` was
-never tagged or released, so the *build number* is the only thing that
-tells the two rounds apart. This is **build 16**; the **build 15** entry
-below is a different build with different contents. Check
-"0.1.13-rc1 (16)" in About before reporting anything against it.
+Second test build of this round, handed out directly — still not in the
+auto-update feed, and installed copies will not be offered it. It gets
+its own version string rather than reusing `0.1.13-rc1`: the About
+screen shows the version string and nothing else, so two hand-off builds
+sharing one string would look identical to the person testing them, and
+their downloads would even have the same file name. The `0.1.13-rc1`
+entry below is a different build with different contents. Check
+**0.1.13-rc2** in About before reporting anything against it.
 
-Build 15 tested one idea — the start-up rework — and it did **not** fix
-the macOS 26 crash
-([#82](https://github.com/weylandd/NoType/issues/82)). Build 16 tests a
-different one, arrived at by reproducing the crash locally instead of
+`0.1.13-rc1` tested one idea — the start-up rework — and it did **not**
+fix the macOS 26 crash
+([#82](https://github.com/weylandd/NoType/issues/82)). This build tests
+a different one, arrived at by reproducing the crash locally instead of
 guessing at it: NoType raises an internal Objective-C error inside a
 background job, macOS absorbs it silently and keeps going, and the app
 falls over at an unrelated click some time afterwards. **Which** of
@@ -79,10 +80,15 @@ here is confirmed to fix the crash.
   the one most likely to misfire, still runs unchanged.
 
 ### Internal
-- `CFBundleVersion` 15 → 16. `CFBundleShortVersionString` stays
-  `0.1.13-rc1` — never tagged, so the string is free to reuse — which is
-  why the build integer is what distinguishes the rounds in the issue
-  log.
+- `CFBundleShortVersionString` `0.1.13-rc1` → `0.1.13-rc2`;
+  `CFBundleVersion` 16 → 17. The plan had said to reuse the string and
+  let the build integer separate the rounds, on the grounds that
+  `0.1.13-rc1` was never tagged. That was changed once the build was
+  ready to hand out: the About screen renders only the version string,
+  so the build integer distinguishes the rounds in the issue log but
+  not for the person holding the file. The integer still increments per
+  hand-off build — it is now a second identifier rather than the only
+  one.
 - New `docs/solutions/` material: the exception-preprocessor chaining
   rule (dropping the chain converts a silently absorbed error into an
   immediate abort on every machine — measured, not argued), and the
@@ -101,7 +107,7 @@ here is confirmed to fix the crash.
 
 ---
 
-## [0.1.13-rc1] — build 15 — 2026-07-25
+## [0.1.13-rc1] — 2026-07-25
 
 Test build, handed out directly rather than published — it is not in the
 auto-update feed and installed copies will not be offered it. The point
@@ -110,8 +116,8 @@ macOS 26.2 crash reported in
 [issue #82](https://github.com/weylandd/NoType/issues/82).
 
 **Outcome: it did not.** Kept here as the record of what was tested;
-build 16 above is the follow-on round. Nothing in this section has been
-edited beyond the heading and this note.
+`0.1.13-rc2` above is the follow-on round. Nothing in this section has
+been edited beyond the heading and this note.
 
 ### Fixed
 - **Auto-updates now actually run for menu-bar-only users.** NoType's
