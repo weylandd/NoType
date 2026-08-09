@@ -166,8 +166,17 @@ final class RetainedRecordingTests: XCTestCase {
         // The load-bearing assertion (KTD8): the two classifiers sit
         // next to each other so a new error case is added to both. If
         // someone adds a case to `isTerminal` and forgets `shouldRetain`,
-        // this fails — provided the new case is added to `fixtures` too,
-        // which the shared list makes the obvious move.
+        // this fails — provided the new case is added to `fixtures` too.
+        //
+        // That proviso is why this test is NOT the whole guard. It closes
+        // the enum axis only, and weakly: a seventh `GeminiError` case is
+        // already caught by the compiler (both switches are exhaustive
+        // with no `default`), while a *classification* disagreement on it
+        // is caught here only if someone also appends a fixture. The
+        // genuinely uncovered axis — the `Int` inside `.http`, where both
+        // functions encode their only real policy — is closed
+        // mechanically by `test_noHTTPStatusIsBothTerminalAndRetained`
+        // below, which needs no fixture maintenance at all.
         for f in fixtures {
             XCTAssertEqual(
                 RecordingSession.isTerminal(f.error),
@@ -178,6 +187,34 @@ final class RetainedRecordingTests: XCTestCase {
                 XCTAssertFalse(
                     RecordingSession.shouldRetain(f.error),
                     "\(f.label) is terminal, so it must retain nothing"
+                )
+            }
+        }
+    }
+
+    func test_noHTTPStatusIsBothTerminalAndRetained() {
+        // Closes the axis the fixture list cannot: `.http` carries an
+        // `Int`, so no hand-maintained list and no `CaseIterable`
+        // conformance can enumerate it. Both classifiers branch on that
+        // Int (`status == 401 || status == 403` vs `status != 401 &&
+        // status != 403`), so a future edit that widens the terminal band
+        // in one and not the other — say adding `|| status == 402` to
+        // `isTerminal` — would retain audio for a session that aborted,
+        // writing a broken history row with a live retry button for a
+        // failure the retry can never fix (violating AE1's shape).
+        //
+        // Sweeping the whole status space makes that impossible to miss
+        // without touching this file. Proved red per
+        // `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`
+        // ("prove the guard red"): with `|| status == 402` temporarily
+        // added to `isTerminal`, this fails on HTTP 402 while every other
+        // test in the file stays green.
+        for status in 0...599 {
+            let error = GeminiClient.GeminiError.http(status: status, body: "")
+            if RecordingSession.isTerminal(error) {
+                XCTAssertFalse(
+                    RecordingSession.shouldRetain(error),
+                    "HTTP \(status) is terminal, so it must retain nothing"
                 )
             }
         }
@@ -205,5 +242,36 @@ final class RetainedRecordingTests: XCTestCase {
         XCTAssertEqual(payload.chunks.first?.audio, Data([0x01, 0x02]))
         XCTAssertEqual(payload.context.activeApp.bundleID, "com.tinyspeck.slackmacgap")
         XCTAssertEqual(payload.model, .flash)
+    }
+
+    // MARK: - Memory-only contract (R1)
+
+    /// Runtime conformance probe. Written generically so the check is
+    /// made at runtime on an opaque `T.Type` — a direct
+    /// `RetainedRecording.self is any Encodable.Type` would let the
+    /// compiler resolve it statically and warn that the cast always
+    /// fails, which the Definition of Done's warning-free bar forbids.
+    private func conformsToCoding<T>(_ type: T.Type) -> Bool {
+        type is any Encodable.Type || type is any Decodable.Type
+    }
+
+    func test_retainedRecording_isNotSerializable() {
+        // R1: retained audio is memory-only and never written to disk.
+        // Today that holds by accident at the container level —
+        // `ContextSnapshot` is not `Codable`, so `RetainedRecording:
+        // Codable` would fail to compile — but `Chunk` has no such
+        // barrier: its members are `Int` / `Bool` / `Data` / `Int`, so
+        // adding the conformance synthesizes silently, and `Chunk` is
+        // the limb that actually holds the user's speech.
+        //
+        // The plan's Risks section nominates a human reviewer as the
+        // guard against serializing this type; this is the mechanical
+        // half. `test_retainedRecording_carriesChunksContextAndModel`
+        // above is its presence complement — an absence-only assertion
+        // would stay green if the type were deleted outright.
+        XCTAssertFalse(conformsToCoding(RetainedRecording.self),
+                       "RetainedRecording must never be serializable (R1)")
+        XCTAssertFalse(conformsToCoding(RetainedRecording.Chunk.self),
+                       "RetainedRecording.Chunk must never be serializable (R1)")
     }
 }

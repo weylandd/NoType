@@ -350,6 +350,13 @@ final class RecordingSession {
     /// to get audio duration. Named struct (over a 4-tuple) so a future
     /// field addition errors at the compile site rather than silently
     /// mis-positioning at one of three call sites.
+    ///
+    /// Mirrored field-for-field by `RetainedRecording.Chunk` — this type
+    /// is private to the session, that one is its escaping counterpart
+    /// for chunks whose audio is kept for a retry. **A field added here
+    /// belongs there too**, or the retained copy stops reproducing the
+    /// original request; the back-reference is on both sides so neither
+    /// is edited without seeing the other.
     private struct EncodedChunk: Sendable {
         let idx: Int
         let isFinal: Bool

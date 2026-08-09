@@ -55,7 +55,8 @@ Error classification lives in `RecordingSession.isTerminal(_:)`:
 | `GeminiError.missingKey` | terminal | abort, surface "add API key" |
 | `GeminiError.blocked(_)` (prompt-level block **or** candidate-level `finishReason` content block) | terminal | abort, surface block reason |
 | Any other `Error` (e.g. encoder, `AVFAudio`) | terminal | abort, surface as-is |
-| `GeminiError.http(_, _)` (any status) | recoverable | marker, continue |
+| `GeminiError.http(401 / 403)` (rejected key / key not authorised for the model) | terminal | abort, surface key error |
+| `GeminiError.http(_, _)` (any **other** status — 0 / 429 / 4xx / 5xx) | recoverable | marker, continue |
 | `GeminiError.empty` | recoverable | marker, continue |
 | `GeminiError.decoding(_)` | recoverable | marker, continue |
 | `GeminiError.truncated` (`finishReason == MAX_TOKENS`) | recoverable | marker, continue |
