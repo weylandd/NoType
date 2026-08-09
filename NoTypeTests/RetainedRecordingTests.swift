@@ -188,6 +188,21 @@ final class RetainedRecordingTests: XCTestCase {
                     RecordingSession.shouldRetain(f.error),
                     "\(f.label) is terminal, so it must retain nothing"
                 )
+            } else {
+                // The complement, and the direction U6 actually depends
+                // on. Every recoverable failure writes a `[…]` marker via
+                // `recordRecoverableFailure`, and U6 fills those markers
+                // by walking retained chunks in order — so a class that
+                // is recoverable but NOT retainable would emit a marker
+                // with no chunk behind it and shift every later marker
+                // onto the wrong slot. Asserting only the terminal
+                // direction (as this guard did originally) leaves that
+                // one-to-one property entirely unpinned.
+                XCTAssertTrue(
+                    RecordingSession.shouldRetain(f.error),
+                    "\(f.label) is recoverable, so it writes a gap marker "
+                    + "and must retain the chunk that marker stands for"
+                )
             }
         }
     }
@@ -215,6 +230,16 @@ final class RetainedRecordingTests: XCTestCase {
                 XCTAssertFalse(
                     RecordingSession.shouldRetain(error),
                     "HTTP \(status) is terminal, so it must retain nothing"
+                )
+            } else {
+                // Same complement as above, swept over the whole status
+                // space: a narrowing edit to `shouldRetain` alone (say
+                // dropping 429 as "never worth retrying") would leave a
+                // marker with no retained chunk behind it.
+                XCTAssertTrue(
+                    RecordingSession.shouldRetain(error),
+                    "HTTP \(status) is recoverable, so it writes a gap "
+                    + "marker and must retain the chunk behind it"
                 )
             }
         }
@@ -365,28 +390,34 @@ final class RetainedRecordingTests: XCTestCase {
         XCTAssertNil(payload(batch: batch, failed: []))
     }
 
-    func test_retainSet_hallucinationGateDrop_retainsNothing() {
-        // The gate's third state (`text: ""`, not `nil`): Gemini answered
-        // and we filtered the answer. That is not a failure, so the
-        // chunk never enters the failed set and nothing is retained —
-        // retaining it would hold audio for a call that succeeded.
-        // See `NoType/Recording/CLAUDE.md` "Post-response hallucination
-        // gate".
-        let batch = [chunk(0), chunk(1), chunk(2, isFinal: true)]
-
-        // Chunk 1 was gate-dropped; 0 and 2 transcribed normally.
-        XCTAssertNil(payload(batch: batch, failed: []))
-    }
-
-    func test_retainSet_gateDropAlongsideARealFailure_keepsOnlyTheFailure() {
-        // Same batch, but chunk 2's call genuinely failed. The
-        // gate-dropped chunk 1 still contributes nothing.
-        let batch = [chunk(0), chunk(1), chunk(2, isFinal: true)]
-
-        let result = payload(batch: batch, failed: [2])
-
-        XCTAssertEqual(result?.chunks.map(\.idx), [2])
-    }
+    // The hallucination gate's third state (`text: ""`, not `nil`) —
+    // Gemini answered and we filtered the answer, which is NOT a failure
+    // and must retain nothing (`NoType/Recording/CLAUDE.md`,
+    // "Post-response hallucination gate") — deliberately has NO test
+    // here, and that absence is the honest position rather than an
+    // oversight.
+    //
+    // `retainedPayload` cannot see the distinction. It receives an
+    // already-classified `Set<Int>`, in which a gate-dropped chunk and a
+    // cleanly-transcribed chunk are both simply absent. Two earlier
+    // drafts of this file asserted the gate case by passing `failed: []`
+    // and `failed: [2]` — byte-identical inputs to
+    // `test_retainSet_noChunkFailed_retainsNothing` and
+    // `test_retainSet_oneOfThreeFailed_keepsOnlyThatChunk` above. They
+    // would have stayed green if the production code had collapsed the
+    // gate/failure distinction entirely, which is the exact failure mode
+    // `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`
+    // names: a test that passes because it never exercises the path is
+    // worse than no test, because it stops a reviewer checking by hand.
+    //
+    // The real guarantee is structural and lives at the call sites:
+    // `retainableFailures` is mutated ONLY inside the two `catch` arms
+    // of `processBatch` / `splitRetry`, while the gate fires on the `do`
+    // arm. A gate-dropped chunk therefore never reaches this function's
+    // index set at all. That is a property of the session, which owns an
+    // `AudioRecorder` / `SileroVAD` / `GeminiClient` / `HistoryStore` and
+    // is not unit-drivable — so it rides the plan's manual smoke
+    // protocol, and is listed there rather than faked here.
 
     func test_retainSet_carriesTheFrozenContextAndModel() {
         // R3 / KTD3: the payload ships the snapshot the failed requests
@@ -423,6 +454,80 @@ final class RetainedRecordingTests: XCTestCase {
 
     func test_retainSet_emptyBatch_retainsNothing() {
         XCTAssertNil(payload(batch: [], failed: [0, 1]))
+    }
+
+    // MARK: - Cross-batch merge (U2)
+    //
+    // A session drains several batches, so the payload the summary
+    // exposes is the fold of one payload per failing batch.
+    // `RecordingSession.mergeRetained` is that fold, extracted pure for
+    // the same reason `retainedPayload` is: the two properties U6
+    // depends on — ascending chunk order across the whole session, and
+    // one context/model for the payload — are otherwise only assertable
+    // by driving a session that cannot be driven.
+
+    func test_merge_intoNothing_takesTheIncomingPayload() {
+        let incoming = payload(batch: [chunk(4)], failed: [4])
+
+        let merged = RecordingSession.mergeRetained(existing: nil, incoming: incoming)
+
+        XCTAssertEqual(merged?.chunks.map(\.idx), [4])
+    }
+
+    func test_merge_ofNothing_leavesTheAccumulatorAlone() {
+        // The successful-batch case: every batch after a failing one
+        // calls the fold with `nil` and must not disturb what is held.
+        let existing = payload(batch: [chunk(1)], failed: [1])
+
+        let merged = RecordingSession.mergeRetained(existing: existing, incoming: nil)
+
+        XCTAssertEqual(merged?.chunks.map(\.idx), [1])
+    }
+
+    func test_merge_ofTwoNothings_staysNothing() {
+        XCTAssertNil(RecordingSession.mergeRetained(existing: nil, incoming: nil))
+    }
+
+    func test_merge_reordersAcrossBatches_notJustWithinOne() {
+        // The load-bearing one. U6 replaces `[…]` markers left-to-right
+        // in chunk order, so the merged payload must be ascending by
+        // chunk index even when a later batch carries a LOWER index than
+        // an earlier one. That cannot happen while the sender drains
+        // serially — which is exactly why it must be pinned here rather
+        // than assumed: the day the drain order changes, this test is
+        // what stops the regression surfacing two units downstream as
+        // scrambled recovered text.
+        let first  = payload(batch: [chunk(5), chunk(9)], failed: [5, 9])
+        let second = payload(batch: [chunk(2), chunk(7)], failed: [2, 7])
+
+        let merged = RecordingSession.mergeRetained(existing: first, incoming: second)
+
+        XCTAssertEqual(merged?.chunks.map(\.idx), [2, 5, 7, 9])
+        // Audio must travel with its own index, not be re-paired by
+        // position — a sort that moved indices without their payloads
+        // would still satisfy the assertion above.
+        XCTAssertEqual(merged?.chunks.map(\.audio),
+                       [Data([0xA2]), Data([0xA5]), Data([0xA7]), Data([0xA9])])
+    }
+
+    func test_merge_keepsTheFirstPayloadsContextAndModel() {
+        // The first failing batch's context wins. Mid-session batches
+        // await the full context task; only a final batch may fall back
+        // to `ContextSnapshot.minimal`, and the final batch is last — so
+        // "first" is also "richest", which is the snapshot a retry wants
+        // (R3, R11).
+        let rich = ContextSnapshot.minimal(
+            activeApp: AppInfo(name: "Xcode", bundleID: "com.apple.dt.Xcode")
+        )
+        let first  = payload(batch: [chunk(0)], failed: [0],
+                             context: rich, model: .flash)
+        let second = payload(batch: [chunk(1)], failed: [1],
+                             context: slackContext, model: .flashLite)
+
+        let merged = RecordingSession.mergeRetained(existing: first, incoming: second)
+
+        XCTAssertEqual(merged?.context, rich)
+        XCTAssertEqual(merged?.model, .flash)
     }
 
     // MARK: - SessionSummary carries the payload

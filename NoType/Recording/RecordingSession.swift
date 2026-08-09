@@ -444,8 +444,13 @@ final class RecordingSession {
 
         /// This chunk in its escaping form, for the retention path. The
         /// field-for-field mirroring contract is in the doc-comment
-        /// above; this is where it is actually exercised, so a field
-        /// added to either type without the other fails to compile here.
+        /// above; this is where it is exercised — but only in ONE
+        /// direction. A field added to `RetainedRecording.Chunk` breaks
+        /// this memberwise-init call and fails the build; a field added
+        /// to `EncodedChunk` alone compiles silently and is dropped on
+        /// the floor here. That second direction is a review
+        /// responsibility, not a compiler-enforced one — don't read the
+        /// mirroring note above as covering it.
         /// `audio` is a `Data` — copy-on-write, so this is a reference
         /// bump, not a second copy of the blob.
         var retainable: RetainedRecording.Chunk {
@@ -700,9 +705,11 @@ final class RecordingSession {
         // the two awaits (the previous ordering) left a window where a
         // resuming `stop()` slipped past its `failure` guard while this
         // task was still suspended on `await senderTask?.value`.
-        if failure == nil {
-            failure = CancellationError()
-        }
+        // Routed through `markFailure` rather than assigning `failure`
+        // inline so the retained-audio reset rides the same latch every
+        // other terminal path uses (R4 / AE2) — synchronously, before
+        // the two awaits below, rather than only after them.
+        markFailure(CancellationError())
         recorder.stop()
         senderTask?.cancel()
         vadTask?.cancel()
@@ -719,8 +726,11 @@ final class RecordingSession {
         lastRecoverableError = nil
         // Cancellation is terminal (R4): a cancelled session keeps no
         // audio, so anything a mid-session network blip had already
-        // retained is dropped here rather than surfacing as a broken
-        // history row for a session the user deliberately abandoned.
+        // retained is dropped rather than surfacing as a broken history
+        // row for a session the user deliberately abandoned. The
+        // `markFailure` latch above already did this synchronously;
+        // repeating it keeps the companion-field reset in one place and
+        // is idempotent.
         retained = nil
     }
 
@@ -758,13 +768,23 @@ final class RecordingSession {
     /// order, so `RetainedRecording`'s ascending-order contract holds
     /// without depending on the sender's drain order staying serial.
     private func accumulateRetained(_ payload: RetainedRecording?) {
-        guard let payload else { return }
-        guard let existing = retained else {
-            retained = payload
-            return
-        }
-        retained = RetainedRecording(
-            chunks: (existing.chunks + payload.chunks).sorted { $0.idx < $1.idx },
+        retained = Self.mergeRetained(existing: retained, incoming: payload)
+    }
+
+    /// The merge rule itself, as a pure function so the two properties
+    /// U6 depends on can be pinned without driving a session: the result
+    /// is in ascending chunk order whatever order the batches arrived
+    /// in, and the first payload's context/model survive. Same seam
+    /// shape as `retainedPayload` / `shouldUseLitePath`; pinned by
+    /// `RetainedRecordingTests`.
+    nonisolated static func mergeRetained(
+        existing: RetainedRecording?,
+        incoming: RetainedRecording?
+    ) -> RetainedRecording? {
+        guard let incoming else { return existing }
+        guard let existing else { return incoming }
+        return RetainedRecording(
+            chunks: (existing.chunks + incoming.chunks).sorted { $0.idx < $1.idx },
             context: existing.context,
             model: existing.model
         )
@@ -1280,10 +1300,18 @@ final class RecordingSession {
         // Skipped once a terminal error has latched — which `splitRetry`
         // can do after it has already collected recoverable indices. That
         // session aborts, and R4 holds terminal failures to retaining
-        // nothing; writing a broken row with a live retry button for a
-        // session killed by a rejected key is exactly the shape AE1
-        // forbids.
-        if !didFail {
+        // nothing. This guard covers only THIS batch; the session-wide
+        // half (dropping what an earlier batch retained) lives in
+        // `markFailure`, which is the latch every terminal path shares.
+        //
+        // The emptiness term is not just an optimisation: without it
+        // `encoded.map(\.retainable)` materialises a chunk struct for
+        // every chunk of every batch — including the ordinary successful
+        // one — only for `retainedPayload` to discard it. Keeping the
+        // success path allocation-free is what makes the `retained`
+        // field's "a session that never loses a chunk allocates nothing
+        // here" literally true.
+        if !didFail && !retainableFailures.isEmpty {
             accumulateRetained(Self.retainedPayload(
                 inBatch: encoded.map(\.retainable),
                 failedChunkIndices: retainableFailures,
@@ -1545,6 +1573,20 @@ final class RecordingSession {
 
     private func markFailure(_ error: Error) {
         if failure == nil { failure = error }
+        // Terminal abort is a SESSION-wide fact, not a per-batch one
+        // (R4). Once any error has latched, this session is going to
+        // throw out of `stop()`, and nothing it captured is retryable —
+        // including audio an *earlier* batch already accumulated. The
+        // `!didFail` guard at the `processBatch` retain site only
+        // suppresses the batch it runs in; a session that lost chunk 0
+        // to a 5xx and then hit a rejected key on chunk 3 would keep
+        // chunk 0's audio without this line, and `AppState`'s catch arm
+        // (KTD3) reads `retained != nil` as "this session lost chunks in
+        // the recoverable class". Writing a broken row with a live retry
+        // button for a session killed by a bad key is the shape AE1
+        // forbids. Unconditional (not inside the `failure == nil` guard)
+        // because it is idempotent and must hold on every latch.
+        retained = nil
     }
 
     // MARK: - Context-task helpers
