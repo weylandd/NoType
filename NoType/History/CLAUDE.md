@@ -7,17 +7,19 @@ Two siblings: the rolling **last-10** transcript window (`HistoryStore`) and the
 - `HistoryStore.swift` — `actor` for the last-10 transcript JSON. FIFO eviction.
 - `HistoryEntry.swift` — `Codable` model shared by both stores.
 - `StatsStore.swift` — `actor` for `stats.json`: totals + per-day + per-app aggregates.
+- `RetainedAudioStore.swift` — `@MainActor` in-memory holder for a broken row's failed-chunk audio, keyed by `HistoryEntry.id`. Never serialized; eviction mirrors the ten-entry cap via `retain(only:)`.
+- `RetryMerge.swift` — pure gap-slot merge: how a retry's per-chunk results land back in the row they were re-sent from. Consumed by `AppState.retryEntry(id:)` / `settleRetry`.
 
 ## Invariants
 
 1. **`HistoryStore` cap = 10.** Append at the cap drops the oldest.
 2. **`allEntries()` returns oldest-first**; popover and `HomeView` sort newest-first for display.
-3. **`remove(id:)` is a no-op if the id isn't present.** Drives the popover's per-row trash button through `AppState.deleteHistoryEntry(id:)`: optimistic in-memory update + fire-and-forget disk write.
+3. **`remove(id:)` is a no-op if the id isn't present.** Drives the popover's per-row trash button through `AppState.deleteHistoryEntry(id:)`: optimistic in-memory update + fire-and-forget disk write. **`update(_:)` shares that contract** — it replaces the row with the matching id **in place** and no-ops when absent. In place, not remove-then-append: a retry rewrites a broken row's text and failure count without changing what the row *is*, and re-appending would reorder the last-10 list and move the trim onto a different victim.
 4. **No audio retention** (architecture invariant I4) — only `text` is stored.
 5. **`StatsStore` keeps derived counts only — no transcripts.** Honours the no-audio-retention + history-cap=10 privacy posture; a user who clears history doesn't have transcripts hiding in stats either.
 6. **Local-TZ day keys** (`Calendar.autoupdatingCurrent`) — a session at 23:45 May 11 local lands in the May 11 bucket, not May 12 UTC.
 7. **Last-seen display name wins** in `appBuckets[bundleID].name`. App renames pick up without manual reconciliation.
-8. **`StatsStore.record` is NOT idempotent.** Callers must not call it twice for the same session.
+8. **`StatsStore.record` is NOT idempotent.** Callers must not call it twice for the same session. **`recordTokens(_:model:timestamp:bundleID:appName:)` is the token-only sibling** for callers that must record spend *without* counting a session: it folds usage into the day and day×app buckets and touches neither `totalSessions`, `totalWords`, nor the duration fields. A retry uses it every time (R15); `record` is reached at most once per history entry, on the first retry that recovers text for a row lifetime stats never counted (`isBroken && text.isEmpty`). Both write the flat aggregate and the per-model split through one `addTokens` helper so they cannot drift.
 
 ## Hard rules
 

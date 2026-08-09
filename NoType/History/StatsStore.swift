@@ -542,10 +542,7 @@ actor StatsStore {
         day.sessions += 1
         day.durationSeconds += duration
         day.durationWords += timedWords
-        day.tokenInput  += tokens.input
-        day.tokenOutput += tokens.output
-        day.tokenCached += tokens.cached
-        Self.addModelTokens(&day.tokensByModel, model: model, tokens: tokens)
+        Self.addTokens(&day, model: model, tokens: tokens)
         snap.dayBuckets[dayKey] = day
 
         // Empty bundle IDs would all collapse into one bucket and the
@@ -567,10 +564,7 @@ actor StatsStore {
             dayAppBucket.sessions += 1
             dayAppBucket.durationSeconds += duration
             dayAppBucket.durationWords += timedWords
-            dayAppBucket.tokenInput  += tokens.input
-            dayAppBucket.tokenOutput += tokens.output
-            dayAppBucket.tokenCached += tokens.cached
-            Self.addModelTokens(&dayAppBucket.tokensByModel, model: model, tokens: tokens)
+            Self.addTokens(&dayAppBucket, model: model, tokens: tokens)
             perApp[entry.sourceBundleID] = dayAppBucket
             snap.dayAppBuckets[dayKey] = perApp
         }
@@ -615,10 +609,7 @@ actor StatsStore {
 
         let dayKey = StatsSnapshot.dayKey(for: timestamp)
         var day = snap.dayBuckets[dayKey] ?? DayBucket(words: 0, sessions: 0)
-        day.tokenInput  += tokens.input
-        day.tokenOutput += tokens.output
-        day.tokenCached += tokens.cached
-        Self.addModelTokens(&day.tokensByModel, model: model, tokens: tokens)
+        Self.addTokens(&day, model: model, tokens: tokens)
         snap.dayBuckets[dayKey] = day
 
         // Same empty-bundle carve-out as `record` — all blank ids would
@@ -626,10 +617,7 @@ actor StatsStore {
         if !bundleID.isEmpty {
             var perApp = snap.dayAppBuckets[dayKey] ?? [:]
             var dayAppBucket = perApp[bundleID] ?? DayBucket(words: 0, sessions: 0)
-            dayAppBucket.tokenInput  += tokens.input
-            dayAppBucket.tokenOutput += tokens.output
-            dayAppBucket.tokenCached += tokens.cached
-            Self.addModelTokens(&dayAppBucket.tokensByModel, model: model, tokens: tokens)
+            Self.addTokens(&dayAppBucket, model: model, tokens: tokens)
             perApp[bundleID] = dayAppBucket
             snap.dayAppBuckets[dayKey] = perApp
 
@@ -689,6 +677,28 @@ actor StatsStore {
     }
 
     // MARK: - Per-model token folding
+
+    /// Fold one `TokenUsage` into a bucket's flat aggregate **and** its
+    /// per-model split, together.
+    ///
+    /// The two halves are one operation, not two: the flat
+    /// `tokenInput/Output/Cached` fields are the cross-model aggregate and
+    /// the sum across `tokensByModel` must equal them (pinned by
+    /// `StatsStoreTests.test_record_dualWrite_flatEqualsSumOfPerModel`).
+    /// They were previously written out longhand at four call sites — both
+    /// buckets in `record(_:tokens:model:)` and both in `recordTokens` —
+    /// which is four places for a fifth field to be forgotten in. One
+    /// helper is one place.
+    private static func addTokens(
+        _ bucket: inout DayBucket,
+        model: GeminiModel,
+        tokens: TokenUsage
+    ) {
+        bucket.tokenInput  += tokens.input
+        bucket.tokenOutput += tokens.output
+        bucket.tokenCached += tokens.cached
+        addModelTokens(&bucket.tokensByModel, model: model, tokens: tokens)
+    }
 
     /// Fold one session's `TokenUsage` into a per-model token map,
     /// keyed by `GeminiModel.rawValue`. No-op for an all-zero usage

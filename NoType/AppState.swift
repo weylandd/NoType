@@ -856,13 +856,32 @@ final class AppState {
     /// holder mutation is what keeps U7's rows honest. Both mutation sites
     /// below are paired with it; a future one must be too.
     ///
-    /// ## One request at a time
+    /// ## One request at a time — and the two limits of that claim
     ///
-    /// Chunks are re-sent strictly serially, and `canRetry` refuses while a
-    /// session is recording or sending (R14), so this never puts a second
-    /// Gemini request beside a session's own. Stopping at the first failure
-    /// (R16) bounds the uncancellable wait to one request timeout rather
-    /// than the sum of every retained chunk's.
+    /// Chunks are re-sent strictly serially: this run never has two of its
+    /// own requests in the air. Two things it does **not** promise, both
+    /// deliberate, both easy to misread from R14:
+    ///
+    /// 1. **The exclusion with recording is one-directional.** `canRetry`
+    ///    refuses to *start* a retry while a session is recording or
+    ///    sending (R14), but `handleHotkeyPress` does not consult
+    ///    `retryingEntryID`, so a session may start beside a running
+    ///    retry and put a second request on the wire. That is the chosen
+    ///    trade: push-to-talk is the app's primary function and must not
+    ///    be blocked by background recovery. The consequence to know is
+    ///    that the new session's `recordHistoryEntry` trim can evict the
+    ///    retrying row at the ten-entry cap — which lands on the
+    ///    deleted-row exit in `settleRetry` and releases the payload, the
+    ///    same outcome R5 already specifies for eviction.
+    /// 2. **The wait is bounded by the chunk count, not by one timeout.**
+    ///    Stopping at the first failure (R16) bounds a *failing* run, but
+    ///    one failure can itself cost two attempts —
+    ///    `GeminiClient.retryDecision` re-issues network and 5xx classes
+    ///    once — against a 30 s `timeoutIntervalForResource`. And a run
+    ///    whose chunks all answer, slowly, never breaks at all: it pays
+    ///    every chunk's latency in turn. Since `canRetry` blocks every
+    ///    row while any retry runs, that is also how long the other rows
+    ///    wait. There is no cancel (KTD7); delete is the only exit.
     func retryEntry(id entryID: UUID) async {
         guard canRetry(entryID: entryID),
               let row = history.first(where: { $0.id == entryID }),
@@ -874,9 +893,13 @@ final class AppState {
         retryingEntryID = entryID
         _ = retainedAudio.take(entryID)
 
-        let send: RetryChunkSender = retryChunkSender ?? { [weak self] chunk, context, priors, model in
-            guard let self else { throw CancellationError() }
-            return try await self.sendRetryChunk(
+        // No `[weak self]`: this closure is a local, not a stored property,
+        // and the enclosing async method holds `self` for the whole run —
+        // so a weak capture could never be nil, and its `guard` would have
+        // been an unreachable branch throwing an error the HUD catalog has
+        // no copy for.
+        let send: RetryChunkSender = retryChunkSender ?? { chunk, context, priors, model in
+            try await self.sendRetryChunk(
                 chunk: chunk,
                 context: context,
                 priors: priors,
@@ -889,6 +912,15 @@ final class AppState {
         var failure: Error?
 
         for chunk in payload.chunks {
+            // R13 keeps delete available during a run, and a deleted row is
+            // one the user has told us they do not want. Stop spending
+            // their Gemini budget on it the moment they say so, rather than
+            // discovering it once at settle time. The tail is padded below,
+            // so this lands on the same deleted-row exit as before.
+            guard history.contains(where: { $0.id == entryID }) else {
+                Self.log.info("retry abandoned — its row was removed mid-run")
+                break
+            }
             // KTD6: the row's surviving text, markers filtered out, plus
             // whatever this run has recovered so far — so a chunk that just
             // came back becomes context for the next one, exactly as
@@ -990,7 +1022,11 @@ final class AppState {
         tokens: TokenUsage,
         failure: Error?
     ) async {
-        let recoveredCount = RetryMerge.recoveredCount(recovered)
+        // Placement, not recovery, is what licenses a release: a chunk
+        // whose text the merge could not land keeps its marker slot AND
+        // its audio. See `RetryMerge.Merged.placed`.
+        let merged = RetryMerge.mergeDetailed(existingText: row.text, recovered: recovered)
+        let placedCount = merged.placedCount
 
         // Exit 1: the row was deleted while the run was in flight. R13 keeps
         // delete available during a retry, so this is reachable by design
@@ -1007,11 +1043,14 @@ final class AppState {
             return
         }
 
-        // Exit 2: nothing recovered (R19). The row keeps its text and its
-        // failure count, the payload goes back untouched so the user can try
-        // again, and the failure is surfaced — a retry that silently
-        // restores the pre-tap appearance reads as "nothing happened".
-        guard recoveredCount > 0 else {
+        // Exit 2: nothing landed in the row (R19). The row keeps its text
+        // and its failure count, the payload goes back untouched so the
+        // user can try again, and the failure is surfaced — a retry that
+        // silently restores the pre-tap appearance reads as "nothing
+        // happened". Keyed on *placed*, not recovered, so a run whose
+        // answers had nowhere to go is treated as the failure it is
+        // instead of quietly consuming the audio that produced them.
+        guard placedCount > 0 else {
             retainedAudio.put(payload, for: entryID)
             retryingEntryID = nil
             // `failure == nil` means every chunk answered with nothing (an
@@ -1022,16 +1061,16 @@ final class AppState {
             return
         }
 
-        // Exit 3: something recovered. The recovered text replaces its gap
+        // Exit 3: something landed. The recovered text replaces its gap
         // markers in the row (R12) — the text already pasted into the target
         // app is not touched and cannot be, which is the whole of KD5.
-        let mergedText = RetryMerge.merge(existingText: row.text, recovered: recovered)
-        // Whatever did not recover stays held, so the next retry re-pays for
+        let mergedText = merged.text
+        // Whatever did not land stays held, so the next retry re-pays for
         // those chunks only (R16). Re-putting the reduced payload — rather
         // than releasing chunk by chunk — is what keeps `RetainedAudioStore`
         // a whole-entry API.
-        let remaining = zip(payload.chunks, recovered)
-            .filter { !RetryMerge.isRecovery($0.1) }
+        let remaining = zip(payload.chunks, merged.placed)
+            .filter { !$0.1 }
             .map(\.0)
         let updated = HistoryEntry(
             id: row.id,
@@ -1043,16 +1082,17 @@ final class AppState {
             // Subtracted rather than set to `remaining.count`, so the count
             // stays equal to the number of markers actually left in the
             // text — which is the predicate U7 renders and the merge's
-            // next run indexes against.
-            failedChunkCount: max(0, row.failedChunkCount - recoveredCount)
+            // next run indexes against. The subtrahend is `placedCount`
+            // for the same reason `remaining` is: a marker that is still
+            // in the text must still be counted.
+            failedChunkCount: max(0, row.failedChunkCount - placedCount)
         )
         if let idx = history.firstIndex(where: { $0.id == entryID }) {
             history[idx] = updated
         }
-        if remaining.isEmpty {
-            // R5's retry-succeeded release: `take` already emptied the slot
-            // and there is nothing to put back.
-        } else {
+        // When nothing remains this is R5's retry-succeeded release: `take`
+        // already emptied the slot and there is nothing to put back.
+        if !remaining.isEmpty {
             retainedAudio.put(
                 RetainedRecording(
                     chunks: remaining,

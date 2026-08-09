@@ -25,14 +25,19 @@ final class HistoryStoreTests: XCTestCase {
         super.tearDown()
     }
 
-    private func entry(text: String, when: Date = Date()) -> HistoryEntry {
+    private func entry(
+        text: String,
+        when: Date = Date(),
+        failedChunkCount: Int = 0
+    ) -> HistoryEntry {
         HistoryEntry(
             id: UUID(),
             text: text,
             sourceAppName: "Slack",
             sourceBundleID: "com.tinyspeck.slackmacgap",
             timestamp: when,
-            durationSeconds: 1.0
+            durationSeconds: 1.0,
+            failedChunkCount: failedChunkCount
         )
     }
 
@@ -207,6 +212,74 @@ final class HistoryStoreTests: XCTestCase {
         await store.remove(id: UUID())
         let entries = await store.allEntries()
         XCTAssertEqual(entries.map { $0.text }, ["kept"])
+    }
+
+    // MARK: - update(_:) (U6 — the retry's disk write)
+
+    func test_update_replacesTheRowInPlace_withoutMovingIt() async {
+        // A retry rewrites a broken row's text and failure count without
+        // changing what the row *is*. Re-appending would move it to the
+        // newest slot, reorder the last-10 list under the user, and put
+        // the trim in a position to evict a different row than the cap
+        // would have taken.
+        let store = HistoryStore(url: tempURL)
+        let first = entry(text: "first")
+        let broken = entry(text: "second \(RecordingSession.failureMarker)", failedChunkCount: 1)
+        let last = entry(text: "third")
+        await store.append(first)
+        await store.append(broken)
+        await store.append(last)
+
+        let recovered = HistoryEntry(
+            id: broken.id,
+            text: "second recovered",
+            sourceAppName: broken.sourceAppName,
+            sourceBundleID: broken.sourceBundleID,
+            timestamp: broken.timestamp,
+            durationSeconds: broken.durationSeconds,
+            failedChunkCount: 0
+        )
+        await store.update(recovered)
+
+        let entries = await store.allEntries()
+        XCTAssertEqual(entries.map(\.id), [first.id, broken.id, last.id], "order is preserved")
+        XCTAssertEqual(entries.map(\.text), ["first", "second recovered", "third"])
+        XCTAssertEqual(entries[1].isBroken, false, "and the row is no longer broken")
+    }
+
+    func test_update_persistsAcrossAFreshReader() async {
+        // The mirror is not the assertion — the file is.
+        let broken = entry(text: "gap \(RecordingSession.failureMarker)", failedChunkCount: 1)
+        await HistoryStore(url: tempURL).append(broken)
+
+        await HistoryStore(url: tempURL).update(
+            HistoryEntry(
+                id: broken.id,
+                text: "gap filled",
+                sourceAppName: broken.sourceAppName,
+                sourceBundleID: broken.sourceBundleID,
+                timestamp: broken.timestamp,
+                durationSeconds: broken.durationSeconds,
+                failedChunkCount: 0
+            )
+        )
+
+        let entries = await HistoryStore(url: tempURL).allEntries()
+        XCTAssertEqual(entries.map(\.text), ["gap filled"])
+    }
+
+    func test_update_missingIdIsNoop_andAddsNoRow() async {
+        // Mirrors `remove(id:)`'s contract. Reachable when a retry settles
+        // before the row's own fire-and-forget append has landed — the row
+        // must not be conjured into existence out of order.
+        let store = HistoryStore(url: tempURL)
+        let kept = entry(text: "kept")
+        await store.append(kept)
+
+        await store.update(entry(text: "never appended"))
+
+        let entries = await store.allEntries()
+        XCTAssertEqual(entries.map(\.text), ["kept"], "no row added, none changed")
     }
 
     // MARK: - deleteAll (U7)

@@ -36,6 +36,16 @@ import Foundation
 /// The merge is written to degrade safely if that ever slips: a slot with
 /// no recovery keeps its marker, a marker with no slot keeps itself, and
 /// a run that recovered nothing returns the text untouched.
+///
+/// Degrading safely in the *text* is only half of it, though, and the
+/// other half is why `mergeDetailed` reports `placed` separately: the
+/// caller releases a chunk's audio, and a recovery the merge could not
+/// land must not license that release. The one-to-one above is not in
+/// fact guaranteed today — `TextReplacementEngine` runs over the stitched
+/// transcript before it is stored, and its Unicode boundaries match the
+/// `…` inside `[…]`, so a user replacement pair on the ellipsis leaves a
+/// row that is still broken and still holds audio but carries no marker
+/// to substitute into. Placement is what keeps that case lossless.
 enum RetryMerge {
 
     /// Whether a per-chunk retry outcome counts as a recovery.
@@ -51,17 +61,40 @@ enum RetryMerge {
     /// audio held, and keeps `failedChunkCount` equal to the number of
     /// markers left in the text.
     ///
-    /// The single source of truth for that rule: `merge(existingText:recovered:)`
-    /// and `AppState`'s settle path both read it, so the text and the
-    /// retained set can never disagree about what recovered.
+    /// The single source of truth for that rule: `mergeDetailed` reads it
+    /// to build both the text and the `placed` flags `AppState`'s settle
+    /// path releases audio from, so the text and the retained set can
+    /// never disagree about what recovered.
     static func isRecovery(_ text: String?) -> Bool {
         guard let text else { return false }
         return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// How many of `recovered` count as recoveries.
-    static func recoveredCount(_ recovered: [String?]) -> Int {
-        recovered.reduce(0) { $0 + (isRecovery($1) ? 1 : 0) }
+    /// What one merge did: the row's new text, and which slots' recovered
+    /// text actually reached it.
+    ///
+    /// `placed` exists because "this chunk recovered" and "this chunk's
+    /// text landed in the row" are **not** the same fact, and the caller
+    /// releases audio on the second one. A recovery with no marker to
+    /// substitute into is dropped by the merge; deciding what to release
+    /// from `isRecovery` alone would then free the chunk's audio *and*
+    /// throw its text away, which destroys the only copy of the user's
+    /// recording silently. Markers can go missing for reasons outside this
+    /// file — `TextReplacementEngine` runs over the stitched transcript
+    /// before it is stored (`NoType/History/CLAUDE.md`), and its
+    /// `(?<![\p{L}\p{N}])…(?![\p{L}\p{N}])` boundary matches the `…`
+    /// inside `[…]`, so a user pair on the ellipsis rewrites every marker
+    /// in the row.
+    struct Merged {
+        /// The row's text after the merge.
+        let text: String
+        /// One flag per entry of the `recovered` array passed in: true iff
+        /// that slot's text is present in `text`.
+        let placed: [Bool]
+
+        /// How many slots actually landed. This — not a count of
+        /// `isRecovery` outcomes — is what a caller may release audio for.
+        var placedCount: Int { placed.reduce(0) { $0 + ($1 ? 1 : 0) } }
     }
 
     /// Merge one retry run's per-chunk outcomes into the row's stored text.
@@ -83,20 +116,35 @@ enum RetryMerge {
     /// holding audio for the rest, and the next retry would have nowhere
     /// to put its results.
     static func merge(existingText: String, recovered: [String?]) -> String {
+        mergeDetailed(existingText: existingText, recovered: recovered).text
+    }
+
+    /// `merge`, plus which slots actually landed — the shape the settle
+    /// path must use, because releasing a chunk's audio is only safe once
+    /// its text is in the row. See `Merged.placed`.
+    static func mergeDetailed(existingText: String, recovered: [String?]) -> Merged {
         let slots: [String?] = recovered.map {
             isRecovery($0) ? $0?.trimmingCharacters(in: .whitespacesAndNewlines) : nil
         }
+        let nonePlaced = [Bool](repeating: false, count: recovered.count)
+
         // Nothing recovered → the row is untouched (R19). Also what keeps
         // the empty-text branch from turning a blank row into a row of
         // bare markers.
-        guard slots.contains(where: { $0 != nil }) else { return existingText }
+        guard slots.contains(where: { $0 != nil }) else {
+            return Merged(text: existingText, placed: nonePlaced)
+        }
 
         let marker = RecordingSession.failureMarker
 
         if existingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return TextInjector
+            // The empty-text branch emits every slot — a recovery as its
+            // text, an unrecovered one as a marker — so every recovery
+            // lands by construction.
+            let text = TextInjector
                 .stitchChunks(slots.map { $0 ?? marker })
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            return Merged(text: text, placed: slots.map { $0 != nil })
         }
 
         // Left-to-right marker substitution. Spacing needs no repair: the
@@ -104,12 +152,14 @@ enum RetryMerge {
         // chunk at paste time, so dropping the trimmed recovery into it
         // inherits the surrounding whitespace.
         var out = ""
+        var placed = nonePlaced
         var rest = Substring(existingText)
         var slot = 0
         while let hit = rest.range(of: marker) {
             out += rest[rest.startIndex..<hit.lowerBound]
             if slot < slots.count, let recoveredText = slots[slot] {
                 out += recoveredText
+                placed[slot] = true
             } else {
                 // No slot for this marker (fewer chunks than markers), or
                 // the chunk did not recover. Either way the gap stays
@@ -120,7 +170,13 @@ enum RetryMerge {
             rest = rest[hit.upperBound...]
         }
         out += rest
-        return out
+        // Slots past the last marker were never visited, so their `placed`
+        // flags stay false and the caller keeps holding their audio. That
+        // is the whole point of reporting placement separately: a row with
+        // fewer markers than retained chunks (a rewritten marker, a
+        // narrowed retention class) loses no audio and no text — the run
+        // simply reads as a partial one and can be retried.
+        return Merged(text: out, placed: placed)
     }
 
     /// The surviving transcripts of a row, as Gemini-facing priors (KTD6).

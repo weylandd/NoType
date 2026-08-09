@@ -254,6 +254,76 @@ final class AppStateRetryTests: XCTestCase {
         XCTAssertEqual(fx.store.peek(row.id)?.chunks.map(\.idx), [0])
     }
 
+    func test_retry_recoveryWithNoMarkerToLandIn_keepsTheAudioAndSurfacesTheFailure() async {
+        // The data-loss regression. A broken row can carry fewer markers
+        // than retained chunks — `TextReplacementEngine` runs over the
+        // stitched transcript before it is stored and its Unicode boundary
+        // matches the `…` inside `[…]`, so a user replacement pair on the
+        // ellipsis rewrites every marker in the row. Gemini then answers,
+        // the merge has nowhere to put the text, and the run must be
+        // treated as a failure: releasing the chunk on the strength of
+        // "it recovered" would destroy the only copy of the audio and
+        // throw the recovered text away in the same breath.
+        let fx = Fixture(self)
+        let row = fx.appendBrokenRow(
+            text: "Ship it by [...] and review after.",
+            failedChunkCount: 1,
+            chunkCount: 1
+        )
+        fx.state.retryChunkSender = fx.sender(
+            ["the tenth"],
+            tokens: TokenUsage(input: 70, output: 5, cached: 0)
+        )
+
+        await fx.state.retryEntry(id: row.id)
+
+        let settled = fx.row(row.id)
+        XCTAssertEqual(settled?.text, "Ship it by [...] and review after.", "the row is not rewritten")
+        XCTAssertEqual(settled?.failedChunkCount, 1, "and it stays broken")
+        XCTAssertEqual(
+            fx.store.peek(row.id)?.chunks.map(\.idx),
+            [0],
+            "the audio the merge could not use goes back — it is the only copy"
+        )
+        XCTAssertTrue(fx.hud.errorHUDVisible, "R19: the user is told the run achieved nothing")
+        let snap = await fx.stats.summary()
+        XCTAssertEqual(snap.totalSessions, 0, "and no session is counted for it")
+        XCTAssertEqual(
+            snap.dayBuckets[fx.dayKey(row)]?.tokenInput,
+            70,
+            "but the request was still billed, so its tokens are recorded"
+        )
+    }
+
+    func test_retry_sumsTokensAcrossEveryChunkItSent() async {
+        // Distinct per-chunk usage, so an accumulator that overwrites
+        // instead of summing (`tokens = result.tokens`) is caught. With a
+        // single shared TokenUsage across calls, that mutation survives.
+        let fx = Fixture(self)
+        let row = fx.appendBrokenRow(
+            text: "a \(marker) b \(marker) c \(marker) d",
+            failedChunkCount: 3,
+            chunkCount: 3
+        )
+        fx.state.retryChunkSender = { chunk, _, _, _ in
+            (
+                "R\(chunk.idx)",
+                TokenUsage(
+                    input: 100 * (chunk.idx + 1),
+                    output: 10 * (chunk.idx + 1),
+                    cached: chunk.idx
+                )
+            )
+        }
+
+        await fx.state.retryEntry(id: row.id)
+
+        let day = await fx.stats.summary().dayBuckets[fx.dayKey(row)]
+        XCTAssertEqual(day?.tokenInput, 600, "100 + 200 + 300")
+        XCTAssertEqual(day?.tokenOutput, 60, "10 + 20 + 30")
+        XCTAssertEqual(day?.tokenCached, 3, "0 + 1 + 2")
+    }
+
     // MARK: - Nothing recovered (R19)
 
     func test_retry_nothingRecovered_leavesTheRowAndPayloadUntouched_andSurfacesTheFailure() async {
@@ -416,6 +486,74 @@ final class AppStateRetryTests: XCTestCase {
 
         let snap = await fx.stats.summary()
         XCTAssertEqual(snap.dayBuckets[fx.dayKey(row)]?.tokenInput, 42)
+    }
+
+    func test_retry_deletedMidRun_stopsSpendingOnTheRemainingChunks() async {
+        // The user said they do not want this row. Every chunk still in the
+        // queue is money spent on something already discarded, so the run
+        // must abandon at the next boundary rather than discovering the
+        // deletion once at settle time.
+        let fx = Fixture(self)
+        let row = fx.appendBrokenRow(text: "", failedChunkCount: 4, chunkCount: 4)
+
+        var attempted: [Int] = []
+        fx.state.retryChunkSender = { [state = fx.state] chunk, _, _, _ in
+            attempted.append(chunk.idx)
+            if chunk.idx == 0 { state.deleteHistoryEntry(id: row.id) }
+            return ("recovered \(chunk.idx)", TokenUsage(input: 10, output: 1, cached: 0))
+        }
+
+        await fx.state.retryEntry(id: row.id)
+
+        XCTAssertEqual(attempted, [0], "chunks 1-3 are never billed for a deleted row")
+        XCTAssertNil(fx.store.peek(row.id), "and the payload is released, not resurrected")
+        let snap = await fx.stats.summary()
+        XCTAssertEqual(
+            snap.dayBuckets[fx.dayKey(row)]?.tokenInput,
+            10,
+            "only the one request that had already gone out is recorded"
+        )
+    }
+
+    // MARK: - The disk write
+
+    func test_retry_persistsTheRecoveredRowInPlace_withoutReorderingHistory() async {
+        // `settleRetry`'s `historyStore.update` is the feature's only disk
+        // write, and every other test in this file seeds rows through the
+        // mirror-only `recordHistoryEntry`, which leaves the store empty —
+        // so `update` takes its no-op branch and its replace path is never
+        // exercised. Seed the actor too, and assert against disk.
+        let fx = Fixture(self)
+        let older = HistoryEntry(
+            id: UUID(),
+            text: "an earlier, healthy transcript",
+            sourceAppName: "Slack",
+            sourceBundleID: Fixture.bundleID,
+            timestamp: Date(timeIntervalSinceNow: -600),
+            durationSeconds: 4,
+            failedChunkCount: 0
+        )
+        await fx.history.append(older)
+
+        let row = fx.appendBrokenRow(
+            text: "Ship it by \(marker) and review after.",
+            failedChunkCount: 1,
+            chunkCount: 1
+        )
+        await fx.history.append(row)
+
+        fx.state.retryChunkSender = fx.sender(["the tenth"])
+        await fx.state.retryEntry(id: row.id)
+
+        let onDisk = await fx.history.allEntries()
+        XCTAssertEqual(
+            onDisk.map(\.id),
+            [older.id, row.id],
+            "the row is replaced where it stood — a re-append would reorder the last-10 list"
+        )
+        XCTAssertEqual(onDisk.last?.text, "Ship it by the tenth and review after.")
+        XCTAssertEqual(onDisk.last?.failedChunkCount, 0, "the recovered row persists as un-broken")
+        XCTAssertEqual(onDisk.first?.text, older.text, "and the untouched row is untouched")
     }
 
     // MARK: - Fixture

@@ -154,7 +154,7 @@ final class RetryMergeTests: XCTestCase {
         )
     }
 
-    // MARK: - isRecovery / recoveredCount
+    // MARK: - isRecovery
 
     func test_isRecovery_matrix() {
         XCTAssertTrue(RetryMerge.isRecovery("text"))
@@ -163,9 +163,81 @@ final class RetryMergeTests: XCTestCase {
         XCTAssertFalse(RetryMerge.isRecovery("  \t\n "), "whitespace is not text")
     }
 
-    func test_recoveredCount_countsOnlyRealRecoveries() {
-        XCTAssertEqual(RetryMerge.recoveredCount(["a", nil, "", "b", "   "]), 2)
-        XCTAssertEqual(RetryMerge.recoveredCount([]), 0)
+    // MARK: - Placement (what the caller may release audio for)
+
+    func test_placed_marksOnlyTheSlotsThatActuallyLanded() {
+        let text = "one \(marker) two \(marker) three"
+
+        let merged = RetryMerge.mergeDetailed(
+            existingText: text,
+            recovered: [nil, "SECOND"]
+        )
+
+        XCTAssertEqual(merged.placed, [false, true])
+        XCTAssertEqual(merged.placedCount, 1)
+    }
+
+    func test_placed_emptyTextBranch_landsEveryRecovery() {
+        let merged = RetryMerge.mergeDetailed(
+            existingText: "",
+            recovered: ["Hello there", nil, "goodbye"]
+        )
+
+        XCTAssertEqual(merged.placed, [true, false, true])
+    }
+
+    func test_placed_recoveryWithNoMarkerToLandIn_isNotPlaced() {
+        // The data-loss shape. A broken row whose markers were rewritten
+        // after the fact — `TextReplacementEngine` runs over the stitched
+        // transcript before it is stored, and its Unicode boundary matches
+        // the `…` inside `[…]`, so a user pair on the ellipsis leaves a
+        // row that is still `isBroken` and still holds audio but carries
+        // no marker. The merge has nowhere to put the recovered text; if
+        // it reported that chunk as recovered anyway, the settle path
+        // would release the only copy of the audio AND discard the text.
+        let merged = RetryMerge.mergeDetailed(
+            existingText: "Ship it by [...] and review after.",
+            recovered: ["the tenth"]
+        )
+
+        XCTAssertEqual(merged.text, "Ship it by [...] and review after.", "nothing to substitute")
+        XCTAssertEqual(merged.placed, [false], "so the chunk did NOT land")
+        XCTAssertEqual(merged.placedCount, 0)
+    }
+
+    func test_placed_moreRecoveriesThanMarkers_marksOnlyTheOnesWithASlot() {
+        let text = "one \(marker) two"
+
+        let merged = RetryMerge.mergeDetailed(
+            existingText: text,
+            recovered: ["FIRST", "SECOND"]
+        )
+
+        XCTAssertEqual(merged.text, "one FIRST two")
+        XCTAssertEqual(
+            merged.placed,
+            [true, false],
+            "the second recovery had no marker, so its audio must stay held"
+        )
+    }
+
+    func test_placed_nothingRecovered_isAllFalse_andSizedToTheInput() {
+        let merged = RetryMerge.mergeDetailed(existingText: "a \(marker) b", recovered: [nil, nil])
+
+        XCTAssertEqual(merged.placed, [false, false], "one flag per retained chunk, even on a no-op")
+        XCTAssertEqual(merged.placedCount, 0)
+    }
+
+    func test_merge_isTheTextHalfOfMergeDetailed() {
+        // The String overload stays the priors path's entry point; it must
+        // not drift from the shape the settle path reads.
+        let text = "a \(marker) b \(marker) c"
+        for recovered: [String?] in [["X", "Y"], ["X", nil], [nil, nil], []] {
+            XCTAssertEqual(
+                RetryMerge.merge(existingText: text, recovered: recovered),
+                RetryMerge.mergeDetailed(existingText: text, recovered: recovered).text
+            )
+        }
     }
 
     // MARK: - Priors (KTD6)
