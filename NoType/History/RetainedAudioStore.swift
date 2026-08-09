@@ -120,9 +120,19 @@ final class RetainedAudioStore {
     /// in flight, and settles the row by re-putting whatever did not
     /// recover (or nothing, when everything did — which is R5's
     /// retry-succeeded release). Consumer: U6.
+    ///
+    /// **The taken payload is the only copy, so every path out of the
+    /// retry must re-put what it did not recover — not just the two
+    /// arms that end normally.** Between the `take` and the re-put, U6
+    /// issues a network call per chunk; a thrown error, an early
+    /// `return`, or a cancellation that skips the re-put deletes the
+    /// user's audio permanently and silently, because nothing here
+    /// holds a second reference and no test can observe the loss. The
+    /// nothing-recovered case (R19) is the one most easily written as
+    /// an early exit and is exactly the case that must re-put
+    /// everything it took.
     func take(_ entryID: UUID) -> RetainedRecording? {
-        defer { payloads[entryID] = nil }
-        return payloads[entryID]
+        payloads.removeValue(forKey: entryID)
     }
 
     /// Drop the payload held against `entryID`. A no-op when the id is
