@@ -339,6 +339,15 @@ final class RecordingSession {
     private let history:  HistoryStore
 
     private var startedAt: Date?
+    /// Wall-clock time `stop()` began — i.e. hotkey release.
+    ///
+    /// Captured so `brokenHistoryEntry()` can compute the same
+    /// press-to-release duration the success path does. `stop()` itself
+    /// returns long after release when the Gemini calls it drains are
+    /// failing and retrying, so `Date()` at throw time would credit the
+    /// row with the whole failed-transcription window instead of the
+    /// time the user actually spoke.
+    private var stoppedAt: Date?
     private var sourceApp: NSRunningApplication?
     /// Find/replace pairs to apply between `finalizeForInsertion` and
     /// `paste`. Captured from `DictionaryContext` at session start and
@@ -754,6 +763,58 @@ final class RecordingSession {
         )
     }
 
+    /// **The single place that turns this session into a `HistoryEntry`.**
+    ///
+    /// Both rows this session can produce come from here: the pasted row
+    /// on the success path, and the broken row `AppState` writes when
+    /// `stop()` threw after retaining audio (R6). Keeping one factory is
+    /// the point — the app / bundle-id / timestamp / duration fields are
+    /// derived from session state the caller does not have, and a second
+    /// builder would drift on the first field either of them gains.
+    ///
+    /// `failedChunkCount` comes from `summary` rather than being passed
+    /// in, so the persisted row and `SessionSummary.hasFailures` can
+    /// never disagree about how many chunks were lost — one predicate,
+    /// one source.
+    private func makeHistoryEntry(text: String) -> HistoryEntry {
+        // Duration = hotkey press → release. `stoppedAt` is captured at
+        // the very top of `stop()`, which runs once the user has already
+        // released, so it's the best proxy we have for release time.
+        // Drives WPM / Time saved on the Home tab.
+        let endedAt = stoppedAt ?? Date()
+        return HistoryEntry(
+            id: UUID(),
+            text: text,
+            sourceAppName: sourceApp?.localizedName ?? "Unknown",
+            sourceBundleID: sourceApp?.bundleIdentifier ?? "",
+            timestamp: startedAt ?? Date(),
+            durationSeconds: max(0, endedAt.timeIntervalSince(startedAt ?? endedAt)),
+            failedChunkCount: summary.failedChunkCount
+        )
+    }
+
+    /// The history row for a session whose `stop()` threw after every
+    /// dispatched chunk failed recoverably (R6, KTD3).
+    ///
+    /// **The text is empty on purpose, and that emptiness is load-bearing
+    /// twice over.** It is what U7 renders as the design's placeholder
+    /// bars (R9), and it is how "lifetime stats never counted this
+    /// session" is represented (R15 / KTD7): the success arm cannot
+    /// produce an empty-text row — `stop()` throws `SessionError.noSpeech`
+    /// on an empty stitch before it ever reaches `makeHistoryEntry` — so
+    /// an empty `text` on a broken row means, unambiguously, that nothing
+    /// was pasted and `StatsStore.record` was never called for it. U6's
+    /// retry accounting reads exactly that. A future change that seeds
+    /// this row with the `[…]` markers instead would silently make every
+    /// recovered session double-count.
+    ///
+    /// Only meaningful once `stop()` has thrown; calling it on a live
+    /// session dates the row from `Date()` instead of release time.
+    /// `AppState.finalizeRecording`'s catch arm is the only caller.
+    func brokenHistoryEntry() -> HistoryEntry {
+        makeHistoryEntry(text: "")
+    }
+
     /// Fold one batch's retained payload into the session accumulator.
     ///
     /// The first payload's context and model win. Both are frozen at
@@ -807,6 +868,10 @@ final class RecordingSession {
     /// pastes the concatenated transcript, and writes a history entry.
     func stop() async throws -> HistoryEntry {
         let t0 = Date()
+        // Every `throw` below leaves `AppState` holding this session, and
+        // the broken-row path (R6) needs release time to date the row.
+        // Record it before the first await rather than at each throw site.
+        stoppedAt = t0
         recorder.stop()                 // finishes the AsyncStream
         await vadTask?.value            // VAD consumer drains and exits
         let tStream = Date()
@@ -918,19 +983,7 @@ final class RecordingSession {
         await TextInjector.paste(final)
         let tPaste = Date()
 
-        // Duration = hotkey press → release. `t0` is captured at the
-        // very top of `stop()`, which runs once the user has already
-        // released, so it's the best proxy we have for release time.
-        // Drives WPM / Time saved on the Home tab.
-        let durationSeconds = max(0, t0.timeIntervalSince(startedAt ?? t0))
-        let entry = HistoryEntry(
-            id: UUID(),
-            text: final,
-            sourceAppName: sourceApp?.localizedName ?? "Unknown",
-            sourceBundleID: sourceApp?.bundleIdentifier ?? "",
-            timestamp: startedAt ?? Date(),
-            durationSeconds: durationSeconds
-        )
+        let entry = makeHistoryEntry(text: final)
         await history.append(entry)
 
         Self.log.info(

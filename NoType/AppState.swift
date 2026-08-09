@@ -18,6 +18,20 @@ final class AppState {
     var recordingState: RecordingState = .idle
     var history: [HistoryEntry] = []
 
+    /// The history row whose retry is in flight, or `nil` when none is.
+    ///
+    /// **One value, both surfaces (R18 / KTD9).** The popover's last-10
+    /// list and the Home tab's recent list render the same row component
+    /// against this single `@Observable` field, so a retry started in one
+    /// shows as in flight in the other rather than each view holding its
+    /// own copy. Deliberately *not* `@ObservationIgnored` — being observed
+    /// is the whole point.
+    ///
+    /// Written by U6's retry orchestration and read by U7's row states;
+    /// `canRetry(entryID:)` below already consults it so a second tap on a
+    /// retrying row cannot start a second run.
+    private(set) var retryingEntryID: UUID?
+
     /// Cross-window tab navigation flag. Set by surfaces outside the
     /// main window (e.g. popover gear → Settings) when they want the
     /// main window to open on a specific tab. `MainWindowView`
@@ -164,6 +178,14 @@ final class AppState {
     @ObservationIgnored private let appCategorizer: AppCategorizer
     @ObservationIgnored private let dictionaryStore: DictionaryStore
     @ObservationIgnored private let onboarding: OnboardingState
+    /// The in-memory audio of broken rows' failed chunks (R1, R5).
+    ///
+    /// `@ObservationIgnored` on purpose: views never read the payloads,
+    /// only whether a retry is possible, and that goes through
+    /// `canRetry(entryID:)`. Injected so eviction is testable without
+    /// reaching into `AppState`'s privates — production always takes the
+    /// default. Never log a payload or any of its fields.
+    @ObservationIgnored private let retainedAudio: RetainedAudioStore
     @ObservationIgnored private var observationTasks: [Task<Void, Never>] = []
 
     /// Guards `prime()` against a second run. Mirrors `UpdateController`'s
@@ -323,8 +345,10 @@ final class AppState {
         instructionsStore: InstructionsStore,
         appCategorizer: AppCategorizer,
         dictionaryStore: DictionaryStore,
-        onboarding: OnboardingState
+        onboarding: OnboardingState,
+        retainedAudio: RetainedAudioStore = RetainedAudioStore()
     ) {
+        self.retainedAudio = retainedAudio
         self.permissions = permissions
         self.hud = hud
         self.gemini = gemini
@@ -576,6 +600,11 @@ final class AppState {
 
     func refreshHistory() async {
         history = await historyStore.allEntries()
+        // Reloading the mirror is a history mutation like any other: it
+        // can drop rows the mirror was holding, and a payload keyed by a
+        // row that no longer exists is unreachable memory (R5). At launch
+        // this is a no-op over an empty holder.
+        retainedAudio.retain(only: liveHistoryIDs)
     }
 
     /// Trailing audio samples from the in-flight recording session, or
@@ -590,6 +619,10 @@ final class AppState {
     func deleteHistoryEntry(id: UUID) {
         // Optimistic local update so the row disappears immediately.
         history.removeAll { $0.id == id }
+        // R5's user-delete release. Targeted `remove(_:)`, not
+        // `retain(only:)` — that one is the cap's mirror and this is not
+        // an eviction; see `RetainedAudioStore`'s trigger table.
+        retainedAudio.remove(id)
         Task { [historyStore] in
             await historyStore.remove(id: id)
         }
@@ -606,6 +639,9 @@ final class AppState {
     /// `deleteHistoryEntry`.
     func deleteAllHistory() {
         history.removeAll()
+        // Every row is gone, so every payload is unreachable (R5). The
+        // empty live set is `retain(only:)`'s delete-all case.
+        retainedAudio.retain(only: [])
         Task { [historyStore] in
             await historyStore.deleteAll()
         }
@@ -635,6 +671,111 @@ final class AppState {
                 self?.statsSummary = empty
             }
         }
+    }
+
+    // MARK: - Retained audio (failed-recording retry)
+
+    /// Cap on the in-memory history mirror.
+    ///
+    /// Mirrors `HistoryStore.cap`. The two are separate constants because
+    /// the mirror trims optimistically on the main actor while the store
+    /// trims on its own actor during the disk write; they must agree, or
+    /// `liveHistoryIDs` would name a set the store disagrees with and
+    /// `retain(only:)` would drop a payload for a row that is still on
+    /// screen — or keep one for a row that is gone.
+    nonisolated static let historyMirrorCap = 10
+
+    /// The ids of the rows the mirror currently holds.
+    ///
+    /// This is deliberately read *after* a mutation has settled rather
+    /// than predicted before one: it is the set the UI is actually
+    /// rendering and the set `peek`/`take` will be called with, so keying
+    /// eviction off it cannot destroy a payload the user can still see a
+    /// retry button for.
+    private var liveHistoryIDs: Set<UUID> { Set(history.map(\.id)) }
+
+    /// Append `entry` to the history mirror, trim to the cap, and bring
+    /// the retained-audio holder into step (R5).
+    ///
+    /// The single append path — both `finalizeRecording` arms go through
+    /// it, so the "put the payload, then keep only what survived the
+    /// trim" ordering exists once. `retain(only:)` runs *after* the put so
+    /// the row just appended keeps its payload, and any row the trim
+    /// evicted loses one in the same breath (AE5). Eviction is never a
+    /// `remove(_:)` loop — see `RetainedAudioStore`.
+    ///
+    /// The on-disk write is the caller's business: `RecordingSession.stop()`
+    /// already performed it on the success path, and the catch arm's
+    /// `recordBrokenRow` fires its own.
+    func recordHistoryEntry(_ entry: HistoryEntry, retaining payload: RetainedRecording?) {
+        history.append(entry)
+        if history.count > Self.historyMirrorCap {
+            history.removeFirst(history.count - Self.historyMirrorCap)
+        }
+        if let payload {
+            retainedAudio.put(payload, for: entry.id)
+        }
+        retainedAudio.retain(only: liveHistoryIDs)
+    }
+
+    /// Write the broken history row for a session whose `stop()` threw,
+    /// and hold its audio for a retry (R6).
+    ///
+    /// `retained` is the recoverable-versus-terminal split (KTD3): U2
+    /// clears the session's payload session-wide on any terminal error, so
+    /// a `nil` here means "expired key, content block, cancellation" and
+    /// this is a **no-op** — the session is discarded exactly as it is
+    /// today, with no row and nothing held (AE1). Non-`nil` means the
+    /// class that already produces a `[…]` marker, and the loss becomes a
+    /// row the user can act on.
+    ///
+    /// Optimistic mirror update plus a fire-and-forget disk write, the
+    /// same shape as `deleteHistoryEntry`. Returns the row it wrote, or
+    /// `nil` when it wrote none.
+    @discardableResult
+    func recordBrokenRow(retained: RetainedRecording?, entry: HistoryEntry) -> HistoryEntry? {
+        guard let retained else { return nil }
+        recordHistoryEntry(entry, retaining: retained)
+        Task { [historyStore] in
+            await historyStore.append(entry)
+        }
+        return entry
+    }
+
+    /// Whether a retry may start right now — the pure half, over the two
+    /// facts that gate it plus the one that de-bounces it.
+    ///
+    /// - `hasRetainedPayload`: false for a row whose process-lifetime
+    ///   audio is gone, which is exactly a *dead* row (R8) — it keeps
+    ///   copy and delete but loses retry (R10).
+    /// - `recordingState`: R14. A retry during `.recording` or `.sending`
+    ///   would put a second Gemini request beside the session's own.
+    /// - `isRetrying`: R13. `take(_:)` already removes the payload for the
+    ///   duration of a run, so this is belt-and-braces against a double
+    ///   tap landing before the take — cheap, and the risk register calls
+    ///   for guarding the entry point rather than trusting the UI.
+    nonisolated static func canRetry(
+        recordingState: RecordingState,
+        hasRetainedPayload: Bool,
+        isRetrying: Bool
+    ) -> Bool {
+        guard hasRetainedPayload, !isRetrying else { return false }
+        switch recordingState {
+        case .idle:                 return true
+        case .recording, .sending:  return false
+        }
+    }
+
+    /// Whether the row `entryID` can start a retry right now. The
+    /// instance half of `canRetry(recordingState:hasRetainedPayload:isRetrying:)`,
+    /// and the only retry-availability read outside this file — U6 guards
+    /// its entry point on it and U7 derives the row's action set from it.
+    func canRetry(entryID: UUID) -> Bool {
+        Self.canRetry(
+            recordingState: recordingState,
+            hasRetainedPayload: retainedAudio.peek(entryID) != nil,
+            isRetrying: retryingEntryID == entryID
+        )
     }
 
     // MARK: - API key
@@ -1103,10 +1244,13 @@ final class AppState {
                 // session the user has since started. Don't touch either.
                 guard self.currentSession === session, case .sending = self.recordingState else { return }
                 self.currentSession = nil
-                self.history.append(entry)
-                if self.history.count > 10 {
-                    self.history.removeFirst(self.history.count - 10)
-                }
+                // The row already carries `failedChunkCount` — the
+                // session set it from the same `summary` this arm reads,
+                // so a partially-failed session's row is broken (R6) with
+                // no second predicate involved. `retained` is non-nil for
+                // exactly those sessions, and holding it here is what
+                // gives that row a retry action (R5).
+                self.recordHistoryEntry(entry, retaining: sessionSummary.retained)
                 self.recordingState = .idle
                 self.lockedRecording = false
                 self.releaseSleepAssertion()
@@ -1160,6 +1304,16 @@ final class AppState {
                 self.releaseSleepAssertion()
                 self.uninstallSpacebarLockTap()
                 self.hud.hideTranscribingHUD()
+                // R6 / KTD3: `stop()` keeps its throwing contract, and the
+                // throw is still what feeds the Error HUD below — but a
+                // session that lost every chunk to the recoverable class
+                // now leaves a row behind instead of evaporating with the
+                // toast. `recordBrokenRow` is a no-op when nothing was
+                // retained, which is the terminal case (AE1).
+                self.recordBrokenRow(
+                    retained: session.summary.retained,
+                    entry: session.brokenHistoryEntry()
+                )
                 self.surfaceError(.sessionFailure(error))
             }
         }
