@@ -14,7 +14,8 @@ applies_when:
   - A convention-only rule keeps regressing and someone proposes a mechanical check
   - "Writing a guard whose subject is an installed hook, a swapped function pointer, a redaction rule, or the order of two steps"
   - "A test fixture is chosen for convenience rather than for the real shape of the thing being matched"
-tags: [testing, source-scan, convention-tests, guard-fidelity, launch-ordering, false-negative, hook-installation, exhaustive-switch]
+  - "Adding a type to a path a scan enforces a rule over — especially via a default argument, a stored-property default, or a factory"
+tags: [testing, source-scan, convention-tests, guard-fidelity, launch-ordering, false-negative, hook-installation, discovery-set]
 related_components: [NoTypeApp, UI, Permissions, Diagnostics, Recording]
 ---
 
@@ -106,6 +107,47 @@ Generalised: **when a guard's subject is two exhaustive switches over the same e
 
 This does not mean deleting the enum-axis test. It means not counting it as the coverage — keep it if it documents intent (it names the invariant in prose for the next reader), but write the comment that says what it does *not* close, so the next maintainer does not read its green as "these two agree."
 
+### A fourth shape: the property is checked correctly, over a discovery set that quietly narrowed
+
+The three shapes above are all about the *assertion*. This one is about the **population the assertion runs over**. A source scan is two scans stacked: one that decides *which subjects to look at*, and one that checks *the property* on each. Only the second is ever written down as the rule, so only the second gets reviewed — and a discovery pass that silently returns a smaller set produces exactly the same green as a rule that holds.
+
+`LaunchPathScanner.launchPathTypes` (`NoTypeTests/LaunchOrderingTests.swift:549`) builds the launch path by walking `constructedTypeNames(in: fn.body)` over every reachable `init` body. `functionBodies` deliberately "walk[s] to the opening brace of the body, skipping the signature (parameters, effects, return type)" (`:816`), so nothing inside a parameter list is ever seen.
+
+U5 of the retry work put a new type on the launch path as a **default argument**:
+
+```swift
+// NoType/AppState.swift:349 — the default is still there; it is the test surface.
+init(…, retainedAudio: RetainedAudioStore = RetainedAudioStore()) { … }
+```
+
+A default argument is evaluated **at the call site** — inside `NoTypeApp.init()` — so `RetainedAudioStore` was genuinely constructed on the launch path and genuinely subject to the rule. But its `RetainedAudioStore(` text sits in a parameter list in a *different file*, appearing in no `init` body the scanner reads. The type never entered the population, so `violations(inSource:)` never opened its source. A `Task { … }` or an `NSApp` read inside `RetainedAudioStore.init` would have shipped with the entire suite green.
+
+The sharp part: this file had already reasoned its way to this exact conclusion **on the other axis**. `violations(inSource:)` scans `storedPropertyDeclarations` (`:647`) explicitly because those "execute as part of construction even though they appear in no function body" — checklist item 4 above. That sentence describes a default argument verbatim. The insight was applied to the property scan and not to the discovery scan, because nobody had written down that **discovery is a scan too**.
+
+So: **a scan must assert its own discovery set, not only the property it checks over that set.** For every subject the rule is meant to cover, either the scan demonstrably found it, or a named assertion pins it:
+
+```swift
+// LaunchOrderingTests.swift:64 — inside the repo-wide violations test, beside the
+// existing AppState / PermissionsViewModel / AppearanceController discovery guards.
+XCTAssertTrue(
+    types.keys.contains("RetainedAudioStore"),
+    "Launch-path discovery lost RetainedAudioStore — NoTypeApp.init() must construct it explicitly rather than relying on AppState.init's default argument, which this scan cannot see. Found: \(types.keys.sorted())"
+)
+```
+
+**Say plainly whether you repaired the scan or routed around it.** This fix routed around: `NoTypeApp.init()` now names the type in a body (`NoType/NoTypeApp.swift:160`) and the assertion above stops that being "simplified" back to the elided form. But `constructedTypeNames` still cannot see default arguments, so the *next* defaulted construction added anywhere on the launch path is invisible again, with nothing to catch it. That is a defensible trade — parsing parameter lists correctly is hard, and a wrong parse fails **green**, which is the hazard this whole entry is about — but it is a tripwire for one type, not a closed class. A write-up that implies otherwise hands the next reader a false sense of coverage.
+
+**Enumerate against the runtime state, not against the syntax you had in hand.** The discovery axis rots the same way needle lists do (checklist item 1). Shapes that reach construction in this repo:
+
+| Reaches construction | In an `init` body? | Covered by |
+|---|---|---|
+| `let x = Foo()` inside an initializer | yes | the discovery walk itself |
+| `private let x = Foo()` stored-property default | no | `storedPropertyDeclarations` (`:647`) |
+| `init(x: Foo = Foo())` default argument | **no** | one per-type assertion (`:64`) — not the class |
+| `Foo.install()` static call that constructs nothing | **no** | a separate file-scoped guard in `ExceptionBreadcrumbTests` |
+
+Factory functions (`Foo.make()`) and protocol-witness construction sit in the same column and have no guard at all today. The generalisation past source scans: **any rule enforced over an enumerated population inherits the enumeration's blind spots**, and the enumeration is usually the part nobody restates when the rule is quoted.
+
 ### Prove the guard red
 
 None of the above is discoverable by reading the test. The only reliable check is to **break the thing on purpose and watch the test fail** — revert the fix, delete the wiring line, add the needle you think is covered — then restore. Both new assertions in this arc were verified red that way before being trusted. A guard never observed failing is a guard whose fidelity is unmeasured.
@@ -125,6 +167,8 @@ The absence-only trap is not new to this repo, which is the argument for stating
 
 The concrete cost here: the shipped artifact would have been a menu-bar app that launches, shows its icon, and does nothing — no hotkey, empty history, permissions permanently `.unknown`. Indistinguishable from a genuinely ungranted install, on a branch whose entire purpose was to fix a crash the maintainer cannot reproduce. (`AppState.prime()` now logs one `.info` line on entry for exactly this reason — `NoType/AppState.swift:376`.)
 
+**The recurrence rate is itself a finding, and it says something about this file.** Three units of one plan — U1, U2 and U5 of `docs/plans/2026-08-09-001-feat-failed-recording-retry-plan.md` — each shipped at least one guard that passed for a reason other than the property it named, and each was caught at review, not at authoring, *with this entry already written and already extended twice in the same plan*. The reason it did not reach the authors is structural: a catalogue of failure shapes is a **review** instrument. Its title selects for "I am writing a source scan," and none of the three authors thought they were — one was pinning two enum classifiers, one a numeric constant. So the authoring-time habits (mutate the thing and watch it go red; try to delete a drift before guarding it) now live where a test author actually looks, in [`testing-spm-and-git`](./testing-spm-and-git-2026-05-15.md) > Testing, and this entry stays what it is: the place a reviewer looks the shape up once they already suspect one. Adding a fourth failure-shape section for the constant-drift case would have been this same mistake a fourth time.
+
 ## When to Apply
 
 - **Writing any new source-scan / convention test.** Walk the four checklist items plus the anchor-and-overload notes, then prove it red.
@@ -132,6 +176,7 @@ The concrete cost here: the shipped artifact would have been a menu-bar app that
 - **Reviewing a diff that adds "and a test pins this."** Check what the test would do if the feature were entirely removed rather than merely misplaced.
 - **Writing a guard for an installed hook, a swapped pointer, a redaction rule, or an ordering between two steps.** Apply the hook-guard section: name the worst outcome in that area, then check whether the assertion would be green under it.
 - **Adding a sibling classifier, or any consistency guard between two functions over the same type.** Name the axis the guard covers, ask what else already covers it (an exhaustive switch, a non-optional type, a constraint), and check whether the axis carrying the real policy — usually an associated value or a numeric range — is covered by anything at all.
+- **Adding a type to a path that a scan enforces a rule over.** Ask how it is constructed, not just where: a default argument, a stored-property default, a factory, or a static entry point all reach the runtime state without appearing in an `init` body. Then check the scan's *discovery* output names it, not just that its violation count is zero.
 - **Narrower than it looks — but not only source text.** A behavioural test that constructs the object and asserts on its output does fail loudly when the subject *disappears*; that much still holds. What it does not catch is a subject that is present and wrong in a way the assertion cannot tell from correct — a comparison that degenerates to `nil == nil`, a fixture matched by a broader rule than the one named, two correct steps composed backwards. Source scans are the worst case of this class, not the whole of it.
 
 ## Examples
@@ -177,5 +222,7 @@ func startPollingIfNeeded()  { Task { … } }   // two hops down
 - [`architecture-patterns/partial-recovery-with-markers-2026-05-16.md`](../architecture-patterns/partial-recovery-with-markers-2026-05-16.md) — the recoverable/terminal split that `isTerminal(_:)` encodes, and which `shouldRetain(_:)` now mirrors; the source of the 401/403 carve-out the status sweep guards.
 - Commits `a77cf9d` (adds `shouldRetain` beside `isTerminal`) and `97e4a21` (review remediation: the `0...599` status sweep, proved red) — where the compiler-owns-the-case-axis section came from. Unit U1 of `docs/plans/2026-08-09-001-feat-failed-recording-retry-plan.md`. Both SHAs are branch-local to `feat/failed-recording-retry` at time of writing and will be rewritten if that branch squash-merges; the plan path is the stable reference.
 - [`runtime-errors/onhover-mainactor-inheritance-crash-2026-05-19.md`](../runtime-errors/onhover-mainactor-inheritance-crash-2026-05-19.md) — where `DSComponentsHoverTests` came from; its Prevention section presents the scan as an unqualified win, which this entry qualifies.
+- Commits `7f2431f` (U5 implementation — put `RetainedAudioStore` on the launch path through a default argument) and `9d485bb` (review remediation: `NoTypeApp.init()` names it explicitly, plus the discovery assertion, plus the constant-drift test rewrite). Unit U5 of the same plan. Branch-local to `feat/failed-recording-retry` at time of writing; the plan path is the stable reference.
+- [`conventions/reconcile-optimistic-mirror-by-union-2026-08-09.md`](./reconcile-optimistic-mirror-by-union-2026-08-09.md) — the other P1 from U5. Not a guard-fidelity problem, but the same underlying move: a check written against one of two views of the same state, where the two are deliberately allowed to disagree.
 - `NoTypeTests/LaunchOrderingTests.swift`, `NoTypeTests/DSComponentsHoverTests.swift` — the two general source-scan guards in the project. `NoTypeTests/ExceptionBreadcrumbTests.swift` carries a third, file-scoped one (`test_breadcrumbSource_schedulesNoMainActorWork_andDoesNotTouchNSApp`) added because `LaunchOrderingTests`' discovery walks constructions (`TypeName(`) and so cannot see a type reached only through a static `install()` call — an instance of checklist item 1 at the discovery layer rather than the needle layer.
 - `NoType/UI/CLAUDE.md` "Launch ordering" — the rule these guards pin.

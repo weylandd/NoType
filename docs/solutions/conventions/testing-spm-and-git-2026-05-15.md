@@ -1,6 +1,7 @@
 ---
 title: Testing, SPM dependency, and Git/PR hygiene conventions
 date: 2026-05-15
+last_updated: 2026-08-09
 category: conventions
 module: cross-cutting
 problem_type: convention
@@ -29,6 +30,8 @@ The day-to-day conventions for how code lands in the repo. Less load-bearing tha
 - **Hard rule:** `NoTypeTests/GeminiRequestBuilderTests.swift` must verify the cache-friendly part ordering. If the test changes, the cache-prefix invariant changed — get explicit review.
 - **Use synthetic AX trees and synthetic audio buffers for tests.** Don't depend on the live system in unit tests.
 - **A boundary / over-match regression fixture must embed the exact pattern flanked by adjacent word-characters, or it silently tests nothing.** PR-DICT found a tautological test: the fixture `beg.example` never contains the substring `e.g.`, so it passed under both the old `\b` idiom and the new Unicode look-around — pinning nothing. `code.g.example` (embeds `e.g.` with a word-char on each side) actually exercises the boundary. When a test guards a "must NOT over-match across a boundary" rule, verify the target string genuinely contains the pattern at a boundary the old code would have mishandled. This is the fixture-level case of a broader class — see [source-scan guard fidelity](./source-scan-guard-fidelity-2026-07-25.md) for tests that pin a convention by scanning source text.
+- **Before you commit a test, break the thing it pins and watch it go red.** Revert the fix, delete the wiring line, change the constant — then restore. A test that has never been observed failing has *unmeasured* fidelity, and the ways it can be green-for-the-wrong-reason are not visible by reading it: a comparison that degenerates to `nil == nil`, a fixture caught by a broader rule than the one named, an assertion over a discovery set that quietly narrowed. Three consecutive units of one plan (`docs/plans/2026-08-09-001-feat-failed-recording-retry-plan.md`, U1 / U2 / U5) each shipped one of these; all three were caught at review, and the mutation probe is the step that would have caught them a stage earlier. The catalogue of shapes lives in [source-scan guard fidelity](./source-scan-guard-fidelity-2026-07-25.md) — but it is a *review* instrument, so the habit belongs here.
+- **Before writing a drift guard between two values, try to delete the drift instead.** `AppState.historyMirrorCap` and `HistoryStore.cap` were two hand-copied literals plus `XCTAssertEqual(AppState.historyMirrorCap, 10)` — an assertion that could only fail in the harmless direction, and was blind to the one that mattered (`HistoryStore.cap` moving under a stale mirror constant). Making `HistoryStore.cap` internal and deriving `historyMirrorCap = HistoryStore.cap` removed the drift outright and freed the test to aim at what can still break: both trim *implementations*, driven past the cap, survivors compared. A guard is what you write when the invariant cannot be made structural — not the first move.
 - **Integration tests against the real Gemini API live behind env var `NOTYPE_INTEGRATION=1`**; they are not part of the default `NoTypeTests` run.
 
 ### SPM dependencies
@@ -79,6 +82,7 @@ docs: migrate ADR-002..009 to docs/solutions/ (batch 1 of 2)
 
 ## Related
 
+- [source-scan guard fidelity](./source-scan-guard-fidelity-2026-07-25.md) — the catalogue of ways a guard is green for the wrong reason, and why the authoring-time habits above live here rather than there.
 - `docs/build.md` — release workflow that depends on these conventions.
 - `solutions/tooling-decisions/sparkle-2-with-custom-banner-ui-2026-05-15.md` — the only current SPM dep.
 - `docs/conventions.md` — legacy index, redirects here.
