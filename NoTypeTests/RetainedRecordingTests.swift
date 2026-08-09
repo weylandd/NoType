@@ -274,4 +274,186 @@ final class RetainedRecordingTests: XCTestCase {
         XCTAssertFalse(conformsToCoding(RetainedRecording.Chunk.self),
                        "RetainedRecording.Chunk must never be serializable (R1)")
     }
+
+    // MARK: - Retain-set derivation (U2)
+    //
+    // `RecordingSession.retainedPayload(inBatch:failedChunkIndices:context:model:)`
+    // is the pure seam the session's two failure arms funnel through:
+    // `processBatch`'s single-chunk arm and `splitRetry`'s per-chunk arm
+    // each collect the indices that passed `shouldRetain(_:)`, and the
+    // batch's encoded chunks plus that set produce the payload. The
+    // session itself owns an AudioRecorder / SileroVAD / GeminiClient /
+    // HistoryStore and is not drivable end to end, so this is where the
+    // R2 / R3 behaviour is proved; the wiring is covered by the plan's
+    // manual smoke protocol.
+
+    /// A batch chunk with a distinguishable audio blob and sample count,
+    /// so a mis-mapped index is visible rather than plausible.
+    private func chunk(
+        _ idx: Int,
+        isFinal: Bool = false
+    ) -> RetainedRecording.Chunk {
+        RetainedRecording.Chunk(
+            idx: idx,
+            isFinal: isFinal,
+            audio: Data([UInt8(0xA0 + idx)]),
+            samples: 16_000 * (idx + 1)
+        )
+    }
+
+    private var slackContext: ContextSnapshot {
+        ContextSnapshot.minimal(
+            activeApp: AppInfo(name: "Slack", bundleID: "com.tinyspeck.slackmacgap")
+        )
+    }
+
+    private func payload(
+        batch: [RetainedRecording.Chunk],
+        failed: Set<Int>,
+        context: ContextSnapshot? = nil,
+        model: GeminiModel = .flashLite
+    ) -> RetainedRecording? {
+        RecordingSession.retainedPayload(
+            inBatch: batch,
+            failedChunkIndices: failed,
+            context: context ?? slackContext,
+            model: model
+        )
+    }
+
+    func test_retainSet_oneOfThreeFailed_keepsOnlyThatChunk() {
+        // R2: audio for chunks that returned text is released on the
+        // existing schedule — only the failed one survives, and it
+        // survives at its original chunk index, which is what lets its
+        // recovered text land back in the right `[…]` slot later.
+        let batch = [chunk(0), chunk(1), chunk(2, isFinal: true)]
+
+        let result = payload(batch: batch, failed: [1])
+
+        XCTAssertEqual(result?.chunks.map(\.idx), [1])
+        XCTAssertEqual(result?.chunks.first?.audio, Data([0xA1]))
+        XCTAssertEqual(result?.chunks.first?.samples, 32_000)
+        XCTAssertEqual(result?.chunks.first?.isFinal, false)
+    }
+
+    func test_retainSet_everyChunkFailed_keepsAllInChunkOrder() {
+        let batch = [chunk(3), chunk(4), chunk(5, isFinal: true)]
+
+        let result = payload(batch: batch, failed: [3, 4, 5])
+
+        XCTAssertEqual(result?.chunks.map(\.idx), [3, 4, 5])
+        XCTAssertEqual(result?.chunks.map(\.isFinal), [false, false, true])
+    }
+
+    func test_retainSet_isSortedByChunkIndex_notByBatchOrder() {
+        // `failedChunkIndices` is a `Set`, so nothing about iteration
+        // order can be relied on, and a future change to the sender's
+        // drain order must not reshuffle the payload. Feed the batch
+        // deliberately out of order and require ascending output.
+        let batch = [chunk(7), chunk(2), chunk(5)]
+
+        let result = payload(batch: batch, failed: [7, 2, 5])
+
+        XCTAssertEqual(result?.chunks.map(\.idx), [2, 5, 7])
+    }
+
+    func test_retainSet_noChunkFailed_retainsNothing() {
+        // The ordinary successful session: no payload at all, so the
+        // normal path gains no memory cost.
+        let batch = [chunk(0), chunk(1), chunk(2, isFinal: true)]
+
+        XCTAssertNil(payload(batch: batch, failed: []))
+    }
+
+    func test_retainSet_hallucinationGateDrop_retainsNothing() {
+        // The gate's third state (`text: ""`, not `nil`): Gemini answered
+        // and we filtered the answer. That is not a failure, so the
+        // chunk never enters the failed set and nothing is retained —
+        // retaining it would hold audio for a call that succeeded.
+        // See `NoType/Recording/CLAUDE.md` "Post-response hallucination
+        // gate".
+        let batch = [chunk(0), chunk(1), chunk(2, isFinal: true)]
+
+        // Chunk 1 was gate-dropped; 0 and 2 transcribed normally.
+        XCTAssertNil(payload(batch: batch, failed: []))
+    }
+
+    func test_retainSet_gateDropAlongsideARealFailure_keepsOnlyTheFailure() {
+        // Same batch, but chunk 2's call genuinely failed. The
+        // gate-dropped chunk 1 still contributes nothing.
+        let batch = [chunk(0), chunk(1), chunk(2, isFinal: true)]
+
+        let result = payload(batch: batch, failed: [2])
+
+        XCTAssertEqual(result?.chunks.map(\.idx), [2])
+    }
+
+    func test_retainSet_carriesTheFrozenContextAndModel() {
+        // R3 / KTD3: the payload ships the snapshot the failed requests
+        // actually used and the model the session was frozen on — not
+        // whatever is current when the payload is read. Both are
+        // parameters precisely so nothing inside this function can read
+        // live state.
+        let frozen = ContextSnapshot.minimal(
+            activeApp: AppInfo(name: "Xcode", bundleID: "com.apple.dt.Xcode")
+        )
+
+        let result = payload(
+            batch: [chunk(0, isFinal: true)],
+            failed: [0],
+            context: frozen,
+            model: .flash
+        )
+
+        XCTAssertEqual(result?.context, frozen)
+        XCTAssertEqual(result?.context.activeApp.bundleID, "com.apple.dt.Xcode")
+        XCTAssertEqual(result?.model, .flash)
+    }
+
+    func test_retainSet_indexWithNoMatchingChunk_fabricatesNothing() {
+        // The filter runs over the batch, not over the index set, so a
+        // set carrying an index the batch never held (a sub-150 ms chunk
+        // dropped before encode, say) yields no chunk rather than a
+        // synthesised one with empty audio.
+        let batch = [chunk(0), chunk(1)]
+
+        XCTAssertNil(payload(batch: batch, failed: [9]))
+        XCTAssertEqual(payload(batch: batch, failed: [1, 9])?.chunks.map(\.idx), [1])
+    }
+
+    func test_retainSet_emptyBatch_retainsNothing() {
+        XCTAssertNil(payload(batch: [], failed: [0, 1]))
+    }
+
+    // MARK: - SessionSummary carries the payload
+
+    func test_sessionSummary_defaultsToNoRetainedPayload() {
+        // The successful session's shape: `AppState` branches on
+        // presence, so absence has to be the default rather than an
+        // empty payload.
+        let summary = RecordingSession.SessionSummary(
+            failedChunkCount: 0,
+            dispatchedChunkCount: 3,
+            tokens: .zero,
+            model: .flashLite
+        )
+        XCTAssertNil(summary.retained)
+    }
+
+    func test_sessionSummary_carriesRetainedPayloadVerbatim() {
+        let retained = payload(batch: [chunk(0), chunk(1, isFinal: true)],
+                               failed: [0, 1])
+        let summary = RecordingSession.SessionSummary(
+            failedChunkCount: 2,
+            dispatchedChunkCount: 2,
+            tokens: .zero,
+            model: .flashLite,
+            retained: retained
+        )
+
+        XCTAssertTrue(summary.hasFailures)
+        XCTAssertEqual(summary.retained?.chunks.map(\.idx), [0, 1])
+        XCTAssertEqual(summary.retained?.chunks.map(\.audio),
+                       [Data([0xA0]), Data([0xA1])])
+    }
 }
