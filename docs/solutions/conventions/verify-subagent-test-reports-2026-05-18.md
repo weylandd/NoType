@@ -1,6 +1,7 @@
 ---
 title: Verify subagent test reports by running the full suite yourself
 date: 2026-05-18
+last_updated: 2026-08-09
 category: conventions
 module: cross-cutting
 problem_type: convention
@@ -55,6 +56,8 @@ The empirical incident that motivated this entry: PR #47's review-fixer applied 
 
 Generalised: any reporting boundary where a subagent summarises a partial action as a complete one is a place where the orchestrator owes the user independent verification. Subagents are useful for parallel context isolation and bounded work; they are not authoritative on what they didn't actually do. "Targeted suites passed" is a *true* fact about what the subagent ran; "the project still passes tests" is a *different* fact that requires running the project's full test suite.
 
+**A claim about a *probe* is worse than a claim about a run, because re-running the suite cannot check it.** A test run leaves an artifact — output the orchestrator can reproduce in 60 seconds. A mutation probe ("I broke each thing and watched it go red", the habit prescribed in [testing-spm-and-git](./testing-spm-and-git-2026-05-15.md) > Testing) leaves *nothing*: the source is restored, the suite is green either way, and the diff looks identical whether or not the probe happened. It is unfalsifiable from the artifacts. U6 of the retry plan is the case: the implementer reported all 38 new tests mutation-checked red, in good faith, and the claim was right for six of seven guards — the reviewer re-mutated the source and found the seventh mutant alive (`tokens = result.tokens` in place of `tokens = tokens + result.tokens`, silent under-billing, no red test). Nothing short of re-performing the mutation would have found it. So: when a report claims a probe rather than a run, re-mutate the specific line yourself, or treat the guard as unverified and say so. The same applies to a claim of manual verification, a claim that an edge case was exercised, and a claim that a fixture was checked against the old implementation.
+
 A pushed commit that turns out to have regressed a test on `main` is harder to fix than a 60-second `xcodebuild test` run before push. The asymmetry favours always running.
 
 ## When to Apply
@@ -100,7 +103,8 @@ The cost is one `xcodebuild test` run (~60s on this project). The benefit is tha
 
 ## Related
 
-- `docs/solutions/conventions/testing-spm-and-git-2026-05-15.md` — the existing testing convention (unit-test expectations, SPM allow-list, Conventional Commits); this convention complements it for the orchestrator-subagent boundary.
+- `docs/solutions/conventions/testing-spm-and-git-2026-05-15.md` — the existing testing convention (unit-test expectations, SPM allow-list, Conventional Commits); this convention complements it for the orchestrator-subagent boundary. Its Testing section owns the mutation-probe habit itself, and the fixture-distinctness rule that explains why U6's probe could not have caught the surviving mutant even if it had been run exactly as claimed.
+- `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md` — the catalogue of shapes a guard fails in, and the recurrence-rate argument (four units of one plan) that U6's claimed-but-unverified probe sharpens.
 - `docs/solutions/architecture-patterns/gemini-prompt-section-audit-2026-05-17.md` Tier 4 — defines the 2 known live-API `PromptEvalTests` failures that make up the current baseline.
 - `docs/build.md` "Hard rules" — the build-then-cleanup recipe; this convention adds the test-then-verify step before push.
 - Project memory `feedback-test-ui-before-push.md` (Claude Code) — sibling principle for SwiftUI visual changes: `BUILD SUCCEEDED` ≠ layout correct; the same shape extends here to `subagent reported tests passed` ≠ full suite passed.
