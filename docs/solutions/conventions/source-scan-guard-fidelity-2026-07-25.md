@@ -1,7 +1,7 @@
 ---
 title: A source-scan guard that only asserts absence stays green while the feature is dead
 date: 2026-07-25
-last_updated: 2026-07-26
+last_updated: 2026-08-09
 category: conventions
 module: cross-cutting
 problem_type: convention
@@ -14,8 +14,8 @@ applies_when:
   - A convention-only rule keeps regressing and someone proposes a mechanical check
   - "Writing a guard whose subject is an installed hook, a swapped function pointer, a redaction rule, or the order of two steps"
   - "A test fixture is chosen for convenience rather than for the real shape of the thing being matched"
-tags: [testing, source-scan, convention-tests, guard-fidelity, launch-ordering, false-negative, hook-installation]
-related_components: [NoTypeApp, UI, Permissions, Diagnostics]
+tags: [testing, source-scan, convention-tests, guard-fidelity, launch-ordering, false-negative, hook-installation, exhaustive-switch]
+related_components: [NoTypeApp, UI, Permissions, Diagnostics, Recording]
 ---
 
 # A source-scan guard that only asserts absence stays green while the feature is dead
@@ -75,6 +75,37 @@ A source scan is the *clearest* instance because its subject is literally text, 
 
 The through-line is the same as the absence-only trap above: each guard's green state was **compatible with the defect**, so its passing carried no information. Ask of any guard, not just a source scan: *what is the worst outcome in this area, and would this test be green under it?*
 
+### A third shape: the guard measures an axis the compiler already owns
+
+The two shapes above are green *while the defect is reachable*. This one is green for a different reason — the guard is real, but it duplicates a stronger mechanism, and the axis where the policy actually lives is unguarded. The tell is a drift guard between two **exhaustive switches over the same enum**.
+
+`RecordingSession` grew a second classifier in U1 of the retry work: `shouldRetain(_:)` (`NoType/Recording/RecordingSession.swift:237`) decides whether a failed chunk's audio is kept for a retry, sitting immediately below `isTerminal(_:)` (`:190`), which decides whether the same error aborts the session. Adjacency is deliberate — a new error case should be added to both — and the unit shipped `test_everyTerminalCase_declinesRetention` to pin that they cannot diverge.
+
+Two things were wrong with it as a guard:
+
+1. **The case axis belongs to the compiler.** Both functions switch over `GeminiClient.GeminiError` (six cases, `NoType/Gemini/GeminiClient.swift:34`) with **no `default`**. A seventh case does not compile in either function — the type system, not the test, is what forces a maintainer to visit both. Worse, on that axis the test is *weaker* than the compiler it duplicates: it iterates a hand-maintained `fixtures` list, so a classification disagreement on a new case is caught only if someone also remembers to append a fixture. The compiler needs no such cooperation.
+2. **The real policy lives in the associated value, which had zero coverage.** Neither function's interesting behaviour is "which case is this" — it is the `Int` inside `.http`. `isTerminal` returns `status == 401 || status == 403`; `shouldRetain` returns `status != 401 && status != 403`. That carve-out is the entire policy, it is duplicated by hand in two places, and no fixture list or `CaseIterable` conformance can enumerate an `Int`.
+
+The fix sweeps the value space instead of the case space, asserting the complement property directly (`NoTypeTests/RetainedRecordingTests.swift:195`):
+
+```swift
+func test_noHTTPStatusIsBothTerminalAndRetained() {
+    for status in 0...599 {
+        let error = GeminiClient.GeminiError.http(status: status, body: "")
+        if RecordingSession.isTerminal(error) {
+            XCTAssertFalse(RecordingSession.shouldRetain(error),
+                           "HTTP \(status) is terminal, so it must retain nothing")
+        }
+    }
+}
+```
+
+Proved red per the section below: adding `|| status == 402` to `isTerminal` fails the sweep on 402 while **every other test in the file — including the no-drift test — stays green**. That divergence would retain audio for a session that aborted, writing a history row with a live retry button for a failure a retry can never fix.
+
+Generalised: **when a guard's subject is two exhaustive switches over the same enum, the compiler already owns the case axis, so the guard earns its keep only on the associated-value axis.** A drift test that iterates enum cases is measuring the compiler. Before writing any consistency guard, name the axis it covers and ask what *else* already covers that axis — then check whether the axis carrying the actual policy is covered by anything at all. The same question applies wherever a stronger mechanism is already in play: an exhaustive switch, a non-optional type, a `let` binding, a database constraint.
+
+This does not mean deleting the enum-axis test. It means not counting it as the coverage — keep it if it documents intent (it names the invariant in prose for the next reader), but write the comment that says what it does *not* close, so the next maintainer does not read its green as "these two agree."
+
 ### Prove the guard red
 
 None of the above is discoverable by reading the test. The only reliable check is to **break the thing on purpose and watch the test fail** — revert the fix, delete the wiring line, add the needle you think is covered — then restore. Both new assertions in this arc were verified red that way before being trusted. A guard never observed failing is a guard whose fidelity is unmeasured.
@@ -100,6 +131,7 @@ The concrete cost here: the shipped artifact would have been a menu-bar app that
 - **Any refactor that relocates work** — init → launch hook, view → controller, sync → async, one module to another. Ask: *if the destination were deleted, which test goes red?* If the answer is none, the guard is absence-only.
 - **Reviewing a diff that adds "and a test pins this."** Check what the test would do if the feature were entirely removed rather than merely misplaced.
 - **Writing a guard for an installed hook, a swapped pointer, a redaction rule, or an ordering between two steps.** Apply the hook-guard section: name the worst outcome in that area, then check whether the assertion would be green under it.
+- **Adding a sibling classifier, or any consistency guard between two functions over the same type.** Name the axis the guard covers, ask what else already covers it (an exhaustive switch, a non-optional type, a constraint), and check whether the axis carrying the real policy — usually an associated value or a numeric range — is covered by anything at all.
 - **Narrower than it looks — but not only source text.** A behavioural test that constructs the object and asserts on its output does fail loudly when the subject *disappears*; that much still holds. What it does not catch is a subject that is present and wrong in a way the assertion cannot tell from correct — a comparison that degenerates to `nil == nil`, a fixture matched by a broader rule than the one named, two correct steps composed backwards. Source scans are the worst case of this class, not the whole of it.
 
 ## Examples
@@ -142,6 +174,8 @@ func startPollingIfNeeded()  { Task { … } }   // two hops down
 - [`documentation-gaps/positive-spelling-ax-fixture-2026-05-18.md`](../documentation-gaps/positive-spelling-ax-fixture-2026-05-18.md) — the same absence-only trap in the prompt-eval domain, still open. The clearest prior statement of this failure class in the repo.
 - [`conventions/verify-subagent-test-reports-2026-05-18.md`](./verify-subagent-test-reports-2026-05-18.md) — sibling principle at a different boundary: a green signal that reports something narrower than what you concluded from it.
 - [`conventions/testing-spm-and-git-2026-05-15.md`](./testing-spm-and-git-2026-05-15.md) — the base testing convention this refines; its tautological-fixture bullet is the fixture-level instance of the same class.
+- [`architecture-patterns/partial-recovery-with-markers-2026-05-16.md`](../architecture-patterns/partial-recovery-with-markers-2026-05-16.md) — the recoverable/terminal split that `isTerminal(_:)` encodes, and which `shouldRetain(_:)` now mirrors; the source of the 401/403 carve-out the status sweep guards.
+- Commits `a77cf9d` (adds `shouldRetain` beside `isTerminal`) and `97e4a21` (review remediation: the `0...599` status sweep, proved red) — where the compiler-owns-the-case-axis section came from. Unit U1 of `docs/plans/2026-08-09-001-feat-failed-recording-retry-plan.md`. Both SHAs are branch-local to `feat/failed-recording-retry` at time of writing and will be rewritten if that branch squash-merges; the plan path is the stable reference.
 - [`runtime-errors/onhover-mainactor-inheritance-crash-2026-05-19.md`](../runtime-errors/onhover-mainactor-inheritance-crash-2026-05-19.md) — where `DSComponentsHoverTests` came from; its Prevention section presents the scan as an unqualified win, which this entry qualifies.
 - `NoTypeTests/LaunchOrderingTests.swift`, `NoTypeTests/DSComponentsHoverTests.swift` — the two general source-scan guards in the project. `NoTypeTests/ExceptionBreadcrumbTests.swift` carries a third, file-scoped one (`test_breadcrumbSource_schedulesNoMainActorWork_andDoesNotTouchNSApp`) added because `LaunchOrderingTests`' discovery walks constructions (`TypeName(`) and so cannot see a type reached only through a static `install()` call — an instance of checklist item 1 at the discovery layer rather than the needle layer.
 - `NoType/UI/CLAUDE.md` "Launch ordering" — the rule these guards pin.

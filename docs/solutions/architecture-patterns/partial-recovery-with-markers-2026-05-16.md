@@ -126,4 +126,5 @@ A neutral `"Pasted with gaps"` HUD says "N of M chunks didn't transcribe — `[�
 - PR #38 — adaptive pause threshold + 180 s force-cut.
 - PR #39 — partial recovery (this entry).
 - `NoType/Recording/CLAUDE.md` — invariant 12 ("Partial recovery") and the per-class classifier matrix.
+- `RecordingSession.shouldRetain(_:)` — sibling classifier governed by this same recoverable/terminal split (it retains exactly the gap-marker class, including the 401/403 carve-out). **A new `GeminiError` case belongs in both.** Guard fidelity for the pair: [`conventions/source-scan-guard-fidelity-2026-07-25.md`](../conventions/source-scan-guard-fidelity-2026-07-25.md).
 - `NoType/Gemini/CLAUDE.md` — retry-policy subsection (flipped from "don't paste partial" to point at this layer).
