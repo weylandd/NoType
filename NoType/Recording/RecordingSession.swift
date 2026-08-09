@@ -183,6 +183,10 @@ final class RecordingSession {
     /// initiated. Everything else (HTTP 4xx/5xx/network/decoding/
     /// empty/truncated) is treated as a transient gap — paste what we
     /// have, mark the gap, let the user decide whether to re-dictate.
+    ///
+    /// Sibling classifier: `shouldRetain(_:)` immediately below decides
+    /// whether the same error keeps the chunk's audio for a retry. A new
+    /// error case belongs in both.
     nonisolated static func isTerminal(_ error: Error) -> Bool {
         if error is CancellationError { return true }
         if let gerr = error as? GeminiClient.GeminiError {
@@ -205,6 +209,49 @@ final class RecordingSession {
             }
         }
         return true
+    }
+
+    /// Decide whether a failed chunk's encoded audio is worth keeping in
+    /// memory so the user can re-send it from its history row.
+    ///
+    /// Sibling classifier: `isTerminal(_:)` immediately above decides
+    /// whether the same error aborts the session. **A new error case
+    /// belongs in both** — that adjacency is the entire reason this
+    /// function lives here rather than beside the retry code (plan
+    /// KTD8). The two are complementary today, but deliberately written
+    /// as separate switches: retention may narrow (a failure class we
+    /// keep recovering from but never successfully retry) without
+    /// changing which errors abort a session, and vice versa.
+    /// `RetainedRecordingTests` pins the one direction that must always
+    /// hold — every terminal error retains nothing.
+    ///
+    /// The governing rule (plan R4) is "retain exactly the class that
+    /// today produces a `[…]` gap marker": network failure (status 0),
+    /// 429, 5xx, and any other non-auth HTTP status, plus empty,
+    /// decoding and truncated responses. Retention deliberately does
+    /// **not** extend to terminal failures — a rejected key, a content
+    /// block, a cancellation or an encode failure keeps nothing and
+    /// aborts the session exactly as before. A retry could not fix any
+    /// of them, and holding audio the user can never recover is a
+    /// privacy cost with no payoff.
+    nonisolated static func shouldRetain(_ error: Error) -> Bool {
+        if error is CancellationError { return false }
+        guard let gerr = error as? GeminiClient.GeminiError else {
+            // Encoder / AVFAudio / anything unrecognised: terminal, and
+            // in the encode case the audio never made it to a blob.
+            return false
+        }
+        switch gerr {
+        case .missingKey, .blocked:
+            return false
+        case .http(let status, _):
+            // Same auth carve-out as `isTerminal`: 401 (bad key) and
+            // 403 (key not authorised for this model) abort the
+            // session, so there is nothing to retry against.
+            return status != 401 && status != 403
+        case .empty, .decoding, .truncated:
+            return true
+        }
     }
 
     private let recorder: AudioRecorder
