@@ -36,9 +36,25 @@ import Network
 /// So `lastObserved` is written **only** from `pathUpdateHandler`, and a
 /// query that finds it `nil` waits up to ``firstPathWaitCap`` for the first
 /// real delivery before answering. That first delivery arrives in ~1 ms in
-/// practice (it is a local kernel query, not a network round-trip), the
-/// wait is paid at most once per process, and if it is ever exceeded the
-/// answer is `false` — "assume online and let the real request decide".
+/// practice (it is a local kernel query, not a network round-trip), and if
+/// the cap is ever exceeded the answer is `false` — "assume online and let
+/// the real request decide". The wait is paid by any query that still finds
+/// `lastObserved == nil`; in practice that is the first Gemini request of
+/// the process and nothing after it, but a monitor that never delivers
+/// would make each request pay it again rather than latching a verdict.
+///
+/// **Deliveries are consumed in order, and that is load-bearing too.** The
+/// handler `yield`s into an `AsyncStream` drained by one consumer task
+/// instead of spawning an unstructured `Task` per update. Unstructured
+/// tasks carry no ordering guarantee relative to one another, so a burst of
+/// path updates — waking from sleep, a VPN coming up, Wi-Fi roaming between
+/// access points — could deliver `.unsatisfied` then `.satisfied` and land
+/// them at the actor in the opposite order. That would latch a false
+/// "offline" verdict which, because nothing re-reads the path afterwards,
+/// would persist until the *next* path change and short-circuit every
+/// Gemini request in between. `.bufferingNewest(1)` also means a slow
+/// consumer collapses a burst onto its final state rather than replaying
+/// stale ones.
 ///
 /// Nothing here is constructed or started at launch. `GeminiClient` builds
 /// this on its first request, which is long after `NSApplicationMain` — see
@@ -102,9 +118,23 @@ actor NetworkReachability {
     /// called exactly once and the monitor outlives the call that made it.
     private var monitor: NWPathMonitor?
 
+    /// The single task draining `pathUpdateHandler`'s deliveries into
+    /// ``record(_:)``. One consumer is what makes the writes ordered — see
+    /// the delivery-order note in the type doc-comment.
+    private var consumer: Task<Void, Never>?
+
     /// Last status delivered by `pathUpdateHandler`. **Never** seeded from
     /// `NWPathMonitor.currentPath` — see the first-delivery note above.
     private var lastObserved: PathStatus?
+
+    deinit {
+        // Hygiene rather than necessity: `GeminiClient` builds exactly one
+        // of these and holds it for the process's life. It matters for the
+        // throwaway instances tests construct, which would otherwise leave
+        // a live monitor and a spinning consumer behind per test.
+        consumer?.cancel()
+        monitor?.cancel()
+    }
 
     /// `true` only when the system has told us there is no usable network
     /// path. Every ambiguous case answers `false`.
@@ -116,18 +146,30 @@ actor NetworkReachability {
 
     private func startIfNeeded() {
         guard monitor == nil else { return }
+        let (stream, continuation) = AsyncStream<PathStatus>.makeStream(
+            bufferingPolicy: .bufferingNewest(1)
+        )
         let m = NWPathMonitor()
-        m.pathUpdateHandler = { [weak self] path in
-            // Map inside the handler so only a `Sendable` value crosses
-            // into the actor — `NWPath` itself never leaves this closure.
-            let status = PathStatus(path.status)
-            Task { await self?.record(status) }
+        m.pathUpdateHandler = { path in
+            // Map inside the handler so only a `Sendable` value crosses out
+            // of it — `NWPath` itself never leaves this closure. `yield` is
+            // synchronous and the handler runs on a serial queue, so the
+            // stream observes deliveries in the order the system made them.
+            continuation.yield(PathStatus(path.status))
         }
         m.start(queue: Self.deliveryQueue)
         monitor = m
+        consumer = Task { [weak self] in
+            for await status in stream {
+                await self?.record(status)
+            }
+        }
     }
 
-    private func record(_ status: PathStatus) {
+    /// Internal, not private, so `NetworkReachabilityTests` can drive the
+    /// write path directly. Nothing outside this file calls it in
+    /// production — the consumer task above is its only caller.
+    func record(_ status: PathStatus) {
         lastObserved = status
     }
 

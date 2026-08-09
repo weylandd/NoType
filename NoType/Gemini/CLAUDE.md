@@ -73,6 +73,14 @@ Three things about it are load-bearing:
   synchronously right after `start(queue:)` returns `.unsatisfied` on a
   fully-online machine, so the verdict is driven only by
   `pathUpdateHandler`. See `NetworkReachability`'s doc-comment.
+- **Deliveries are consumed in order.** The handler `yield`s into an
+  `AsyncStream` drained by one consumer task, not one unstructured `Task`
+  per update — those carry no ordering guarantee relative to each other,
+  and a burst (sleep/wake, VPN bring-up, Wi-Fi roaming) that landed
+  `.unsatisfied` after a newer `.satisfied` would latch a false offline
+  verdict. Nothing re-reads the path afterwards, so that verdict would
+  persist until the *next* path change and short-circuit every request in
+  between — the one false-offline shape that does not self-heal.
 - **The throw sits outside the retry loop.** That is *how* a short-circuit
   avoids being re-issued, without teaching `retryDecision` to distinguish
   bodies — which would have cost a genuine status-0 *timeout* its retry.
@@ -114,6 +122,8 @@ Each attempt logs `attempt=N`. These retries are the HTTP-level safety net insid
 - `NoTypeTests/GeminiRequestBuilderTests.swift` — pins the cache-friendly part ordering and the system-prompt anti-completion clause. Touching this test means the prompt contract changed → explicit reviewer review.
 - `NoTypeTests/PromptEvalTests.swift` + `NoTypeTests/PromptEvalHarness.swift` — live-API behavioural eval. Drives 9 audio fixtures through the prompts and asserts on substring / word-count / wordCountCeiling. Gated by Keychain entry `app.notype.tests.gemini` (or `NOTYPE_GEMINI_KEY` env). Skips cleanly when neither is set.
 - `NoTypeTests/AppCategorizerTests.swift` — pins the classifier JSON parser.
+- `NoTypeTests/NetworkReachabilityTests.swift` — pins the offline verdict's conservatism (only `.unsatisfied`; `nil` / `.requiresConnection` / an unrecognised future case all answer "not offline"), the `NWPath.Status` mapping, the first-delivery wait cap, and last-writer-wins on `record`. `test_liveProbe_onAnOnlineMachine_doesNotReportOffline` starts a **real** `NWPathMonitor` and asserts a value rather than skipping — deliberate, but it means the suite fails on a genuinely offline machine. Don't run the suite with Wi-Fi off during an offline smoke test and read that failure as a regression.
+- `NoTypeTests/GeminiClientOfflineShortCircuitTests.swift` — pins the short-circuit error's *shape* (same `.http(0, "URLError code=…")` both producers build, still recoverable and retainable downstream), the log-only status-0 description arm, and the *position* of the check via a source guard: present in `sendRequest`, absent from `performOnce`, and gating an actual `throw` ahead of the retry loop.
 
 ## Pointers
 

@@ -83,6 +83,51 @@ final class NetworkReachabilityTests: XCTestCase {
         XCTAssertLessThanOrEqual(NetworkReachability.firstPathWaitCap, .milliseconds(500))
     }
 
+    // MARK: - Delivery ordering
+
+    /// The verdict is last-writer-wins over a field only the delivery
+    /// consumer writes, so the order those writes land in *is* the verdict.
+    ///
+    /// This is the false-offline failure that does not heal: nothing
+    /// re-reads the path after the first delivery, so an `.unsatisfied`
+    /// that lands after a newer `.satisfied` short-circuits every Gemini
+    /// request until the *next* path change — which on a stable connection
+    /// may be hours. A burst of updates (waking from sleep, VPN bring-up,
+    /// Wi-Fi roaming) is exactly when two deliveries arrive close enough
+    /// together for the hop to reorder, which is why the handler feeds a
+    /// single-consumer `AsyncStream` rather than spawning one unstructured
+    /// `Task` per update — unstructured tasks have no ordering guarantee
+    /// relative to each other.
+    ///
+    /// **Scope, stated so a green run is not over-trusted:** these two
+    /// cases pin the *semantics* `record` must have — the newest delivery
+    /// decides, in both directions — which is what makes ordering the only
+    /// remaining variable. They do **not** prove the ordering itself: they
+    /// drive `record` sequentially from the test, so they pass under the
+    /// unstructured-`Task` shape too. The ordering guarantee is structural
+    /// (one consumer draining one stream) and is not observable from
+    /// outside this actor without injecting the delivery source.
+    func test_recordsAreLastWriterWins_soTheNewestDeliveryDecides() async {
+        let probe = NetworkReachability()
+        await probe.record(.unsatisfied)
+        await probe.record(.satisfied)
+        let offline = await probe.isDefinitelyOffline()
+        XCTAssertFalse(
+            offline,
+            "A newer `.satisfied` delivery must win. If an older `.unsatisfied` can land last, an online machine is locked out of transcription until the next path change."
+        )
+    }
+
+    /// The complement, so the assertion above is not passing merely because
+    /// the verdict is stuck on `false`.
+    func test_recordsAreLastWriterWins_inTheOfflineDirectionToo() async {
+        let probe = NetworkReachability()
+        await probe.record(.satisfied)
+        await probe.record(.unsatisfied)
+        let offline = await probe.isDefinitelyOffline()
+        XCTAssertTrue(offline, "The newest delivery decides in both directions.")
+    }
+
     /// End-to-end against a live monitor. This machine has a network path
     /// while the suite runs, so the assertion is the safe direction: a real
     /// monitor on a real online machine must not report offline. If this

@@ -198,6 +198,25 @@ final class GeminiClientOfflineShortCircuitTests: XCTestCase {
             performOnce.contains("isDefinitelyOffline"),
             "The offline check must not live in performOnce — that body runs once per retry attempt."
         )
+
+        // Presence complement for the *result*, not just the call. Position
+        // and uniqueness both stay satisfied by `_ = await
+        // reachabilityProbe().isDefinitelyOffline()` — a probe that runs,
+        // is correctly placed, and throws nothing, silently restoring the
+        // 30 s-per-attempt wait this feature removes. Verified: that
+        // mutation passed every other assertion in this file.
+        let throwIdx = try XCTUnwrap(
+            sendRequest.range(of: "throw offline"),
+            "sendRequest calls the reachability probe but never throws on its verdict — the pre-check is a no-op and the offline wait is back."
+        ).lowerBound
+        XCTAssertGreaterThan(
+            throwIdx, probeIdx,
+            "The offline throw must follow the probe it is gated on."
+        )
+        XCTAssertLessThan(
+            throwIdx, loopIdx,
+            "The offline throw must still sit ahead of the retry loop."
+        )
     }
 
     // MARK: - Fixtures pinning the guard above

@@ -2624,7 +2624,13 @@ enum NoTypeErrorKind {
 /// two would silently re-break the offline / timeout HUD routing.
 enum NetworkErrorTranslator {
     static func extractURLErrorCode(from body: String) -> Int? {
-        let prefix = "URLError code="
+        // The producer's own constant, not a second copy of the literal.
+        // `GeminiError.urlErrorBodyPrefix`'s doc-comment claims it is
+        // "declared once so the producer and the two consumers cannot
+        // drift" — that claim was untrue while this function spelled the
+        // prefix itself, and two matching literals is exactly the drift
+        // the constant exists to prevent.
+        let prefix = GeminiClient.GeminiError.urlErrorBodyPrefix
         guard body.hasPrefix(prefix) else { return nil }
         let rest = body.dropFirst(prefix.count)
         guard let colon = rest.firstIndex(of: ":") else {

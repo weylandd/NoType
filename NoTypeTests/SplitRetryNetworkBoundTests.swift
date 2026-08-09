@@ -72,20 +72,42 @@ final class SplitRetryNetworkBoundTests: XCTestCase {
     /// run had already proved were reachable; without the chunk term a
     /// network-failed batch whose first chunk then failed on a 5xx would
     /// abandon on the wrong evidence.
-    func test_shouldAbandon_requiresAllThreeTerms() {
-        func decide(_ batch: Bool, _ offset: Int, _ chunk: Bool) -> Bool {
+    func test_shouldAbandon_requiresAllFourTerms() {
+        let slow = RecordingSession.abandonMinChunkFailureLatency
+        func decide(_ batch: Bool, _ offset: Int, _ chunk: Bool, _ latency: Duration = .seconds(30)) -> Bool {
             RecordingSession.shouldAbandonSplitRetry(
                 batchFailureWasNetwork: batch,
                 chunkOffset: offset,
-                chunkFailureWasNetwork: chunk
+                chunkFailureWasNetwork: chunk,
+                chunkFailureLatency: latency
             )
         }
-        XCTAssertTrue(decide(true, 0, true), "Batch and first chunk both network — the only abandoning case.")
+        XCTAssertTrue(decide(true, 0, true), "Batch and first chunk both network, and the chunk cost a real timeout — the only abandoning case.")
         XCTAssertFalse(decide(false, 0, true), "Batch failed for another reason; the network evidence is one sample.")
         XCTAssertFalse(decide(true, 0, false), "First chunk failed for another reason.")
         XCTAssertFalse(decide(true, 1, true), "Only the first split chunk's verdict abandons the run.")
         XCTAssertFalse(decide(true, 2, true))
         XCTAssertFalse(decide(false, 1, false))
+
+        // The latency term. A reachability short-circuit answers in ~0 ms,
+        // so two of them is one cached path status read twice — not two
+        // observations. Abandoning on that turns a two-second Wi-Fi blip
+        // into permanent `[…]` in the pasted text, and saves nothing,
+        // because the remaining chunks would short-circuit in ~0 ms too.
+        XCTAssertFalse(
+            decide(true, 0, true, .zero),
+            "Two instant pre-check short-circuits are one observation, not two — abandoning there is both pointless and destructive."
+        )
+        XCTAssertFalse(decide(true, 0, true, .milliseconds(1)))
+        XCTAssertTrue(decide(true, 0, true, slow), "The threshold itself must abandon — the comparison is >=, not >.")
+    }
+
+    /// The threshold has to separate the two shapes it exists to tell
+    /// apart, or the term is decoration: a pre-check short-circuit is
+    /// sub-millisecond, a real `URLSession` timeout is 30 s.
+    func test_abandonLatencyThreshold_sitsBetweenAShortCircuitAndATimeout() {
+        XCTAssertGreaterThan(RecordingSession.abandonMinChunkFailureLatency, .milliseconds(100))
+        XCTAssertLessThan(RecordingSession.abandonMinChunkFailureLatency, .seconds(30))
     }
 
     // MARK: - Accounting for chunks that are never dispatched
@@ -262,6 +284,119 @@ final class SplitRetryNetworkBoundTests: XCTestCase {
         let counts = RecordingSession.chunkCounts(in: responses)
         XCTAssertEqual(counts.failed, 1)
         XCTAssertEqual(counts.dispatched, 3)
+    }
+
+    // MARK: - The call site (what the seams above do NOT prove)
+
+    /// Everything above pins the pure seams and then **hand-composes** them
+    /// the way `splitRetry` is supposed to. That leaves the composition
+    /// itself — the three lines inside `splitRetry` that actually call
+    /// them — unproven, and the gap is not theoretical: deleting
+    /// `retainable.formUnion(acct.retainable)` from the abandon arm, which
+    /// is precisely the permanent-audio-loss bug this whole file exists to
+    /// prevent, left every other test in this class green. So did gutting
+    /// the arm entirely.
+    ///
+    /// `RecordingSession` owns an `AudioRecorder`, a `SileroVAD`, a
+    /// `GeminiClient` and a `HistoryStore` and cannot be driven end to end,
+    /// so this is a source guard in the shape `RaiseSiteScanner`
+    /// (`HUDPanelGeometryTests.swift`) established, and it inherits that
+    /// shape's documented limits: it matches literal spellings in one file
+    /// and proves the statements are *present*, not that they are reached.
+    /// A rename makes it fail loudly, which is a review trigger rather than
+    /// a false negative. It is strictly better than the nothing that was
+    /// there before, and the mutations above are what calibrated it.
+    func test_splitRetryAbandonArm_stillMarksAndRetainsEveryUndispatchedChunk() throws {
+        let body = try XCTUnwrap(
+            Self.body(ofFuncNamed: "splitRetry", in: Self.recordingSessionSource()),
+            "Could not parse splitRetry — the guard lost its anchor."
+        )
+
+        // Presence complement: the arm exists at all. Without this the two
+        // assertions below are vacuously true on a file that deleted it.
+        XCTAssertTrue(
+            body.contains("shouldAbandonSplitRetry("),
+            "splitRetry no longer consults the abandon predicate — the bound is gone."
+        )
+        let acct = try XCTUnwrap(
+            body.range(of: "abandonedAccounting("),
+            "splitRetry no longer derives the abandoned accounting, so nothing can mark or retain the undispatched chunks."
+        )
+
+        // The retention half. Dropping this line is silent permanent loss
+        // of the user's audio — verified green across every other test in
+        // this class before this guard existed.
+        XCTAssertTrue(
+            body.contains("retainable.formUnion(acct.retainable)"),
+            "splitRetry must fold the abandoned chunks' retention set into the set it returns, or their audio never reaches SessionSummary.retained and the user's recording is gone."
+        )
+
+        // The marker half. Without it the undispatched chunks produce no
+        // `[…]`, do not count toward failedChunkCount, and the user is
+        // never told anything was dropped.
+        XCTAssertTrue(
+            body.contains("recordRecoverableFailure(error: error, indices: [idx])"),
+            "splitRetry must record one recoverable failure per abandoned chunk index, or the gaps are silent."
+        )
+
+        // Ordering: both effects must follow the accounting that produced
+        // them, so a refactor cannot leave them reading a stale value.
+        let fold = try XCTUnwrap(body.range(of: "retainable.formUnion(acct.retainable)"))
+        XCTAssertLessThan(acct.lowerBound, fold.lowerBound)
+    }
+
+    /// Fixture proving the extractor above starts and stops at the right
+    /// braces — without it, a guard that silently matched the whole file
+    /// would pass on a `splitRetry` that had lost the arm entirely.
+    func test_bodyExtractor_isScopedToTheNamedFunction() throws {
+        let source = """
+        private func other() {
+            retainable.formUnion(acct.retainable)
+        }
+
+        private func splitRetry(
+            encoded: [EncodedChunk]
+        ) async -> Set<Int> {
+            let marker = 1
+        }
+        """
+        let body = try XCTUnwrap(Self.body(ofFuncNamed: "splitRetry", in: source))
+        XCTAssertTrue(body.contains("let marker = 1"))
+        XCTAssertFalse(
+            body.contains("formUnion"),
+            "The extractor ran past its function — the assertions above would be satisfiable by a neighbouring function."
+        )
+    }
+
+    /// Brace-balanced slice of a named function's body. Same shape and same
+    /// caveats as the extractor in `GeminiClientOfflineShortCircuitTests`
+    /// (naive about braces inside string literals; adequate for the one
+    /// Swift file it reads).
+    private static func body(ofFuncNamed name: String, in source: String) -> String? {
+        guard let decl = source.range(of: "func \(name)(") else { return nil }
+        guard let open = source.range(of: "{", range: decl.upperBound..<source.endIndex) else { return nil }
+        var depth = 0
+        var idx = open.lowerBound
+        while idx < source.endIndex {
+            let ch = source[idx]
+            if ch == "{" { depth += 1 }
+            if ch == "}" {
+                depth -= 1
+                if depth == 0 {
+                    return String(source[source.index(after: open.lowerBound)...idx])
+                }
+            }
+            idx = source.index(after: idx)
+        }
+        return nil
+    }
+
+    private static func recordingSessionSource() -> String {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()    // NoTypeTests/
+            .deletingLastPathComponent()    // repo root
+            .appendingPathComponent("NoType/Recording/RecordingSession.swift")
+        return (try? String(contentsOf: url, encoding: .utf8)) ?? ""
     }
 
     // MARK: - Fixtures

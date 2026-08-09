@@ -45,7 +45,11 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
   dropped VPN), where the check above deliberately doesn't step in. The
   parts it skips are still kept and still retryable: they show as gaps in
   the row and their audio is held exactly as if it had been sent and
-  failed, so one tap re-sends all of them once you're back online.
+  failed, so one tap re-sends all of them once you're back online. It only
+  stops early when those failures actually cost time — a brief Wi-Fi drop
+  that the connection check answers instantly no longer causes the rest of
+  a dictation to be skipped, because skipping it would save nothing and the
+  gaps it leaves in text already pasted can't be repaired by a retry.
 
 ### Internal
 - **Found the actual cause of the macOS 26 crash** ([#82](https://github.com/weylandd/NoType/issues/82)), and corrected the documentation that named the wrong one. NoType raises an internal Objective-C error inside a background job; macOS absorbs it and keeps running, but the concurrency runtime is left corrupted and the app falls over shortly afterwards at an unrelated click. The three previous incidents — a timeline view, a hover handler, a button — were all innocent bystanders, which is why fixing each of them only moved the crash. The mechanism was reproduced locally rather than inferred.

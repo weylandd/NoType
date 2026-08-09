@@ -331,14 +331,46 @@ final class RecordingSession {
     /// the offset term abandons chunks after a mid-run failure the run had
     /// already proved were reachable; dropping the chunk term abandons on
     /// the batch's evidence alone, when the split call is exactly the
-    /// second opinion worth having.
+    /// second opinion worth having; dropping the latency term abandons on
+    /// two instant pre-check short-circuits, which is one observation read
+    /// twice rather than two — see ``abandonMinChunkFailureLatency``.
     nonisolated static func shouldAbandonSplitRetry(
         batchFailureWasNetwork: Bool,
         chunkOffset: Int,
-        chunkFailureWasNetwork: Bool
+        chunkFailureWasNetwork: Bool,
+        chunkFailureLatency: Duration
     ) -> Bool {
-        batchFailureWasNetwork && chunkOffset == 0 && chunkFailureWasNetwork
+        batchFailureWasNetwork
+            && chunkOffset == 0
+            && chunkFailureWasNetwork
+            && chunkFailureLatency >= abandonMinChunkFailureLatency
     }
+
+    /// Minimum wall-clock cost of the first split chunk's failure before
+    /// abandoning the rest of the run is worth doing.
+    ///
+    /// **This term exists because the reachability pre-check took the cost
+    /// out of the case the bound was measuring.** The bound was designed
+    /// when a network-class failure meant a 30 s `URLSession` timeout, so
+    /// two of them was ~60 s of evidence that the transport was down and
+    /// every remaining chunk was another 30 s. `GeminiClient`'s pre-flight
+    /// check now fails an `.unsatisfied`-path request in ~0 ms — so on a
+    /// genuinely offline machine the batched call and the first split chunk
+    /// both fail *instantly*, and "two independent observations" collapses
+    /// into one cached path status read twice, microseconds apart.
+    ///
+    /// That is the case where abandoning is simultaneously pointless and
+    /// harmful: dispatching the remaining chunks costs ~0 ms each (they
+    /// short-circuit too), while abandoning turns a Wi-Fi blip that ends
+    /// two seconds later into `[…]` in the pasted text for every chunk
+    /// after the first — permanently, because a retry rewrites the history
+    /// row and never the text already pasted into the user's document.
+    ///
+    /// 2 s sits far above a short-circuit (~0 ms) and far below the 30 s
+    /// timeout the bound is actually for, so the predicate fires on exactly
+    /// the case that motivated it: a `.satisfied` path whose requests still
+    /// time out — captive portal, dead router, DNS blackhole.
+    nonisolated static let abandonMinChunkFailureLatency: Duration = .seconds(2)
 
     /// What an abandoned split-retry owes the chunks it will never
     /// dispatch.
@@ -350,7 +382,7 @@ final class RecordingSession {
     /// drop its audio on the floor — converting a bounded wait into
     /// permanent data loss, the exact inverse of what the retry feature is
     /// for.
-    struct AbandonedAccounting: Sendable, Equatable {
+    struct AbandonedAccounting: Sendable {
         /// One entry per undispatched chunk, at its original chunk index.
         /// Each becomes a `text: nil` response, so it counts toward
         /// `SessionSummary.failedChunkCount` and renders a `failureMarker`
@@ -1552,6 +1584,10 @@ final class RecordingSession {
             // Re-query priors each iteration so a chunk that just
             // succeeded becomes context for the next one.
             let priors = currentPriors()
+            // Timed so the abandon arm can tell a 30 s timeout from a
+            // ~0 ms reachability short-circuit — see
+            // `abandonMinChunkFailureLatency`.
+            let dispatchedAt = ContinuousClock.now
             do {
                 let result = try await gemini.transcribeWithUsage(
                     audio: chunk.audio,
@@ -1588,24 +1624,32 @@ final class RecordingSession {
                 recordRecoverableFailure(error: error, indices: [chunk.idx])
                 if Self.shouldRetain(error) { retainable.insert(chunk.idx) }
 
-                // Transport is down and we now have two independent
-                // observations of it — the batched call and this
-                // standalone one. Every remaining chunk is a guaranteed
-                // 30 s round-trip ending in the same error, 250 ms apart,
-                // so account for them here instead of spending minutes
-                // proving it. Each still gets its marker AND its audio
-                // retained, which is what keeps an undispatched chunk
-                // indistinguishable from this one — see
+                // Transport is down, we have two independent observations
+                // of it — the batched call and this standalone one — and
+                // this one cost real time rather than being answered from
+                // the reachability cache. Every remaining chunk is a
+                // guaranteed 30 s round-trip ending in the same error,
+                // 250 ms apart, so account for them here instead of
+                // spending minutes proving it. Each still gets its marker
+                // AND its audio retained, which is what keeps an
+                // undispatched chunk indistinguishable from this one — see
                 // `abandonedAccounting`.
                 if Self.shouldAbandonSplitRetry(
                     batchFailureWasNetwork: batchFailureWasNetwork,
                     chunkOffset: offset,
-                    chunkFailureWasNetwork: Self.isNetworkClass(error)
+                    chunkFailureWasNetwork: Self.isNetworkClass(error),
+                    chunkFailureLatency: ContinuousClock.now - dispatchedAt
                 ) {
                     let acct = Self.abandonedAccounting(
                         undispatched: encoded.dropFirst(offset + 1).map(\.retainable),
                         error: error
                     )
+                    // Unreachable by construction — `processBatch` only
+                    // splits an `encoded.count > 1` batch and this arm only
+                    // fires at offset 0, so `dropFirst(1)` always leaves at
+                    // least one chunk. Kept as insurance against a second
+                    // call site: without it an empty set would still log
+                    // "0 chunk(s) marked", which reads like a bug report.
                     guard !acct.markerChunkIndices.isEmpty else { return retainable }
                     Self.log.warning("split-retry abandoned after chunk_\(chunk.idx): no network — \(acct.markerChunkIndices.count) chunk(s) marked without dispatch, audio retained")
                     for idx in acct.markerChunkIndices {
