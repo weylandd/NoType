@@ -104,6 +104,8 @@ let stitched = TextInjector.stitchChunks(pieces)
 
 `stitchChunks` inserts a single space between `,` and `[`, and between `]` and a word-starter, so a marker in the middle reads naturally: `"Hello, […] world"`.
 
+**A stitched marker is not durable, and later work depends on that.** Between `stop()` and storage, the transcript passes through `TextReplacementEngine.apply` (the Dictionary module's user-defined pairs). Its boundaries are Unicode look-arounds over `[\p{L}\p{N}]`, and brackets are neither — so the `…` inside `[…]` sits at a real word boundary and a user pair on the ellipsis rewrites markers out of the text before the history row is written. Harmless when a marker is only a visual placeholder; **not** harmless once something counts markers or substitutes into them. The failed-recording-retry feature does exactly that (a recovered chunk's text replaces its marker positionally), which is why `RetryMerge` reports what it actually *placed* and the retry releases a chunk's audio only on a landed recovery — a marker that was rewritten away must not license destroying the only copy of that chunk's audio. Anything new that treats a marker as a reliable count-of-failures should re-derive the count from `HistoryEntry.failedChunkCount`, not from the text.
+
 ### Surfacing partial state to the user
 
 ```swift

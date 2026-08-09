@@ -118,7 +118,7 @@ These are deliberate non-goals (see [CLAUDE.md](CLAUDE.md)):
 - Offline mode
 - Live transcript window
 - Editing past transcripts in-app
-- Audio retention
+- Audio retention on disk (in-memory retention of failed chunks, for the retry action, already ships)
 - History longer than 10 entries
 - Mac App Store distribution
 - Telemetry / analytics

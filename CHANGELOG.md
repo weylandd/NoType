@@ -10,6 +10,21 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
 
 ## [Unreleased]
 
+### Added
+- **A dictation that fails on a bad connection is no longer lost — you can
+  retry it.** Previously, if the network dropped mid-dictation, the parts
+  that didn't make it came back as `[…]` gaps and the audio behind them was
+  gone; a dictation where nothing made it through disappeared entirely.
+  Now that recording appears in your history marked as incomplete, and one
+  tap re-sends just the parts that failed — filling the gaps in place. If
+  only some of them come back, the rest stay retryable.
+- The audio for those failed parts is held **in memory only**, and never
+  written to disk. It's released as soon as the retry succeeds, when you
+  delete the row, when the row falls out of the last-10 history window, or
+  when you quit NoType. Quitting always loses it, so after a restart an
+  incomplete recording still shows in your history but no longer offers a
+  retry. The text you already had pasted is never touched.
+
 ### Internal
 - **Found the actual cause of the macOS 26 crash** ([#82](https://github.com/weylandd/NoType/issues/82)), and corrected the documentation that named the wrong one. NoType raises an internal Objective-C error inside a background job; macOS absorbs it and keeps running, but the concurrency runtime is left corrupted and the app falls over shortly afterwards at an unrelated click. The three previous incidents — a timeline view, a hover handler, a button — were all innocent bystanders, which is why fixing each of them only moved the crash. The mechanism was reproduced locally rather than inferred.
 - Two things this retires: the start-up rework shipped in 0.1.13-rc1 was tested and **did not** fix the crash (it remains correct for its own reasons), and the README no longer suggests updating macOS as a workaround — the trigger is in NoType, not in the OS.
