@@ -27,8 +27,21 @@ import Foundation
 /// deleted or evicted by the ten-entry cap, or the process exits.
 struct RetainedRecording: Sendable {
 
-    /// One failed chunk, carrying enough to reproduce its original
-    /// request byte-for-byte.
+    /// One failed chunk, carrying enough to re-issue its request as the
+    /// single-chunk call `RecordingSession.splitRetry` would have made.
+    ///
+    /// **Not byte-for-byte identical to the attempt that failed**, and
+    /// deliberately so. There is no lite-path bit here, so a chunk that
+    /// failed on the lite dispatch (`transcribeShort`, trimmed system
+    /// prompt, no on-screen-context or prior-chunks parts) is re-sent
+    /// through the full prompt shape instead. That is fine under KTD5 —
+    /// the retry issues one single-chunk `transcribe` per chunk by
+    /// construction, because a batched response returns one contiguous
+    /// text that cannot be split back into per-gap slots — and it costs
+    /// only a larger prompt on the ~2 s sessions the lite path serves.
+    /// Adding a lite bit would mean a lite retry could never be one of
+    /// several chunks, which the merge does not need and the shape does
+    /// not offer.
     ///
     /// Mirrors `RecordingSession.EncodedChunk`'s field set (that type
     /// is private to the session; this is its escaping counterpart).

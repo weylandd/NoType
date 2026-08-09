@@ -807,6 +807,295 @@ final class AppState {
         )
     }
 
+    // MARK: - Retry orchestration (R11–R13, R15, R16, R19)
+
+    /// One retry request: re-send a single retained chunk and return what
+    /// Gemini said, with the usage it billed.
+    ///
+    /// A seam, not a strategy — production has exactly one implementation
+    /// (`sendRetryChunk`, below) and `retryChunkSender` stays `nil`. It
+    /// exists because everything U6 has to get right — the stats split of
+    /// KTD7, R16's stop-at-first-failure, R19's leave-everything-alone — is
+    /// only observable across a *sequence* of per-chunk outcomes, and there
+    /// is no other way to author that sequence without a live network. Test
+    /// scenarios AE7 / AE8 / AE9 / R16 / R19 drive it.
+    typealias RetryChunkSender = @MainActor (
+        _ chunk: RetainedRecording.Chunk,
+        _ context: ContextSnapshot,
+        _ priors: [String],
+        _ model: GeminiModel
+    ) async throws -> (text: String, tokens: TokenUsage)
+
+    /// Overrides the Gemini call `retryEntry(id:)` makes per chunk.
+    /// `nil` in production. See `RetryChunkSender`.
+    @ObservationIgnored var retryChunkSender: RetryChunkSender?
+
+    /// Re-send a broken row's retained chunks and settle the row into its
+    /// recovered or still-broken state (R11, R12, R16).
+    ///
+    /// `async` rather than fire-and-forget so the whole run — the requests,
+    /// the row rewrite, the stats write — is one awaitable unit. U7's button
+    /// wraps it in a `Task`; that costs one main-actor turn and buys tests a
+    /// join point that a detached `Task` would not have.
+    ///
+    /// ## Double-tap safety
+    ///
+    /// The guard, the in-flight publish, and the `take` all run before the
+    /// first `await`, so two taps in the same run loop cannot both get past
+    /// `canRetry` (which reads `retryingEntryID`) and cannot both take the
+    /// payload. This matters more than it looks: `StatsStore.record` is
+    /// non-idempotent, so a second run reaching the never-counted branch
+    /// would count the session twice.
+    ///
+    /// ## Why the in-flight publish is not optional bookkeeping
+    ///
+    /// `canRetry(entryID:)` reads the retained-audio holder, which is
+    /// `@ObservationIgnored` — so a `take` or a re-put on its own changes
+    /// what the rows *should* render without telling SwiftUI anything.
+    /// Writing `retryingEntryID` in the same synchronous turn as every
+    /// holder mutation is what keeps U7's rows honest. Both mutation sites
+    /// below are paired with it; a future one must be too.
+    ///
+    /// ## One request at a time
+    ///
+    /// Chunks are re-sent strictly serially, and `canRetry` refuses while a
+    /// session is recording or sending (R14), so this never puts a second
+    /// Gemini request beside a session's own. Stopping at the first failure
+    /// (R16) bounds the uncancellable wait to one request timeout rather
+    /// than the sum of every retained chunk's.
+    func retryEntry(id entryID: UUID) async {
+        guard canRetry(entryID: entryID),
+              let row = history.first(where: { $0.id == entryID }),
+              let payload = retainedAudio.peek(entryID)
+        else { return }
+
+        // AE7: in flight before the first request is issued, and in the
+        // same turn as the `take` (see the doc-comment above).
+        retryingEntryID = entryID
+        _ = retainedAudio.take(entryID)
+
+        let send: RetryChunkSender = retryChunkSender ?? { [weak self] chunk, context, priors, model in
+            guard let self else { throw CancellationError() }
+            return try await self.sendRetryChunk(
+                chunk: chunk,
+                context: context,
+                priors: priors,
+                model: model
+            )
+        }
+
+        var recovered: [String?] = []
+        var tokens = TokenUsage.zero
+        var failure: Error?
+
+        for chunk in payload.chunks {
+            // KTD6: the row's surviving text, markers filtered out, plus
+            // whatever this run has recovered so far — so a chunk that just
+            // came back becomes context for the next one, exactly as
+            // `RecordingSession.splitRetry` re-queries `currentPriors()`.
+            let priors = RetryMerge.priors(
+                from: RetryMerge.merge(existingText: row.text, recovered: recovered)
+            )
+            do {
+                let result = try await send(chunk, payload.context, priors, payload.model)
+                tokens = tokens + result.tokens
+                // Same post-response gate the session applies per split
+                // sub-call. A retry must not slip in a hallucination the
+                // original path would have filtered; the gate's `""` verdict
+                // is not a recovery, so the chunk keeps its marker and its
+                // audio (see `RetryMerge.isRecovery`).
+                let durationSeconds = Double(chunk.samples) / AudioRecorder.outputSampleRate
+                recovered.append(
+                    HallucinationLengthGate.apply(to: result.text, durationSeconds: durationSeconds)
+                )
+            } catch {
+                // R16: stop here. Later chunks are not attempted, so the
+                // worst case is one request timeout. Only the error's own
+                // description is logged — never the chunk, the context, or
+                // any recovered text.
+                Self.log.error(
+                    "retry chunk_\(chunk.idx) failed: \(error.localizedDescription, privacy: .public) — stopping run"
+                )
+                failure = error
+                break
+            }
+        }
+
+        // One slot per retained chunk, so a run that stopped early still
+        // describes every chunk. `RetryMerge.merge`'s empty-text branch and
+        // the remaining-chunk derivation below both zip against the payload.
+        while recovered.count < payload.chunks.count { recovered.append(nil) }
+
+        await settleRetry(
+            entryID: entryID,
+            row: row,
+            payload: payload,
+            recovered: recovered,
+            tokens: tokens,
+            failure: failure
+        )
+    }
+
+    /// The production `RetryChunkSender`. Resolves the key at call time and
+    /// re-issues the chunk through the same single-chunk entry point
+    /// `RecordingSession.splitRetry` uses, so a retry's request is shaped
+    /// like the attempt that failed (R11) — same context, same chunk index,
+    /// same final flag, same frozen model.
+    ///
+    /// A missing key throws rather than short-circuiting the run, which puts
+    /// it on the ordinary failure path: nothing recovers, the payload is
+    /// re-put untouched, and the "Add a Gemini API key" HUD is what R19
+    /// surfaces.
+    ///
+    /// Single-chunk by construction, per KTD5 — a batched response returns
+    /// one contiguous text that cannot be split back into per-gap slots.
+    private func sendRetryChunk(
+        chunk: RetainedRecording.Chunk,
+        context: ContextSnapshot,
+        priors: [String],
+        model: GeminiModel
+    ) async throws -> (text: String, tokens: TokenUsage) {
+        guard let key = currentAPIKey, !key.isEmpty else {
+            throw GeminiClient.GeminiError.missingKey
+        }
+        return try await gemini.transcribeWithUsage(
+            audio: chunk.audio,
+            mimeType: "audio/mp4",
+            context: context,
+            priorTranscripts: priors,
+            chunkIndex: chunk.idx,
+            isFinal: chunk.isFinal,
+            apiKey: key,
+            model: model
+        )
+    }
+
+    /// Land one retry run's outcome: rewrite the row, decide what stays
+    /// held, and account for the spend.
+    ///
+    /// Every state mutation happens synchronously before the first `await`,
+    /// so the run settles atomically with respect to another retry and the
+    /// holder is never left mid-update across a suspension. The store writes
+    /// trail it.
+    ///
+    /// **Three exits, and each one must leave the holder correct** —
+    /// `take(_:)` already removed the only copy of the user's audio, so a
+    /// path that neither re-puts nor deliberately releases destroys it
+    /// silently (see `RetainedAudioStore.take(_:)`).
+    private func settleRetry(
+        entryID: UUID,
+        row: HistoryEntry,
+        payload: RetainedRecording,
+        recovered: [String?],
+        tokens: TokenUsage,
+        failure: Error?
+    ) async {
+        let recoveredCount = RetryMerge.recoveredCount(recovered)
+
+        // Exit 1: the row was deleted while the run was in flight. R13 keeps
+        // delete available during a retry, so this is reachable by design
+        // rather than a race to defend against. Re-putting here would
+        // resurrect a payload keyed by a row that no longer exists — memory
+        // nothing can reach and no `retain(only:)` will visit until the next
+        // history mutation. Release it and let the deletion stand; the user
+        // asked for the row to be gone.
+        guard history.contains(where: { $0.id == entryID }) else {
+            retainedAudio.remove(entryID)
+            retryingEntryID = nil
+            Self.log.info("retry settled onto a deleted row — payload released")
+            await recordRetryTokens(tokens, model: payload.model, for: row)
+            return
+        }
+
+        // Exit 2: nothing recovered (R19). The row keeps its text and its
+        // failure count, the payload goes back untouched so the user can try
+        // again, and the failure is surfaced — a retry that silently
+        // restores the pre-tap appearance reads as "nothing happened".
+        guard recoveredCount > 0 else {
+            retainedAudio.put(payload, for: entryID)
+            retryingEntryID = nil
+            // `failure == nil` means every chunk answered with nothing (an
+            // empty response, or one the hallucination gate dropped) — the
+            // no-speech HUD is the honest reading of that.
+            surfaceError(.sessionFailure(failure ?? RecordingSession.SessionError.noSpeech))
+            await recordRetryTokens(tokens, model: payload.model, for: row)
+            return
+        }
+
+        // Exit 3: something recovered. The recovered text replaces its gap
+        // markers in the row (R12) — the text already pasted into the target
+        // app is not touched and cannot be, which is the whole of KD5.
+        let mergedText = RetryMerge.merge(existingText: row.text, recovered: recovered)
+        // Whatever did not recover stays held, so the next retry re-pays for
+        // those chunks only (R16). Re-putting the reduced payload — rather
+        // than releasing chunk by chunk — is what keeps `RetainedAudioStore`
+        // a whole-entry API.
+        let remaining = zip(payload.chunks, recovered)
+            .filter { !RetryMerge.isRecovery($0.1) }
+            .map(\.0)
+        let updated = HistoryEntry(
+            id: row.id,
+            text: mergedText,
+            sourceAppName: row.sourceAppName,
+            sourceBundleID: row.sourceBundleID,
+            timestamp: row.timestamp,
+            durationSeconds: row.durationSeconds,
+            // Subtracted rather than set to `remaining.count`, so the count
+            // stays equal to the number of markers actually left in the
+            // text — which is the predicate U7 renders and the merge's
+            // next run indexes against.
+            failedChunkCount: max(0, row.failedChunkCount - recoveredCount)
+        )
+        if let idx = history.firstIndex(where: { $0.id == entryID }) {
+            history[idx] = updated
+        }
+        if remaining.isEmpty {
+            // R5's retry-succeeded release: `take` already emptied the slot
+            // and there is nothing to put back.
+        } else {
+            retainedAudio.put(
+                RetainedRecording(
+                    chunks: remaining,
+                    context: payload.context,
+                    model: payload.model
+                ),
+                for: entryID
+            )
+        }
+        retryingEntryID = nil
+
+        // KTD7. "Lifetime stats never counted this session" is `isBroken &&
+        // text.isEmpty` on the row as it stood *before* this run — read
+        // `RecordingSession.brokenHistoryEntry()`'s doc-comment for why the
+        // conjunction is load-bearing and bare `text.isEmpty` is not. Once
+        // that row carries any recovered text the branch can never be taken
+        // again, which is what makes the session count once across however
+        // many retries it takes (AE9).
+        if row.isBroken && row.text.isEmpty {
+            statsSummary = await statsStore.record(updated, tokens: tokens, model: payload.model)
+        } else {
+            await recordRetryTokens(tokens, model: payload.model, for: row)
+        }
+        await historyStore.update(updated)
+    }
+
+    /// Fold a retry's spend into lifetime stats without counting a session
+    /// (R15 / KTD7). A `.zero` usage is a no-op inside `StatsStore`.
+    private func recordRetryTokens(
+        _ tokens: TokenUsage,
+        model: GeminiModel,
+        for row: HistoryEntry
+    ) async {
+        guard tokens != .zero else { return }
+        statsSummary = await statsStore.recordTokens(
+            tokens,
+            model: model,
+            timestamp: row.timestamp,
+            bundleID: row.sourceBundleID,
+            appName: row.sourceAppName
+        )
+    }
+
     // MARK: - API key
 
     /// Reads the cached key, falling back to env var + Keychain on first

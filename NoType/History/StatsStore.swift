@@ -581,6 +581,74 @@ actor StatsStore {
         return snap
     }
 
+    /// Fold Gemini token usage into the day and day×app buckets **without**
+    /// counting a session, words, or duration.
+    ///
+    /// The retry half of KTD7. `record(_:tokens:model:)` is documented as
+    /// non-idempotent (invariant 8) precisely because it increments
+    /// `totalSessions`, so a retry that re-sends a row whose session was
+    /// already counted when it pasted cannot go through it — the user would
+    /// gain a phantom session and a second copy of the transcript's words
+    /// every time they tapped retry (AE8). But the tokens are real spend on
+    /// the user's own key and R15 says every retry records them, so they need
+    /// a path of their own.
+    ///
+    /// Keyed off the row's `timestamp` and bundle id, not "now", so a retry
+    /// tomorrow of a dictation from yesterday prices into yesterday's bucket
+    /// alongside the session it belongs to.
+    ///
+    /// Deliberately does **not** touch `totalWords` / `totalSessions` /
+    /// `totalDuration*`: those are the once-per-entry half of KTD7 and are
+    /// written by `record(_:tokens:model:)` on the first retry that recovers
+    /// text for a session lifetime stats never counted (AE9). A `.zero`
+    /// usage is a no-op, so a caller need not pre-check.
+    @discardableResult
+    func recordTokens(
+        _ tokens: TokenUsage,
+        model: GeminiModel,
+        timestamp: Date,
+        bundleID: String,
+        appName: String
+    ) -> StatsSnapshot {
+        var snap = summary()
+        guard tokens != .zero else { return snap }
+
+        let dayKey = StatsSnapshot.dayKey(for: timestamp)
+        var day = snap.dayBuckets[dayKey] ?? DayBucket(words: 0, sessions: 0)
+        day.tokenInput  += tokens.input
+        day.tokenOutput += tokens.output
+        day.tokenCached += tokens.cached
+        Self.addModelTokens(&day.tokensByModel, model: model, tokens: tokens)
+        snap.dayBuckets[dayKey] = day
+
+        // Same empty-bundle carve-out as `record` — all blank ids would
+        // collapse into one bucket whose label races.
+        if !bundleID.isEmpty {
+            var perApp = snap.dayAppBuckets[dayKey] ?? [:]
+            var dayAppBucket = perApp[bundleID] ?? DayBucket(words: 0, sessions: 0)
+            dayAppBucket.tokenInput  += tokens.input
+            dayAppBucket.tokenOutput += tokens.output
+            dayAppBucket.tokenCached += tokens.cached
+            Self.addModelTokens(&dayAppBucket.tokensByModel, model: model, tokens: tokens)
+            perApp[bundleID] = dayAppBucket
+            snap.dayAppBuckets[dayKey] = perApp
+
+            // `appBuckets` carries words + sessions only, so there is
+            // nothing token-shaped to add there. The last-seen display
+            // name still wins (invariant 7) for a row whose app was
+            // renamed between the session and the retry.
+            if var app = snap.appBuckets[bundleID], app.name != appName {
+                app.name = appName
+                snap.appBuckets[bundleID] = app
+            }
+        }
+
+        snap.version = StatsSnapshot.currentVersion
+        cached = snap
+        write(snap)
+        return snap
+    }
+
     /// Wipe every aggregate back to zero (totals, day / app / day×app
     /// buckets, token counters). Driven by Settings → "Delete all
     /// analytics". Returns the new (empty) snapshot so the caller can
