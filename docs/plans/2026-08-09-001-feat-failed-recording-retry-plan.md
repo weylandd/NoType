@@ -438,7 +438,7 @@ Each unit is sized to land as one commit: implement it, satisfy its test scenari
 - **Approach:**
   1. Replace the app-icon slot with an error slot when the row is broken, and with a spinner slot while it is retrying.
   2. Force the action row visible when broken or retrying, instead of gating on hover.
-  3. Render the design's placeholder bars for any row with no text, animating them only while a retry is in flight.
+  3. Render a broken row's transcript the way it was pasted, with `RecordingSession.failureMarker` (`[…]`) where each failed chunk's text should be; a row that recovered nothing renders only those markers. (Was: the design's placeholder bars — superseded by the maintainer directive recorded at R9.)
   4. Extract the action-set derivation as a pure function over broken state, payload presence, text presence, and retry-in-flight.
   5. Pass the retry handler and shared retry state from both call sites so neither surface holds its own copy.
   6. Give a retry that recovered nothing a visible outcome through the existing Error HUD catalog, so the row does not simply revert to how it looked before the user tapped.

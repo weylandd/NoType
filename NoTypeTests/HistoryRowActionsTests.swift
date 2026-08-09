@@ -23,12 +23,16 @@ final class HistoryRowActionsTests: XCTestCase {
 
     // MARK: - Action set (R10, R13, AE4)
 
+    /// A partially-failed transcript: real words plus one surviving gap.
+    /// Copyable, and a recovery still has a marker to land in.
+    private var partialText: String { "Ship it \(marker) and review after." }
+
     func test_actions_brokenWithPayloadAndText_offersRetryCopyDelete() {
         // AE4, first row of the table: the live broken row, mid-window,
         // audio still held.
         XCTAssertEqual(
             HistoryRowView.actions(
-                isBroken: true, canRetry: true, hasText: true, isRetrying: false
+                isBroken: true, canRetry: true, text: partialText, isRetrying: false
             ),
             [.retry, .copy, .delete]
         )
@@ -40,7 +44,7 @@ final class HistoryRowActionsTests: XCTestCase {
         // worth copying and the row itself stays (R8).
         XCTAssertEqual(
             HistoryRowView.actions(
-                isBroken: true, canRetry: false, hasText: true, isRetrying: false
+                isBroken: true, canRetry: false, text: partialText, isRetrying: false
             ),
             [.copy, .delete]
         )
@@ -52,30 +56,61 @@ final class HistoryRowActionsTests: XCTestCase {
         // markers it renders are not something worth copying.
         XCTAssertEqual(
             HistoryRowView.actions(
-                isBroken: true, canRetry: false, hasText: false, isRetrying: false
+                isBroken: true, canRetry: false, text: "", isRetrying: false
             ),
             [.delete]
         )
     }
 
-    func test_actions_retrying_offersDeleteOnly_withNoRetryAndNoCancel() {
-        // R13. Delete stays available — it is the only exit from a run
-        // that cannot be cancelled (KTD7) — and nothing else is offered.
-        let busy = HistoryRowView.actions(
-            isBroken: true, canRetry: false, hasText: true, isRetrying: true
-        )
-        XCTAssertEqual(busy, [.delete])
-        XCTAssertFalse(busy.contains(.retry), "one run at a time")
-        XCTAssertFalse(busy.contains(.copy), "matches the drawn retrying row")
-    }
-
-    func test_actions_retrying_winsOverEveryOtherInput() {
-        // The busy branch is a short-circuit, not one term among four:
-        // even a row that would otherwise offer all three collapses to
-        // delete. Without the early return this reads [.retry,.copy,.delete].
+    func test_actions_markersOnlyRow_readsTheSameAsTheAllFailedRow() {
+        // A row storing bare markers is reachable: one chunk fails while
+        // another is dropped by `HallucinationLengthGate`, and the
+        // session pastes `[…] […]`. It renders identically to the
+        // all-failed row above, so it must offer the same actions —
+        // gating copy on `!text.isEmpty` gave the two visually identical
+        // rows different buttons.
         XCTAssertEqual(
             HistoryRowView.actions(
-                isBroken: true, canRetry: true, hasText: true, isRetrying: true
+                isBroken: true, canRetry: false, text: "\(marker) \(marker)", isRetrying: false
+            ),
+            [.delete]
+        )
+        XCTAssertEqual(
+            HistoryRowView.displayText(for: entry(text: "\(marker) \(marker)", failedChunkCount: 2)),
+            HistoryRowView.displayText(for: entry(text: "", failedChunkCount: 2)),
+            "and they really do render the same string"
+        )
+    }
+
+    func test_actions_retrying_offersNoRetryAndNoCancel_butKeepsDelete() {
+        // R13. Delete stays available — it is the only exit from a run
+        // that cannot be cancelled (KTD7) — and retry never doubles up.
+        let busy = HistoryRowView.actions(
+            isBroken: true, canRetry: false, text: partialText, isRetrying: true
+        )
+        XCTAssertFalse(busy.contains(.retry), "one run at a time")
+        XCTAssertTrue(busy.contains(.delete), "the only exit stays open")
+    }
+
+    func test_actions_retryingRowStillOffersCopy_whenItIsShowingText() {
+        // Since R9's supersession a busy row renders whatever it already
+        // recovered, dimmed. Withholding copy would leave the user
+        // looking at text they cannot take, for a run they cannot
+        // cancel. The drawn retrying row carries a lone trash button,
+        // but it depicts the all-failed case — covered below.
+        XCTAssertEqual(
+            HistoryRowView.actions(
+                isBroken: true, canRetry: true, text: partialText, isRetrying: true
+            ),
+            [.copy, .delete]
+        )
+    }
+
+    func test_actions_retryingRowWithNothingToShow_offersDeleteOnly() {
+        // The drawn retrying row: no transcript, one trash button.
+        XCTAssertEqual(
+            HistoryRowView.actions(
+                isBroken: true, canRetry: true, text: "", isRetrying: true
             ),
             [.delete]
         )
@@ -87,24 +122,40 @@ final class HistoryRowActionsTests: XCTestCase {
         // lives in the view; this is the membership half.)
         XCTAssertEqual(
             HistoryRowView.actions(
-                isBroken: false, canRetry: false, hasText: true, isRetrying: false
+                isBroken: false, canRetry: false, text: "Ship it by Friday.", isRetrying: false
             ),
             [.copy, .delete]
         )
     }
 
     func test_actions_retryIsNeverOfferedOnANonBrokenRow() {
-        // A row with no marker left in its text has nowhere for a
-        // recovery to land, so retry would spend the user's Gemini
-        // budget on a request that settles straight onto R19's
-        // nothing-recovered exit. Dropping `isBroken &&` from the
-        // predicate makes this [.retry, .copy, .delete].
+        // Dropping `isBroken &&` from the predicate makes this
+        // [.retry, .copy, .delete].
         XCTAssertEqual(
             HistoryRowView.actions(
-                isBroken: false, canRetry: true, hasText: true, isRetrying: false
+                isBroken: false, canRetry: true, text: partialText, isRetrying: false
             ),
             [.copy, .delete]
         )
+    }
+
+    func test_actions_retryIsWithheldWhenNoRecoveryCouldLand() {
+        // A row can be broken — `failedChunkCount > 0` — while carrying
+        // no marker at all, because `TextReplacementEngine` runs over the
+        // stitched transcript before it is stored and its boundaries
+        // reach the `…` inside `[…]` (see `RetryMerge`'s header). Every
+        // retry on such a row bills Gemini and settles straight onto
+        // R19's nothing-recovered exit, forever. `isBroken` cannot see
+        // that; `RetryMerge.canAcceptRecovery` can.
+        XCTAssertEqual(
+            HistoryRowView.actions(
+                isBroken: true, canRetry: true, text: "Ship it and review after.", isRetrying: false
+            ),
+            [.copy, .delete]
+        )
+        XCTAssertFalse(RetryMerge.canAcceptRecovery("Ship it and review after."))
+        XCTAssertTrue(RetryMerge.canAcceptRecovery(partialText), "a marker is a landing slot")
+        XCTAssertTrue(RetryMerge.canAcceptRecovery(""), "so is an empty row — every slot is emitted")
     }
 
     func test_actions_deleteIsOfferedInEveryState() {
@@ -112,17 +163,17 @@ final class HistoryRowActionsTests: XCTestCase {
         // than asserted case by case.
         for isBroken in [true, false] {
             for canRetry in [true, false] {
-                for hasText in [true, false] {
+                for text in ["", "   ", partialText, "\(marker)", "no markers here"] {
                     for isRetrying in [true, false] {
                         XCTAssertTrue(
                             HistoryRowView.actions(
                                 isBroken: isBroken,
                                 canRetry: canRetry,
-                                hasText: hasText,
+                                text: text,
                                 isRetrying: isRetrying
                             ).contains(.delete),
                             "delete missing for broken=\(isBroken) canRetry=\(canRetry) "
-                            + "hasText=\(hasText) retrying=\(isRetrying)"
+                            + "text=\(text.debugDescription) retrying=\(isRetrying)"
                         )
                     }
                 }
@@ -134,7 +185,7 @@ final class HistoryRowActionsTests: XCTestCase {
         // Declaration order is render order, matching the design's
         // markup. A row is never rendered with delete in the middle.
         let all = HistoryRowView.actions(
-            isBroken: true, canRetry: true, hasText: true, isRetrying: false
+            isBroken: true, canRetry: true, text: partialText, isRetrying: false
         )
         XCTAssertEqual(all, HistoryRowView.RowAction.allCases)
     }
@@ -190,12 +241,34 @@ final class HistoryRowActionsTests: XCTestCase {
         let row = entry(text: "", failedChunkCount: 3)
         let displayed = HistoryRowView.displayText(for: row)
 
+        // Without this the equality below is satisfiable by synthesising
+        // *nothing*: `displayed == ""` collapses both merges onto the
+        // same empty-text branch with the same arguments, and they agree
+        // trivially. Verified: deleting the synthesis leaves the two
+        // assertions below green and only this one red.
+        XCTAssertEqual(displayed, "\(marker) \(marker) \(marker)")
+
         let recovered: [String?] = ["Ship it", nil, nil]
         let fromStoredText   = RetryMerge.merge(existingText: row.text,  recovered: recovered)
         let fromDisplayedText = RetryMerge.merge(existingText: displayed, recovered: recovered)
 
         XCTAssertEqual(fromStoredText, fromDisplayedText)
         XCTAssertEqual(fromStoredText, "Ship it \(marker) \(marker)")
+    }
+
+    func test_displayText_whitespaceOnlyRow_agreesWithTheBranchRetryMergeTakes() {
+        // The two predicates must select the same branch or the row
+        // renders blank and then visibly reflows into full markers the
+        // moment a retry lands — the exact reflow the synthesis exists to
+        // prevent. `RetryMergeTests.test_merge_whitespaceOnlyExistingText_takesTheEmptyBranch`
+        // already pins the merge side; this pins that rendering follows it.
+        let row = entry(text: "   ", failedChunkCount: 2)
+        XCTAssertTrue(RetryMerge.isEmptyText(row.text), "the merge treats this as empty …")
+        XCTAssertEqual(
+            HistoryRowView.displayText(for: row),
+            "\(marker) \(marker)",
+            "… so the row must render markers, not blank"
+        )
     }
 
     func test_displayText_survivesAPartialRecovery_asAnOrdinaryBrokenRow() {
@@ -207,7 +280,7 @@ final class HistoryRowActionsTests: XCTestCase {
         XCTAssertEqual(HistoryRowView.displayText(for: partially), partially.text)
         XCTAssertEqual(
             HistoryRowView.actions(
-                isBroken: true, canRetry: true, hasText: !partially.text.isEmpty, isRetrying: false
+                isBroken: true, canRetry: true, text: partially.text, isRetrying: false
             ),
             [.retry, .copy, .delete],
             "and it is copyable now, where the all-failed row was not"
@@ -242,11 +315,11 @@ final class HistoryRowActionsTests: XCTestCase {
             HistoryRowView.actions(
                 isBroken: true,
                 canRetry: fx.state.canRetry(entryID: busyRow.id),
-                hasText: false,
+                text: "",
                 isRetrying: fx.state.retryingEntryID == busyRow.id
             ),
             [.delete],
-            "R13: the busy row offers delete and nothing else"
+            "R13: this row recovered nothing, so delete is all it can offer"
         )
         // … and every other row is blocked while it runs, in both
         // surfaces, because both read the same two values.
@@ -255,7 +328,7 @@ final class HistoryRowActionsTests: XCTestCase {
             HistoryRowView.actions(
                 isBroken: true,
                 canRetry: fx.state.canRetry(entryID: otherRow.id),
-                hasText: true,
+                text: "a \(marker) b",
                 isRetrying: fx.state.retryingEntryID == otherRow.id
             ),
             [.copy, .delete],
@@ -277,11 +350,41 @@ final class HistoryRowActionsTests: XCTestCase {
         //
         // Presence first — an absence-only scan would stay green on a
         // surface that dropped the retry affordance entirely.
+        //
+        // **The presence half must pin the destination, not the file.**
+        // Every parameter the row takes here is defaulted, so deleting a
+        // surface's forwarding still compiles; and `HomeView.swift`
+        // reaches the row through `HomeRecentList`, ~870 lines from the
+        // `appState.` needles. A whole-file `contains` is therefore
+        // satisfied by the outer hop while the actual construction
+        // forwards nothing — measured, not reasoned about: deleting
+        // HomeRecentList's three forwarding arguments left the earlier
+        // version of this test green with the Home tab's retry and busy
+        // states entirely gone. So assert on each `HistoryRowView(...)`
+        // argument list itself. See
+        // `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`.
         let popover = try Self.source("NoType/UI/HistoryPopover.swift")
         let home    = try Self.source("NoType/UI/HomeView.swift")
         let row     = try Self.source("NoType/UI/HistoryRowView.swift")
 
         for (name, src) in [("HistoryPopover.swift", popover), ("HomeView.swift", home)] {
+            let constructions = Self.rowConstructions(in: src)
+            XCTAssertFalse(
+                constructions.isEmpty,
+                "\(name) must construct HistoryRowView — this guard is meaningless otherwise"
+            )
+            for call in constructions {
+                for label in ["retryingEntryID:", "canRetry:", "onRetry:"] {
+                    XCTAssertTrue(
+                        call.contains(label),
+                        "\(name) builds a HistoryRowView without `\(label)`. Every one of "
+                        + "these is defaulted, so this compiles and silently drops R18 "
+                        + "in this surface: \(call)"
+                    )
+                }
+            }
+            // …and the values reaching that call must originate in the
+            // one shared slot rather than a per-surface derivation.
             XCTAssertTrue(
                 src.contains("appState.retryingEntryID"),
                 "\(name) must pass the shared retry slot, not a local flag"
@@ -295,11 +398,18 @@ final class HistoryRowActionsTests: XCTestCase {
                 "\(name) must drive the shared orchestration"
             )
             // Absence: neither surface may own retry state of its own.
+            // The needle set covers the names a local busy flag would
+            // plausibly take — keying on "retry" alone let `isBusy` /
+            // `inFlight` / `pendingID` through.
             for line in src.split(separator: "\n") where line.contains("@State") {
-                XCTAssertFalse(
-                    line.lowercased().contains("retry"),
-                    "\(name) declares local retry state — R18 requires one shared value: \(line)"
-                )
+                let lowered = line.lowercased()
+                for needle in ["retry", "busy", "inflight", "in_flight", "pending"] {
+                    XCTAssertFalse(
+                        lowered.contains(needle),
+                        "\(name) declares local retry state (`\(needle)`) — "
+                        + "R18 requires one shared value: \(line)"
+                    )
+                }
             }
         }
 
@@ -316,6 +426,36 @@ final class HistoryRowActionsTests: XCTestCase {
         }
     }
 
+    func test_theRowConstructionScanner_separatesCalls_andExposesADroppedArgument() {
+        // The guard above is worth exactly as much as this extraction, so
+        // pin the extraction on fixtures instead of trusting it against
+        // the real files — where it is green either way. Three things
+        // have to hold: a multi-line call with nested parentheses comes
+        // back whole, two adjacent calls do not merge into one blob that
+        // one wired call could satisfy for both, and a call missing an
+        // argument reads as missing.
+        let wired = """
+        HistoryRowView(
+            entry: entry,
+            retryingEntryID: retryingEntryID,
+            canRetry: canRetry(entry.id),
+            onRetry: { onRetry(entry.id) },
+            onDelete: { onDelete(entry.id) }
+        )
+        """
+        let bare = "HistoryRowView(entry: entry, onDelete: { onDelete(entry.id) })"
+
+        let found = Self.rowConstructions(in: wired + "\n" + bare)
+        XCTAssertEqual(found.count, 2, "two constructions, not one merged blob")
+        XCTAssertTrue(found[0].contains("canRetry(entry.id)"), "nested parens survive")
+        XCTAssertTrue(found[0].contains("onRetry:"))
+        XCTAssertFalse(
+            found[1].contains("retryingEntryID:"),
+            "the dropped-argument case — the one the real guard must catch — is visible"
+        )
+        XCTAssertTrue(Self.rowConstructions(in: "HistoryRowView.separatorLeading").isEmpty)
+    }
+
     // MARK: - A retry that recovers nothing (R19)
 
     func test_retryThatRecoversNothing_leavesTheErrorHUDUp_andTheRowBackInItsRetryableState() async {
@@ -329,7 +469,7 @@ final class HistoryRowActionsTests: XCTestCase {
         let before = HistoryRowView.actions(
             isBroken: true,
             canRetry: fx.state.canRetry(entryID: row.id),
-            hasText: false,
+            text: row.text,
             isRetrying: false
         )
         XCTAssertEqual(before, [.retry, .delete])
@@ -350,7 +490,7 @@ final class HistoryRowActionsTests: XCTestCase {
             HistoryRowView.actions(
                 isBroken: true,
                 canRetry: fx.state.canRetry(entryID: row.id),
-                hasText: false,
+                text: settled?.text ?? "",
                 isRetrying: fx.state.retryingEntryID == row.id
             ),
             before,
@@ -391,6 +531,39 @@ final class HistoryRowActionsTests: XCTestCase {
             await Task.yield()
         }
         XCTFail(message)
+    }
+
+    /// Every `HistoryRowView(...)` construction in `source`, returned as
+    /// the text of its argument list.
+    ///
+    /// Balanced-paren scan rather than a line or regex match, because the
+    /// call spans several lines and its arguments contain parentheses of
+    /// their own (`canRetry(entry.id)`, `onDelete(entry.id)`).
+    static func rowConstructions(in source: String) -> [String] {
+        var out: [String] = []
+        var searchStart = source.startIndex
+        while let hit = source.range(
+            of: "HistoryRowView(", range: searchStart..<source.endIndex
+        ) {
+            var depth = 0
+            var i = source.index(before: hit.upperBound)   // the "(" itself
+            var close: String.Index?
+            while i < source.endIndex {
+                switch source[i] {
+                case "(": depth += 1
+                case ")":
+                    depth -= 1
+                    if depth == 0 { close = i }
+                default: break
+                }
+                if close != nil { break }
+                i = source.index(after: i)
+            }
+            guard let close else { break }
+            out.append(String(source[hit.upperBound..<close]))
+            searchStart = close
+        }
+        return out
     }
 
     private static func source(_ relativePath: String) throws -> String {

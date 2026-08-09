@@ -67,7 +67,41 @@ enum RetryMerge {
     /// never disagree about what recovered.
     static func isRecovery(_ text: String?) -> Bool {
         guard let text else { return false }
-        return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return !isEmptyText(text)
+    }
+
+    /// Whether a row's stored text counts as "carrying nothing".
+    ///
+    /// The **single** definition of that question, deliberately: this file
+    /// decides which merge branch a retry takes, and `HistoryRowView`
+    /// decides whether to synthesise markers for display, whether to offer
+    /// copy, and whether a recovery has anywhere to land. Those are four
+    /// readings of one fact, and they were briefly three separate
+    /// `.isEmpty` spellings — two trimmed here, one untrimmed in the view —
+    /// which disagreed on whitespace-only text. That state is not
+    /// hypothetical: `RetryMergeTests.test_merge_whitespaceOnlyExistingText_takesTheEmptyBranch`
+    /// already pins it, and `TextReplacementEngine` runs over the stitched
+    /// transcript before it is stored (see the note on `Merged.placed`), so
+    /// a user replacement pair can leave a row holding only whitespace.
+    ///
+    /// Trimmed, because a row rendering a lone space is empty to the user
+    /// in every sense that matters.
+    static func isEmptyText(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Whether a recovery re-sent for this row has somewhere to land.
+    ///
+    /// `mergeDetailed` lands text two ways and only two: the empty-text
+    /// branch emits every slot (so an empty row always accepts), and the
+    /// substitution branch replaces `failureMarker` occurrences left to
+    /// right (so a row with at least one marker accepts). A row that is
+    /// still `isBroken` but carries neither — its markers rewritten out
+    /// from under it — accepts nothing, and every retry on it is billed,
+    /// recovers nothing, and settles onto R19's nothing-recovered exit.
+    /// `RetryMerge`'s own header names that rewrite as reachable today.
+    static func canAcceptRecovery(_ text: String) -> Bool {
+        isEmptyText(text) || text.contains(RecordingSession.failureMarker)
     }
 
     /// What one merge did: the row's new text, and which slots' recovered
@@ -137,7 +171,7 @@ enum RetryMerge {
 
         let marker = RecordingSession.failureMarker
 
-        if existingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if isEmptyText(existingText) {
             // The empty-text branch emits every slot — a recovery as its
             // text, an unrecovered one as a marker — so every recovery
             // lands by construction.

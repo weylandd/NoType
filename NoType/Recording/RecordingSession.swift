@@ -797,9 +797,11 @@ final class RecordingSession {
     /// dispatched chunk failed recoverably (R6, KTD3).
     ///
     /// **The text is empty on purpose, and that emptiness is load-bearing
-    /// twice over.** It is what U7 renders as the design's placeholder
-    /// bars (R9), and it is how "lifetime stats never counted this
-    /// session" is represented (R15 / KTD7).
+    /// twice over.** It is what `HistoryRowView.displayText(for:)` turns
+    /// into one `failureMarker` per failed chunk at render time (R9 as
+    /// superseded — the row shows `[…] […]`, not placeholder bars), and
+    /// it is how "lifetime stats never counted this session" is
+    /// represented (R15 / KTD7).
     ///
     /// The exact invariant, because U6's accounting rests on it and the
     /// looser version of this sentence is false: **no row that is both

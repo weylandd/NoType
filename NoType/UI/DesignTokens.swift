@@ -213,9 +213,12 @@ enum DS {
         // `--danger-base` / `--accent-base` at N % alpha, NOT the
         // theme-shared rgba anchors the `*Soft` / `*Border` family is
         // built from. So they spell out per-theme tuples taken from the
-        // `dangerBase` / `accent` hexes above; reusing `dangerBorder`
-        // (0.30) or `accentBorder` (0.32) would be wrong on both the
-        // anchor and the alpha.
+        // `dangerBase` / `accent` hexes above. `dangerBorder` (0.30) is
+        // wrong on both counts — its anchor is a different red entirely.
+        // `accentBorder` (0.32) is wrong on the alpha in both themes and
+        // on the anchor in light (#6C46F0 vs accent's #6C50E9); its dark
+        // anchor does coincide, which is why only the light half makes
+        // reuse impossible rather than merely wrong.
         //
         // Anchors: dangerBase light=#D40924, dark=#E84040 @ 55 %
         //          accent     light=#6C50E9, dark=#7C5CFF @ 45 %

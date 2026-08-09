@@ -80,7 +80,7 @@ struct HistoryRowView: View {
         Self.actions(
             isBroken: entry.isBroken,
             canRetry: canRetry,
-            hasText: !entry.text.isEmpty,
+            text: entry.text,
             isRetrying: isRetrying
         )
     }
@@ -111,11 +111,13 @@ struct HistoryRowView: View {
 
             Spacer(minLength: 0)
 
-            // Action buttons — always in layout so the row never shifts;
-            // faded out unless the row is hovered, broken, or busy.
-            // Membership comes from the pure `actions` table so a change
-            // to R10's truth table reaches the rendering, not just the
-            // test.
+            // Action buttons. Membership comes from the pure `actions`
+            // table so a change to R10's truth table reaches the
+            // rendering, not just the test; visibility is a separate
+            // axis — faded out unless the row is hovered, broken, or
+            // busy. Both live behind the trailing `Spacer`, so a state
+            // change that adds or drops a button re-lays out only this
+            // cluster and never moves the app name or timestamp.
             HStack(spacing: DS.Space.s2) {
                 if actions.contains(.retry) {
                     DSIconButton(icon: .refresh) {
@@ -191,37 +193,50 @@ struct HistoryRowView: View {
 
     /// The three things a row can offer. Declaration order is render
     /// order, matching the design's markup (retry, copy, delete).
-    enum RowAction: String, CaseIterable, Sendable {
+    enum RowAction: CaseIterable, Sendable {
         case retry, copy, delete
     }
 
     /// What a row offers, per R10 and R13.
     ///
-    /// - `isRetrying` wins outright: a run in flight offers delete and
-    ///   nothing else — no retry (one run at a time) and deliberately no
-    ///   cancel (KTD7). Copy goes too, matching the drawn design, whose
-    ///   retrying row carries a single trash button.
-    /// - `retry` requires `isBroken` on top of `canRetry`. In production
-    ///   only a broken row is ever given a payload, so the extra term
-    ///   should be unreachable — but a row with no marker left in its
-    ///   text has nowhere for a recovery to land (`RetryMerge` would
-    ///   place nothing and the run would settle straight onto R19's
-    ///   nothing-recovered exit), so offering the action there would
-    ///   spend the user's Gemini budget on a request that cannot land.
-    /// - `copy` reads the **stored** text, not the rendered one. A
-    ///   session that recovered nothing renders as bare `[…]` markers
-    ///   (see `displayText(for:)`), and markers are not worth putting on
-    ///   the clipboard — AE4 says such a row offers delete only.
+    /// Takes the row's **stored text**, not a caller-derived `hasText`
+    /// flag. Two of the three actions turn on different readings of that
+    /// string — "is any of it worth copying" and "can a recovery land in
+    /// it" — and a boolean parameter puts both derivations in the caller,
+    /// where no test reaches them.
+    ///
+    /// - `isRetrying` wins outright: a run in flight offers no retry (one
+    ///   run at a time) and deliberately no cancel (KTD7); delete is the
+    ///   only exit. Copy survives **only when the row is showing text
+    ///   worth copying** — the drawn retrying row carries a lone trash
+    ///   button, but that row has no transcript at all, and since R9's
+    ///   supersession a busy row does render whatever it recovered.
+    ///   Withholding copy from visible text for an uncancellable run
+    ///   would be a worse trade than diverging from a mock that never
+    ///   depicted this state.
+    /// - `retry` needs somewhere for a recovery to *land*, which is what
+    ///   `RetryMerge.canAcceptRecovery` decides. `isBroken` alone does
+    ///   not: it reads a persisted count, and a row can be broken with
+    ///   its markers rewritten out from under it (`RetryMerge`'s header
+    ///   documents that `TextReplacementEngine` reaches the `…` inside
+    ///   `[…]`). Every retry on such a row is billed and settles straight
+    ///   onto R19's nothing-recovered exit.
+    /// - `copy` asks whether anything but gaps survived, via
+    ///   `RetryMerge.priors` — which already splits on the marker, trims,
+    ///   and drops empties. So a row storing bare `[…] […]` reads the
+    ///   same as one storing `""`: both render markers, and neither is
+    ///   worth putting on the clipboard (AE4).
     nonisolated static func actions(
         isBroken: Bool,
         canRetry: Bool,
-        hasText: Bool,
+        text: String,
         isRetrying: Bool
     ) -> [RowAction] {
-        if isRetrying { return [.delete] }
+        let hasCopyableText = !RetryMerge.priors(from: text).isEmpty
+        if isRetrying { return hasCopyableText ? [.copy, .delete] : [.delete] }
         var out: [RowAction] = []
-        if isBroken && canRetry { out.append(.retry) }
-        if hasText              { out.append(.copy) }
+        if isBroken && canRetry && RetryMerge.canAcceptRecovery(text) { out.append(.retry) }
+        if hasCopyableText { out.append(.copy) }
         out.append(.delete)
         return out
     }
@@ -240,19 +255,30 @@ struct HistoryRowView: View {
     /// is how "lifetime stats never counted this session" is represented
     /// (R15 / KTD7 — see `RecordingSession.brokenHistoryEntry()`, whose
     /// doc-comment warns in as many words that seeding the row with
-    /// markers would make every recovered session double-count). Storing
-    /// them would also make `text` non-empty, which is the very predicate
-    /// the action set uses to decide whether copy is worth offering.
+    /// markers would make every recovered session double-count).
     ///
     /// **Why it does not drift from the retry path.** The synthesis is
     /// `TextInjector.stitchChunks` over N markers — the same call
     /// `RetryMerge`'s empty-text branch makes — so substituting a
     /// recovery into what the user saw and merging it into the stored
     /// empty string produce the same string, and the row does not reflow
-    /// the moment a retry lands its first chunk. Pinned by
-    /// `HistoryRowActionsTests`.
+    /// the moment a retry lands its first chunk. That agreement is why
+    /// the branch is chosen by `RetryMerge.isEmptyText` and not by a
+    /// second, locally-spelled `.isEmpty`: the two disagreed on
+    /// whitespace-only text, which would have rendered a blank row that
+    /// then visibly reflowed into full markers on the first landed chunk
+    /// — the exact reflow this design claims to prevent.
+    ///
+    /// **Not the same question as the stats gate**, despite the shared
+    /// shape. `AppState.settleRetry` asks `row.isBroken && row.text.isEmpty`
+    /// *untrimmed* on purpose: it means "this row came from
+    /// `brokenHistoryEntry()` and was therefore never counted", and a
+    /// whitespace-only row that *pasted* was counted at paste time, so
+    /// loosening that one would let a retry count the session twice.
+    /// Rendering asks a different question — "is there anything here for
+    /// the user to read" — and trims.
     nonisolated static func displayText(for entry: HistoryEntry) -> String {
-        guard entry.isBroken, entry.text.isEmpty else { return entry.text }
+        guard entry.isBroken, RetryMerge.isEmptyText(entry.text) else { return entry.text }
         return TextInjector.stitchChunks(
             Array(repeating: RecordingSession.failureMarker, count: entry.failedChunkCount)
         )
