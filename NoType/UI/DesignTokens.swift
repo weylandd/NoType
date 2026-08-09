@@ -204,6 +204,30 @@ enum DS {
             darkRGBA:  (1.0, 1.0, 1.0, 0.06)
         )
 
+        // Broken / retrying history-row slots — the rim of the 28 pt tile
+        // that replaces the app icon on a failed row (`app/menu-bar.html`,
+        // `.t-err-slot` and its `.rty` variant).
+        //
+        // The design writes both as
+        // `color-mix(in oklab, <base> N%, transparent)` — the theme's own
+        // `--danger-base` / `--accent-base` at N % alpha, NOT the
+        // theme-shared rgba anchors the `*Soft` / `*Border` family is
+        // built from. So they spell out per-theme tuples taken from the
+        // `dangerBase` / `accent` hexes above; reusing `dangerBorder`
+        // (0.30) or `accentBorder` (0.32) would be wrong on both the
+        // anchor and the alpha.
+        //
+        // Anchors: dangerBase light=#D40924, dark=#E84040 @ 55 %
+        //          accent     light=#6C50E9, dark=#7C5CFF @ 45 %
+        static let errorSlotBorder = SwiftUI.Color.dsDynamic(
+            lightRGBA: (212/255,  9/255,  36/255, 0.55),
+            darkRGBA:  (232/255, 64/255,  64/255, 0.55)
+        )
+        static let retrySlotBorder = SwiftUI.Color.dsDynamic(
+            lightRGBA: (108/255, 80/255, 233/255, 0.45),
+            darkRGBA:  (124/255, 92/255, 255/255, 0.45)
+        )
+
         // Popover surface — the body fill behind the history list.
         // Solid in both themes so we don't depend on whatever wallpaper
         // sits behind the menu bar (the previous `.ultraThinMaterial`
@@ -229,6 +253,11 @@ enum DS {
     // -------------------------------------------------------------------------
     enum Border {
         static let hairline: CGFloat = 0.5
+        /// 1.5 pt — the rim of the broken / retrying history-row slot
+        /// (`app/menu-bar.html`, `.t-err-slot`). Thicker than a hairline
+        /// on purpose: at 0.5 pt the dashed variant reads as a smudge
+        /// rather than as a dashed border.
+        static let medium: CGFloat = 1.5
     }
 
     // -------------------------------------------------------------------------

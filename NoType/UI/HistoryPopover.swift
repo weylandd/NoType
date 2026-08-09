@@ -212,6 +212,13 @@ struct HistoryPopover: View {
                     HistoryRowView(
                         entry: entry,
                         isNewest: i == 0,
+                        // R18: the shared slot itself, not a per-surface
+                        // copy. The Home tab's recent list passes the
+                        // same value, so a retry started in either
+                        // surface reads as in-flight in both.
+                        retryingEntryID: appState.retryingEntryID,
+                        canRetry: appState.canRetry(entryID: entry.id),
+                        onRetry: { Task { await appState.retryEntry(id: entry.id) } },
                         onDelete: { appState.deleteHistoryEntry(id: entry.id) }
                     )
                     if i < reversed.count - 1 {

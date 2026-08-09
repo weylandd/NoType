@@ -35,6 +35,13 @@ struct HomeView: View {
 
                     HomeRecentList(
                         entries: appState.history,
+                        // R18: the shared slot itself, not a per-surface
+                        // copy. `HistoryPopover` passes the same value,
+                        // so a retry started in either surface reads as
+                        // in-flight in both.
+                        retryingEntryID: appState.retryingEntryID,
+                        canRetry: { appState.canRetry(entryID: $0) },
+                        onRetry: { id in Task { await appState.retryEntry(id: id) } },
                         onDelete: { id in appState.deleteHistoryEntry(id: id) }
                     )
                 }
@@ -881,6 +888,12 @@ private struct CalendarGridLayout: Layout {
 
 private struct HomeRecentList: View {
     let entries: [HistoryEntry]
+    /// Threaded straight down from `AppState` rather than re-derived
+    /// here, so this surface and the popover render one shared retry
+    /// state instead of each holding its own (R18 / KTD9).
+    let retryingEntryID: UUID?
+    let canRetry: (UUID) -> Bool
+    let onRetry: (UUID) -> Void
     let onDelete: (UUID) -> Void
 
     var body: some View {
@@ -899,6 +912,9 @@ private struct HomeRecentList: View {
                         HistoryRowView(
                             entry: entry,
                             isNewest: i == 0,
+                            retryingEntryID: retryingEntryID,
+                            canRetry: canRetry(entry.id),
+                            onRetry: { onRetry(entry.id) },
                             onDelete: { onDelete(entry.id) }
                         )
                         if i < reversed.count - 1 {
