@@ -224,6 +224,44 @@ final class ErrorCopyRetentionTests: XCTestCase {
         )
     }
 
+    func test_recoverableKinds_whenNothingRetained_renderThePreRetentionCopyVerbatim() {
+        // `describe`'s contract is that `ifLost` is "the pre-retention
+        // copy, kept verbatim". Nothing pinned that, and the first
+        // version of this change broke it in five of ten branches by
+        // folding the retained-only imperative into `cause`: the lost
+        // arm then rendered it twice ("Reconnect first. Reconnect and
+        // try again — …", "Wait a moment. Wait a moment and try
+        // again."). Every assertion below is the exact string this
+        // catalog shipped before retention existed, so a future edit
+        // that moves an imperative back into `cause` fails here rather
+        // than reaching a user.
+        //
+        // Exact equality on purpose: a `contains` check is what let the
+        // stutter through, because the duplicated sentence still
+        // contained the phrase the old test looked for.
+        let expected: [(label: String, copy: String)] = [
+            ("offline (wrapped)", "NoType needs internet to transcribe. Reconnect and try again — your audio wasn't saved."),
+            ("timed out",         "The transcription request timed out. Check your connection and try again."),
+            ("rate limited",      "Gemini throttled the request. Wait a moment and try again."),
+            ("server error",      "The service returned a server error. Wait a moment and try again."),
+            ("region blocked",    "The Gemini API is restricted in your country. Connect through a VPN and try again."),
+            ("empty response",    "Gemini returned an empty response. Try speaking a bit louder or holding the hotkey longer."),
+            ("decode failure",    "Gemini returned an unexpected format. Try again — if it keeps happening, open an issue on GitHub."),
+            ("truncated",         "Gemini stopped before finishing. Try dictating in shorter bursts.")
+        ]
+        for (label, copy) in expected {
+            guard let error = recoverableErrors.first(where: { $0.label == label })?.error else {
+                XCTFail("No recoverable fixture labelled '\(label)'.")
+                continue
+            }
+            XCTAssertEqual(
+                NoTypeErrorKind.sessionFailure(error, retainedForRetry: false).payload.description,
+                copy,
+                "\(label): the nothing-retained arm must render the pre-retention sentence verbatim."
+            )
+        }
+    }
+
     func test_recoverableKinds_whenNothingRetained_neverPromiseARetry() {
         for (label, error) in recoverableErrors {
             let description = NoTypeErrorKind

@@ -2409,16 +2409,29 @@ enum NoTypeErrorKind {
 
     /// Join a cause sentence to the right consequence clause.
     ///
-    /// `ifLost` is the pre-retention copy, kept verbatim for the case it
-    /// is still true of: a recoverable failure that retained nothing
+    /// `ifLost` is the pre-retention copy, kept **verbatim** for the case
+    /// it is still true of: a recoverable failure that retained nothing
     /// (`retainedPayload` found no matching chunk), where no row is
     /// written and the recording genuinely is gone.
+    ///
+    /// `ifKept` is advice that is only true when there *is* a row to act
+    /// on — "Reconnect first.", "Wait a moment." — and it exists because
+    /// the alternative stutters. Fold that advice into `cause` instead
+    /// and the lost branch renders it twice ("Reconnect first. Reconnect
+    /// and try again — your audio wasn't saved."), because `ifLost` is a
+    /// whole pre-retention sentence that already carries its own
+    /// imperative. Keep `cause` a pure diagnosis; anything imperative
+    /// belongs in one of the two arms, never in both.
     private static func describe(
         _ cause: String,
+        ifKept keptAdvice: String = "",
         ifLost lostAdvice: String,
         retainedForRetry: Bool
     ) -> String {
-        retainedForRetry ? "\(cause) \(retainedRecordingClause)" : "\(cause) \(lostAdvice)"
+        guard retainedForRetry else { return "\(cause) \(lostAdvice)" }
+        return keptAdvice.isEmpty
+            ? "\(cause) \(retainedRecordingClause)"
+            : "\(cause) \(keptAdvice) \(retainedRecordingClause)"
     }
 
     var payload: ErrorPayload {
@@ -2595,7 +2608,8 @@ enum NoTypeErrorKind {
                 return ErrorPayload(
                     title: "Rate limit reached",
                     description: describe(
-                        "Gemini throttled the request. Wait a moment.",
+                        "Gemini throttled the request.",
+                        ifKept: "Wait a moment.",
                         ifLost: "Wait a moment and try again.",
                         retainedForRetry: retainedForRetry
                     ),
@@ -2619,7 +2633,8 @@ enum NoTypeErrorKind {
                 return ErrorPayload(
                     title: "Gemini unavailable in your region",
                     description: describe(
-                        "The Gemini API is restricted in your country. Connect through a VPN first.",
+                        "The Gemini API is restricted in your country.",
+                        ifKept: "Connect through a VPN first.",
                         ifLost: "Connect through a VPN and try again.",
                         retainedForRetry: retainedForRetry
                     ),
@@ -2666,7 +2681,8 @@ enum NoTypeErrorKind {
                 return ErrorPayload(
                     title: "Couldn't read response",
                     description: describe(
-                        "Gemini returned an unexpected format. If it keeps happening, open an issue on GitHub.",
+                        "Gemini returned an unexpected format.",
+                        ifKept: "If it keeps happening, open an issue on GitHub.",
                         ifLost: "Try again — if it keeps happening, open an issue on GitHub.",
                         retainedForRetry: retainedForRetry
                     ),
@@ -2724,7 +2740,8 @@ enum NoTypeErrorKind {
             return ErrorPayload(
                 title: "No internet connection",
                 description: describe(
-                    "NoType needs internet to transcribe. Reconnect first.",
+                    "NoType needs internet to transcribe.",
+                    ifKept: "Reconnect first.",
                     // The single most consequential false statement the
                     // product could make once the recording is retained:
                     // a user who reads it stops looking and re-dictates
@@ -2741,7 +2758,8 @@ enum NoTypeErrorKind {
             return ErrorPayload(
                 title: "Couldn't reach Gemini",
                 description: describe(
-                    "The transcription request timed out. Check your connection.",
+                    "The transcription request timed out.",
+                    ifKept: "Check your connection.",
                     ifLost: "Check your connection and try again.",
                     retainedForRetry: retainedForRetry
                 ),
