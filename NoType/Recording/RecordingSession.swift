@@ -799,14 +799,27 @@ final class RecordingSession {
     /// **The text is empty on purpose, and that emptiness is load-bearing
     /// twice over.** It is what U7 renders as the design's placeholder
     /// bars (R9), and it is how "lifetime stats never counted this
-    /// session" is represented (R15 / KTD7): the success arm cannot
-    /// produce an empty-text row — `stop()` throws `SessionError.noSpeech`
-    /// on an empty stitch before it ever reaches `makeHistoryEntry` — so
-    /// an empty `text` on a broken row means, unambiguously, that nothing
-    /// was pasted and `StatsStore.record` was never called for it. U6's
-    /// retry accounting reads exactly that. A future change that seeds
-    /// this row with the `[…]` markers instead would silently make every
-    /// recovered session double-count.
+    /// session" is represented (R15 / KTD7).
+    ///
+    /// The exact invariant, because U6's accounting rests on it and the
+    /// looser version of this sentence is false: **no row that is both
+    /// `isBroken` and empty-texted can come from the success arm.** Not
+    /// "no empty row" — `stop()`'s `guard !stitched.isEmpty` tests the
+    /// *stitch*, and `finalizeForInsertion` (trailing-punctuation strip)
+    /// and `TextReplacementEngine.apply` both run after it, so a session
+    /// whose transcript normalises away does reach `makeHistoryEntry`
+    /// with `text: ""` and is counted. That row is not broken: it has no
+    /// recoverable failure, so `failedChunkCount == 0`. Conversely every
+    /// session that *is* broken had a chunk fail recoverably, and a
+    /// recoverable failure always stitches the `failureMarker` (`[…]`)
+    /// into the transcript — which survives both passes. So on the
+    /// success arm `isBroken` implies non-empty, and `isBroken` plus
+    /// empty means, unambiguously, that this factory built the row,
+    /// nothing was pasted, and `StatsStore.record` was never called.
+    /// **U6 must gate on `isBroken && text.isEmpty`, not `text.isEmpty`
+    /// alone.** A future change that seeds this row with the `[…]`
+    /// markers instead would silently make every recovered session
+    /// double-count.
     ///
     /// Only meaningful once `stop()` has thrown; calling it on a live
     /// session dates the row from `Date()` instead of release time.

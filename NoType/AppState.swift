@@ -599,12 +599,26 @@ final class AppState {
     }
 
     func refreshHistory() async {
-        history = await historyStore.allEntries()
+        let reloaded = await historyStore.allEntries()
+        // The ids the mirror held going in, read *after* the await so a
+        // row appended while we were suspended is included.
+        //
         // Reloading the mirror is a history mutation like any other: it
         // can drop rows the mirror was holding, and a payload keyed by a
-        // row that no longer exists is unreachable memory (R5). At launch
-        // this is a no-op over an empty holder.
-        retainedAudio.retain(only: liveHistoryIDs)
+        // row that no longer exists is unreachable memory (R5). But the
+        // mirror is optimistic and the disk write is fire-and-forget, so
+        // a row can legitimately be in the mirror and not yet on disk —
+        // `recordBrokenRow` creates exactly that window. Retaining the
+        // union means a reload can only ever release a payload both
+        // views agree is gone. Evicting on the reloaded set alone would
+        // destroy the audio of a row the user is still looking at, and
+        // that audio is the only copy in existence.
+        //
+        // Today this runs once, from `prime()`, over an empty holder;
+        // the union is what makes a second caller safe to add.
+        let mirrored = liveHistoryIDs
+        history = reloaded
+        retainedAudio.retain(only: liveHistoryIDs.union(mirrored))
     }
 
     /// Trailing audio samples from the in-flight recording session, or
@@ -677,13 +691,16 @@ final class AppState {
 
     /// Cap on the in-memory history mirror.
     ///
-    /// Mirrors `HistoryStore.cap`. The two are separate constants because
-    /// the mirror trims optimistically on the main actor while the store
-    /// trims on its own actor during the disk write; they must agree, or
-    /// `liveHistoryIDs` would name a set the store disagrees with and
-    /// `retain(only:)` would drop a payload for a row that is still on
-    /// screen — or keep one for a row that is gone.
-    nonisolated static let historyMirrorCap = 10
+    /// **Derived from `HistoryStore.cap`, not a second literal.** The
+    /// mirror trims optimistically on the main actor while the store
+    /// trims on its own actor during the disk write, and the two must
+    /// agree: `liveHistoryIDs` would otherwise name a set the store
+    /// disagrees with, and `retain(only:)` would drop a payload for a row
+    /// that is still on screen — or keep one for a row that is gone.
+    /// Deriving makes that agreement structural. A hand-synced pair
+    /// cannot be guarded by a test that only asserts today's shared
+    /// value, which is why this is not two constants plus an assertion.
+    nonisolated static let historyMirrorCap = HistoryStore.cap
 
     /// The ids of the rows the mirror currently holds.
     ///
@@ -750,10 +767,13 @@ final class AppState {
     ///   copy and delete but loses retry (R10).
     /// - `recordingState`: R14. A retry during `.recording` or `.sending`
     ///   would put a second Gemini request beside the session's own.
-    /// - `isRetrying`: R13. `take(_:)` already removes the payload for the
-    ///   duration of a run, so this is belt-and-braces against a double
-    ///   tap landing before the take — cheap, and the risk register calls
-    ///   for guarding the entry point rather than trusting the UI.
+    /// - `isRetrying`: R13 — **any** retry is running, not just this row's.
+    ///   `take(_:)` already removes the payload for the duration of a run,
+    ///   so for the retrying row itself this is belt-and-braces against a
+    ///   double tap landing before the take. Its real work is the other
+    ///   rows: `AppState.retryingEntryID` is one slot, so a second
+    ///   concurrent run has nowhere to be recorded. See the instance
+    ///   overload for what passing a per-row predicate here would cost.
     nonisolated static func canRetry(
         recordingState: RecordingState,
         hasRetainedPayload: Bool,
@@ -770,11 +790,20 @@ final class AppState {
     /// instance half of `canRetry(recordingState:hasRetainedPayload:isRetrying:)`,
     /// and the only retry-availability read outside this file — U6 guards
     /// its entry point on it and U7 derives the row's action set from it.
+    ///
+    /// `isRetrying` is `retryingEntryID != nil`, **not** `== entryID`:
+    /// the state is a single slot (KTD9), so it can only ever describe
+    /// one run. Gating per-row would let a tap on row B start a second
+    /// retry that overwrites row A's token — A would render idle while
+    /// its run is still in flight (losing R13's busy state) and two
+    /// Gemini requests would be in the air at once. Blocking every row
+    /// while any retry runs is the reading that matches what the state
+    /// can represent.
     func canRetry(entryID: UUID) -> Bool {
         Self.canRetry(
             recordingState: recordingState,
             hasRetainedPayload: retainedAudio.peek(entryID) != nil,
-            isRetrying: retryingEntryID == entryID
+            isRetrying: retryingEntryID != nil
         )
     }
 

@@ -155,24 +155,55 @@ final class AppStateRetentionTests: XCTestCase {
         XCTAssertNil(store.peek(b.id))
     }
 
-    func test_refreshHistory_dropsPayloadsForRowsNotOnDisk() async {
+    func test_refreshHistory_releasesPayloadsNoViewHolds() async {
         // Reloading the mirror from disk is a mutation like any other: a
-        // payload keyed by a row the reload dropped is unreachable memory.
+        // payload keyed by a row neither the reloaded set nor the mirror
+        // holds is unreachable memory.
         let store = RetainedAudioStore()
         let historyStore = HistoryStore(url: throwawayURL(named: "history.json"))
         let state = makeState(retainedAudio: store, historyStore: historyStore)
 
         let onDisk = entry(text: "", failedChunkCount: 1)
         await historyStore.append(onDisk)
-        let ghost = entry(text: "", failedChunkCount: 1)
-        state.recordHistoryEntry(ghost, retaining: payload())
         state.recordHistoryEntry(onDisk, retaining: payload())
+
+        // A payload whose row appears in neither view.
+        let stray = UUID()
+        store.put(payload(), for: stray)
 
         await state.refreshHistory()
 
         XCTAssertEqual(state.history.map(\.id), [onDisk.id])
-        XCTAssertNotNil(store.peek(onDisk.id))
-        XCTAssertNil(store.peek(ghost.id))
+        XCTAssertNotNil(store.peek(onDisk.id), "a live row keeps its payload")
+        XCTAssertNil(store.peek(stray), "a payload no view can reach is released")
+    }
+
+    func test_refreshHistory_keepsThePayloadOfARowNotYetPersisted() async {
+        // The complement, and the reason `refreshHistory` retains the
+        // UNION rather than the reloaded set alone. `recordBrokenRow`
+        // updates the mirror synchronously and writes to disk
+        // fire-and-forget, so a row is legitimately in the mirror and not
+        // yet in the store for a moment. Evicting on the reloaded set
+        // alone would destroy that row's audio — the only copy that
+        // exists — while the user is still looking at the row.
+        //
+        // The row itself does drop out of the mirror here (the reload is
+        // wholesale, which is pre-existing optimistic-mirror behaviour);
+        // what this pins is that the *audio* is not destroyed on the way.
+        // It is released by the next history mutation, so nothing leaks.
+        let store = RetainedAudioStore()
+        let historyStore = HistoryStore(url: throwawayURL(named: "history.json"))
+        let state = makeState(retainedAudio: store, historyStore: historyStore)
+
+        let pending = entry(text: "", failedChunkCount: 1)
+        state.recordHistoryEntry(pending, retaining: payload())
+
+        await state.refreshHistory()
+
+        XCTAssertNotNil(
+            store.peek(pending.id),
+            "a mirror row whose disk write has not landed keeps its audio"
+        )
     }
 
     // MARK: - Retry availability (R13, R14, AE6)
@@ -231,11 +262,48 @@ final class AppStateRetentionTests: XCTestCase {
         XCTAssertFalse(state.canRetry(entryID: broken.id), "R14 gates the live-payload row too")
     }
 
-    func test_historyMirrorCap_matchesTheStoresCap() {
+    func test_mirrorTrim_andStoreTrim_keepTheSameRows() async {
         // The mirror trims optimistically on the main actor and the store
         // trims during its own disk write. If they disagree, the id set
-        // `retain(only:)` is called with disagrees with what was persisted.
-        XCTAssertEqual(AppState.historyMirrorCap, 10)
+        // `retain(only:)` is called with disagrees with what was
+        // persisted — `retain(only:)` then drops a payload for a row
+        // still on screen, or keeps one for a row that is gone.
+        //
+        // This drives BOTH trims past the cap and compares the survivors,
+        // rather than asserting the two constants share today's value:
+        // `historyMirrorCap` is derived from `HistoryStore.cap`, so a
+        // constant-to-constant assertion could not fail, and one that
+        // pinned a literal would stay green through exactly the drift it
+        // names. What can still break is either trim's *implementation*,
+        // and that is what this exercises.
+        let store = RetainedAudioStore()
+        let historyStore = HistoryStore(url: throwawayURL(named: "history.json"))
+        let state = makeState(retainedAudio: store, historyStore: historyStore)
+
+        var appended: [UUID] = []
+        var persisted: [HistoryEntry] = []
+        for i in 0..<(AppState.historyMirrorCap + 3) {
+            let row = entry(text: "row \(i)")
+            appended.append(row.id)
+            persisted = await historyStore.append(row)
+            state.recordHistoryEntry(row, retaining: payload())
+        }
+
+        XCTAssertEqual(persisted.count, AppState.historyMirrorCap)
+        XCTAssertEqual(
+            state.history.map(\.id),
+            persisted.map(\.id),
+            "the mirror and the store must survive the same rows, in the same order"
+        )
+        // The consequence that actually matters: the holder tracks that
+        // agreed-on set exactly — nothing surviving was released, and
+        // nothing evicted is still held.
+        for id in persisted.map(\.id) {
+            XCTAssertNotNil(store.peek(id), "a surviving row keeps its payload")
+        }
+        for id in appended.prefix(3) {
+            XCTAssertNil(store.peek(id), "an evicted row's payload is released")
+        }
     }
 
     // MARK: - Fixtures

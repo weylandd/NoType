@@ -61,6 +61,19 @@ final class LaunchOrderingTests: XCTestCase {
             types.keys.contains("LoginItemController"),
             "Launch-path discovery is not transitive — LoginItemController is built by AppState.init(). Found: \(types.keys.sorted())"
         )
+        // `AppState.init` declares this one as a DEFAULTED parameter
+        // (`retainedAudio: RetainedAudioStore = RetainedAudioStore()`).
+        // A default argument is evaluated at the call site, so the type is
+        // genuinely on the launch path — but its `RetainedAudioStore(`
+        // text sits in a parameter list, and `constructedTypeNames` only
+        // reads initializer *bodies*. `NoTypeApp.init()` therefore names
+        // it explicitly. This assertion is what stops that being
+        // "simplified" back to the elided form, which would drop the type
+        // off the scan while leaving it on the launch path.
+        XCTAssertTrue(
+            types.keys.contains("RetainedAudioStore"),
+            "Launch-path discovery lost RetainedAudioStore — NoTypeApp.init() must construct it explicitly rather than relying on AppState.init's default argument, which this scan cannot see. Found: \(types.keys.sorted())"
+        )
 
         var violations: [String] = []
         for (typeName, url) in types.sorted(by: { $0.key < $1.key }) {

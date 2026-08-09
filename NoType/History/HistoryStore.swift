@@ -3,7 +3,14 @@ import OSLog
 
 actor HistoryStore {
     private static let log = Logger(subsystem: "app.notype", category: "history")
-    private static let cap = 10
+    /// The rolling window (invariant 1). **Internal, not private, because
+    /// it is the single source of truth for a second trim:**
+    /// `AppState.historyMirrorCap` is derived from it, so the optimistic
+    /// main-actor mirror and this actor's FIFO cannot drift apart. A
+    /// private copy here would leave the mirror hand-synced to a literal,
+    /// which is the drift `AppState.liveHistoryIDs` cannot survive — see
+    /// `AppState.historyMirrorCap`.
+    static let cap = 10
 
     private let url: URL
     private let encoder = JSONFileStorage.makeEncoder()
