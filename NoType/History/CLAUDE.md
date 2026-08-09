@@ -39,8 +39,16 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
     let sourceBundleID: String     // "com.tinyspeck.slackmacgap"
     let timestamp: Date
     let durationSeconds: Double    // press → release; 0 for pre-duration rows (tolerant decode)
+    let failedChunkCount: Int      // chunks pasted as "[…]"; 0 for pre-retry rows (tolerant decode)
+    var isBroken: Bool { failedChunkCount > 0 }   // computed — never encoded
 }
 ```
+
+`failedChunkCount` mirrors `SessionSummary.failedChunkCount`. **Only the count is
+persisted** — the audio those chunks would need for a re-send lives in memory
+(`NoType/Recording/RetainedRecording.swift`) and is deliberately not part of the
+entry. `isBroken` is the single predicate for "this row is broken"; call sites
+read it rather than re-deriving `failedChunkCount > 0`.
 
 Storage: `~/Library/Application Support/NoType/history.json`, top-level array of `HistoryEntry`.
 

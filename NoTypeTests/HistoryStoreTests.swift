@@ -153,6 +153,14 @@ final class HistoryStoreTests: XCTestCase {
             .filter { $0.hasPrefix("history.json.corrupt-") }
         XCTAssertEqual(siblings.count, 1,
             "the unreadable file is preserved as history.json.corrupt-<ts>, not deleted")
+        // The backup must be a *move*, not a copy. A copy would leave the
+        // undecodable bytes at `history.json`, so every subsequent read
+        // would re-fail and mint another `.corrupt-<ts>` sibling forever.
+        // Asserting only "reads empty" + "a backup exists" is green under
+        // that regression — see
+        // `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`.
+        XCTAssertFalse(FileManager.default.fileExists(atPath: tempURL.path),
+            "the corrupt file is renamed aside, not copied — nothing is left at history.json")
     }
 
     // MARK: - Round-trip
