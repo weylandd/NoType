@@ -5,6 +5,7 @@ All communication with the Gemini API. Owns the **cache-friendly request shape**
 ## Files
 
 - `GeminiClient.swift` — `actor` wrapping `URLSession`. Owns `buildRequestBody`, the system prompt + per-call instruction templates, the **app classifier** (`classifyApp`). Public methods: `transcribe`, `transcribeBatch`, `transcribeShort`, `validateKey`, `classifyApp`.
+- `NetworkReachability.swift` — `actor` wrapping a lazily-started `NWPathMonitor`. Answers one narrow question for `sendRequest`'s pre-flight check: *does the system report no network path at all?* Conservative by construction — see "Retry policy" below.
 - `Models.swift` — `Codable` types for the REST schema (`GeminiAPI.Request` / `Response` / `Part` / `UsageMetadata` / `Tool` / `GoogleSearchTool` / …).
 
 Per-app categorization, the categorizer's storage, and the AX search override live in `NoType/Instructions/`. This module owns the network round-trip + parser; categories are not a Gemini concept.
@@ -52,6 +53,42 @@ Then audio `inline_data` parts (1..N for batched calls). The **lite path** drops
 `thinkingLevel: "minimal"`, `top_p: 0.2`, `responseMimeType: "text/plain"`. Don't set `temperature` or `topK`. Don't enable `responseSchema` for transcription.
 
 ## Retry policy
+
+**Before the retry loop: a reachability pre-check.** `sendRequest` asks
+`NetworkReachability` whether the system reports a network path and, when
+it definitively does not, throws without issuing a request. This exists
+because the session's `URLSession` runs `waitsForConnectivity = false` with
+a 30 s request timeout, so an offline request does *not* fail fast — it
+parks for the full 30 s, and with the status-0 retry below one Gemini call
+offline cost ~60.5 s. A `splitRetry` over N chunks multiplied that.
+
+Three things about it are load-bearing:
+
+- **Only `NWPath.Status.unsatisfied` short-circuits.** `.satisfied`,
+  `.requiresConnection`, an unrecognised future case, and "the monitor has
+  not delivered a path yet" all answer *not offline* and let the real
+  request decide. A false offline verdict would break transcription for a
+  user who is online — strictly worse than the wait being removed. The
+  first-delivery rule is not optional: `NWPathMonitor.currentPath` read
+  synchronously right after `start(queue:)` returns `.unsatisfied` on a
+  fully-online machine, so the verdict is driven only by
+  `pathUpdateHandler`. See `NetworkReachability`'s doc-comment.
+- **The throw sits outside the retry loop.** That is *how* a short-circuit
+  avoids being re-issued, without teaching `retryDecision` to distinguish
+  bodies — which would have cost a genuine status-0 *timeout* its retry.
+  Moving the check into `performOnce` would double every short-circuit;
+  `GeminiClientOfflineShortCircuitTests` pins the position.
+- **The error is `GeminiError.offlineShortCircuit`, not a new case.** It is
+  built by the same `wrapURLError` the real `URLSession` failure goes
+  through, so it is byte-identical downstream: `RecordingSession.isTerminal`
+  calls it recoverable, `shouldRetain` retains its audio, and
+  `AppState.payloadForSessionFailure` peels the code back out for the "no
+  internet" HUD. A distinct case would require updating `isTerminal` /
+  `shouldRetain` in lockstep — a stop condition in the retry plan.
+
+The monitor is created on the first Gemini request and never at launch —
+`GeminiClient` is constructed inside `NoTypeApp.init()`, which runs before
+`NSApplicationMain`. See `NoType/UI/CLAUDE.md` "Launch ordering".
 
 Implemented via `retryDecision(for:attempt:)`:
 

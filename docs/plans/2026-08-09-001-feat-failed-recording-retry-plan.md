@@ -187,6 +187,31 @@ stateDiagram-v2
 - Pasting a recovered transcript at the cursor.
 - Changing which errors abort a session versus continue with a gap marker.
 
+**Approved after the fact (2026-08-09), following the maintainer's manual
+smoke test.** The offline smoke run at step 1 of the protocol below took
+~61 s to produce the broken row. Diagnosis found the cause entirely in
+pre-existing code — `git diff origin/main...HEAD -- NoType/Gemini/` is empty
+— but the wait is the first thing a user meets on the path this plan
+built, so the maintainer, acting as product owner, approved two follow-on
+changes that were **not** in the plan's original scope:
+
+1. A reachability pre-check in `GeminiClient.sendRequest` so a request
+   issued with no network path fails immediately instead of burning the
+   30 s request timeout (twice, with the status-0 retry). Conservative by
+   construction — only a definitively `.unsatisfied` path short-circuits.
+2. A bound in `RecordingSession.splitRetry`: once the batched call and the
+   first split chunk have both failed in the network class, the remaining
+   chunks are recorded as markers **with their audio retained** rather than
+   dispatched into the same wall.
+
+Both were reviewed against this plan's stop conditions and clear them:
+neither touches `isTerminal(_:)` / `shouldRetain(_:)`, neither changes
+which errors abort a session versus continue with a gap marker, and neither
+introduces a second concurrent Gemini request. The second is explicitly
+constrained so an undispatched chunk is indistinguishable from a
+dispatched-and-failed one — same marker, same failure count, same retained
+audio — because dropping its audio would invert R1's whole purpose.
+
 #### Deferred to Follow-Up Work
 
 - The in-memory AAC encoding debt (`docs/solutions/documentation-gaps/in-memory-aac-encoding-2026-05-15.md`). This work holds encoded blobs longer than before, which makes the temp-file round-trip slightly more conspicuous, but does not depend on fixing it.

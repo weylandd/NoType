@@ -52,6 +52,22 @@ actor GeminiClient {
             case .http(let s, _) where s == 403:    "Gemini API key is not authorized for this model."
             case .http(let s, _) where s == 429:    "Gemini rate limit reached. Try again in a moment."
             case .http(let s, _) where s >= 500:    "Gemini is having trouble (HTTP \(s))."
+            // Status 0 carrying a wrapped `URLError` — the offline /
+            // timed-out / DNS-failed class. Without this arm it falls into
+            // the generic branch below and renders as "Gemini error 0.",
+            // which discards the one fact worth logging: *which* network
+            // failure it was. `RecordingSession` logs this string at
+            // `.public` on every recoverable failure, so that loss made
+            // offline, timeout and DNS indistinguishable in Console.
+            //
+            // Deliberately gated on the `URLError code=` prefix rather than
+            // on `s == 0` alone, so it is provably log-only: the only other
+            // producer of a status-0 error is `validateKey`'s
+            // "no HTTPURLResponse" body, which has no prefix, keeps the
+            // generic rendering, and is the one status-0 shape that reaches
+            // a user-facing surface (`GeminiKeyRow.errorMessage`).
+            case .http(let s, let body) where s == 0 && body.hasPrefix(Self.urlErrorBodyPrefix):
+                "Gemini network failure — \(body)"
             case .http(let s, let body):
                 Self.descriptionForGenericHTTP(status: s, body: body)
             case .decoding:                         "Couldn't read Gemini's response."
@@ -59,6 +75,43 @@ actor GeminiClient {
             case .blocked(let reason):              "Gemini blocked the request: \(reason)."
             case .truncated:                        "Gemini cut the transcription short."
             }
+        }
+
+        /// Prefix of the `body` every wrapped `URLError` carries. Read by
+        /// `NetworkErrorTranslator.extractURLErrorCode` (which recovers the
+        /// numeric code for the HUD) and by the status-0 arm of
+        /// `errorDescription` above. Declared once so the producer
+        /// (`wrapURLError`) and the two consumers cannot drift.
+        static let urlErrorBodyPrefix = "URLError code="
+
+        /// The single place a `URLError` becomes a `GeminiError`.
+        ///
+        /// Status 0 is the project's "this never reached Gemini" marker:
+        /// `RecordingSession.isTerminal` calls it recoverable,
+        /// `RecordingSession.shouldRetain` retains its audio, and
+        /// `AppState.payloadForSessionFailure` peels the code back out of
+        /// the body for the offline / timed-out HUDs. Both producers — the
+        /// real `URLSession` failure in `performOnce` and the pre-flight
+        /// short-circuit in `sendRequest` — go through here so a
+        /// short-circuited request is byte-for-byte indistinguishable
+        /// downstream from the 30-second timeout it replaces.
+        static func wrapURLError(_ urlError: URLError) -> GeminiError {
+            .http(
+                status: 0,
+                body: "\(urlErrorBodyPrefix)\(urlError.code.rawValue): \(urlError.localizedDescription)"
+            )
+        }
+
+        /// The error thrown when the pre-flight reachability check reports
+        /// no network path. Shaped exactly like the `URLError`
+        /// `URLSession` would have produced 30 seconds later, so every
+        /// downstream classifier — `isTerminal`, `shouldRetain`, the
+        /// retention path, `payloadForURLErrorCode` — behaves identically.
+        /// Introducing a distinct error case here instead would require
+        /// updating `isTerminal` / `shouldRetain` in lockstep, which the
+        /// retry plan names as a stop condition.
+        static var offlineShortCircuit: GeminiError {
+            wrapURLError(URLError(.notConnectedToInternet))
         }
 
         /// `true` when Google's response body indicates the caller's
@@ -159,6 +212,27 @@ actor GeminiClient {
     /// successful response. Untouched on errors (so the value
     /// from the last good call survives a subsequent failure).
     private(set) var lastUsage: GeminiAPI.UsageMetadata?
+
+    /// Pre-flight "is there a network path at all?" probe, created on the
+    /// first request and never before.
+    ///
+    /// **Deliberately not built in `init()`.** `GeminiClient` is one of the
+    /// types `NoTypeApp.init()` constructs, which runs before
+    /// `NSApplicationMain` has started the application; starting an
+    /// `NWPathMonitor` there would schedule background delivery inside that
+    /// window. See `NoType/UI/CLAUDE.md` "Launch ordering". Being reached
+    /// only from `sendRequest` also keeps it invisible to
+    /// `LaunchPathScanner`, which walks initializers and the methods
+    /// reachable from them — the guard and the placement agree rather than
+    /// the placement merely evading the guard.
+    private var reachability: NetworkReachability?
+
+    private func reachabilityProbe() -> NetworkReachability {
+        if let existing = reachability { return existing }
+        let probe = NetworkReachability()
+        reachability = probe
+        return probe
+    }
 
     init() {
         let cfg = URLSessionConfiguration.default
@@ -726,6 +800,16 @@ actor GeminiClient {
     /// - HTTP 4xx other than 429: no retry; fail immediately.
     /// - `GeminiError.blocked` / `.empty` / `.decoding` / `.missingKey`:
     ///   non-retryable.
+    ///
+    /// Before any of that, a pre-flight reachability check short-circuits
+    /// the call when the system reports no network path. **That throw sits
+    /// outside the retry loop below on purpose** — it is how a
+    /// short-circuited request avoids being re-issued without touching
+    /// `retryDecision`, so a genuine status-0 *timeout* (which reaches the
+    /// loop the normal way, through `performOnce`) keeps its one retry.
+    /// Moving the check into `performOnce` would silently double every
+    /// short-circuit; `GeminiClientOfflineShortCircuitTests` pins the
+    /// position.
     private func sendRequest(
         audios: [(data: Data, mimeType: String)],
         context: ContextSnapshot,
@@ -739,6 +823,19 @@ actor GeminiClient {
     ) async throws -> (text: String, tokens: TokenUsage) {
         let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedKey.isEmpty else { throw GeminiError.missingKey }
+
+        // Pre-flight: fail immediately when the system reports no network
+        // path, instead of parking on `timeoutIntervalForRequest` for 30 s
+        // (`waitsForConnectivity` is off, so `URLSession` does not fail
+        // fast on its own). Conservative by construction — only a
+        // definitively `.unsatisfied` path short-circuits; see
+        // `NetworkReachability`. Deliberately before the request body is
+        // built and before the retry loop.
+        if await reachabilityProbe().isDefinitelyOffline() {
+            let offline = GeminiError.offlineShortCircuit
+            Self.log.error("\(logID) no network path — failing without issuing a request: \(offline.localizedDescription, privacy: .public)")
+            throw offline
+        }
 
         let body: GeminiAPI.Request
         if useLitePrompt {
@@ -827,10 +924,7 @@ actor GeminiClient {
             // surface. The URLError code is embedded in the body so
             // `AppState.payloadForSessionFailure` can recover it for
             // the "no internet" / "timed out" HUDs.
-            throw GeminiError.http(
-                status: 0,
-                body: "URLError code=\(urlError.code.rawValue): \(urlError.localizedDescription)"
-            )
+            throw GeminiError.wrapURLError(urlError)
         }
         let networkMs = Int(Date().timeIntervalSince(networkStart) * 1000)
 

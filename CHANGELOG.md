@@ -25,6 +25,18 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
   incomplete recording still shows in your history but no longer offers a
   retry. The text you already had pasted is never touched.
 
+### Fixed
+- **Dictating with no internet no longer leaves you waiting a minute for
+  the error.** NoType used to sit on each attempt for the full 30-second
+  network timeout, then try once more — so a single failed dictation could
+  take a minute or more before it told you anything, and a longer one
+  several minutes. It now checks whether the machine has any network
+  connection at all before sending, and fails immediately when it doesn't.
+  The check is deliberately cautious: anything short of "the system says
+  there is no connection" — including a VPN that still needs to dial up —
+  sends the request as usual, so being online is never mistaken for being
+  offline.
+
 ### Internal
 - **Found the actual cause of the macOS 26 crash** ([#82](https://github.com/weylandd/NoType/issues/82)), and corrected the documentation that named the wrong one. NoType raises an internal Objective-C error inside a background job; macOS absorbs it and keeps running, but the concurrency runtime is left corrupted and the app falls over shortly afterwards at an unrelated click. The three previous incidents — a timeline view, a hover handler, a button — were all innocent bystanders, which is why fixing each of them only moved the crash. The mechanism was reproduced locally rather than inferred.
 - Two things this retires: the start-up rework shipped in 0.1.13-rc1 was tested and **did not** fix the crash (it remains correct for its own reasons), and the README no longer suggests updating macOS as a workaround — the trigger is in NoType, not in the OS.
