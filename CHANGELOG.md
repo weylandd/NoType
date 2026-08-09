@@ -36,6 +36,16 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
   there is no connection" — including a VPN that still needs to dial up —
   sends the request as usual, so being online is never mistaken for being
   offline.
+- **A dictation that fails because the connection is dead no longer works
+  through every part one at a time.** When both the first attempt and the
+  retry of the first part fail for connection reasons, NoType stops sending
+  the rest rather than waiting out a 30-second timeout on each — which on a
+  long dictation could run to several minutes. This matters most for a
+  connection that looks alive but isn't (a hotel Wi-Fi sign-in page, a
+  dropped VPN), where the check above deliberately doesn't step in. The
+  parts it skips are still kept and still retryable: they show as gaps in
+  the row and their audio is held exactly as if it had been sent and
+  failed, so one tap re-sends all of them once you're back online.
 
 ### Internal
 - **Found the actual cause of the macOS 26 crash** ([#82](https://github.com/weylandd/NoType/issues/82)), and corrected the documentation that named the wrong one. NoType raises an internal Objective-C error inside a background job; macOS absorbs it and keeps running, but the concurrency runtime is left corrupted and the app falls over shortly afterwards at an unrelated click. The three previous incidents — a timeline view, a hover handler, a button — were all innocent bystanders, which is why fixing each of them only moved the crash. The mechanism was reproduced locally rather than inferred.
