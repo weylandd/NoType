@@ -1056,7 +1056,15 @@ final class AppState {
             // `failure == nil` means every chunk answered with nothing (an
             // empty response, or one the hallucination gate dropped) — the
             // no-speech HUD is the honest reading of that.
-            surfaceError(.sessionFailure(failure ?? RecordingSession.SessionError.noSpeech))
+            //
+            // `retainedForRetry: true` is a statement about this exit, not
+            // about the error: the `put` two lines up handed the audio
+            // back and the `guard` above proved the row still exists, so
+            // the recording is retryable again the moment this HUD shows.
+            surfaceError(.sessionFailure(
+                failure ?? RecordingSession.SessionError.noSpeech,
+                retainedForRetry: true
+            ))
             await recordRetryTokens(tokens, model: payload.model, for: row)
             return
         }
@@ -1668,11 +1676,19 @@ final class AppState {
                 // now leaves a row behind instead of evaporating with the
                 // toast. `recordBrokenRow` is a no-op when nothing was
                 // retained, which is the terminal case (AE1).
-                self.recordBrokenRow(
+                //
+                // Its return value is the HUD's consequence clause: a row
+                // means the recording is retryable and the copy says so;
+                // `nil` means nothing was kept and the pre-retention copy
+                // is still the true one. Reading the outcome here rather
+                // than re-classifying `error` keeps the two in lockstep —
+                // a retainable error that ended up retaining no chunk
+                // must not advertise a retry the user has no row for.
+                let brokenRow = self.recordBrokenRow(
                     retained: session.summary.retained,
                     entry: session.brokenHistoryEntry()
                 )
-                self.surfaceError(.sessionFailure(error))
+                self.surfaceError(.sessionFailure(error, retainedForRetry: brokenRow != nil))
             }
         }
     }
@@ -2343,13 +2359,67 @@ enum NoTypeErrorKind {
     case missingAPIKey
     case vadLoadFailed
     case sessionStartFailed(Error)
-    case sessionFailure(Error)
+    /// A session — or a retry run — that produced no usable text.
+    ///
+    /// `retainedForRetry` is **the outcome, not the error class**, and
+    /// the call site is the only place that knows it: `true` means the
+    /// recording survived into a history row the user can retry (R6),
+    /// `false` means nothing was kept and the recording really is gone.
+    /// It is deliberately not derived from `err` here —
+    /// `RecordingSession.shouldRetain(_:)` says which errors are
+    /// *eligible* for retention, but a session that retained no chunk
+    /// still writes no row, and `AppState.recordBrokenRow` returning
+    /// `nil` is what settles it. Passing eligibility instead of outcome
+    /// would promise the user a retry that isn't there.
+    case sessionFailure(Error, retainedForRetry: Bool)
     /// Session finished and pasted, but one or more chunks' Gemini
     /// calls failed recoverably and were replaced with the marker
     /// (`RecordingSession.failureMarker`) in the pasted text. Neutral
     /// severity — this is a heads-up, not a failure, and the user
     /// already has most of their transcription.
+    ///
+    /// No companion flag here: the summary already carries `retained`,
+    /// which is the same value `AppState.finalizeRecording` handed to
+    /// `recordHistoryEntry(_:retaining:)` a few lines before surfacing
+    /// this HUD, so the row's retryability is readable from the payload
+    /// itself.
     case partialTranscription(summary: RecordingSession.SessionSummary)
+
+    /// The consequence clause a recoverable-class failure ends with when
+    /// the recording survived into a retryable history row (R6).
+    ///
+    /// It states where the recording is and stops there. The row itself
+    /// carries the retry button (`HistoryRowView`'s broken state), so the
+    /// HUD's job is only to keep the user looking — the sentence this
+    /// replaced ("your audio wasn't saved") sent them away from a
+    /// recording NoType was holding for them.
+    ///
+    /// Internal, not private, so `ErrorCopyRetentionTests` can assert
+    /// every recoverable kind ends with *this* clause rather than
+    /// re-spelling the literal once per kind.
+    static let retainedRecordingClause =
+        "The recording is kept in your history, where you can retry it."
+
+    /// Same fact for a session that *did* paste, with `[…]` markers where
+    /// chunks dropped. Worded separately because the retry's effect is
+    /// different: it fills the gaps in the **history row**, never in the
+    /// text already pasted into the target app (plan KD5).
+    static let retainedGapClause =
+        "The recording is kept in your history, where a retry can fill the gaps."
+
+    /// Join a cause sentence to the right consequence clause.
+    ///
+    /// `ifLost` is the pre-retention copy, kept verbatim for the case it
+    /// is still true of: a recoverable failure that retained nothing
+    /// (`retainedPayload` found no matching chunk), where no row is
+    /// written and the recording genuinely is gone.
+    private static func describe(
+        _ cause: String,
+        ifLost lostAdvice: String,
+        retainedForRetry: Bool
+    ) -> String {
+        retainedForRetry ? "\(cause) \(retainedRecordingClause)" : "\(cause) \(lostAdvice)"
+    }
 
     var payload: ErrorPayload {
         switch self {
@@ -2379,20 +2449,29 @@ enum NoTypeErrorKind {
                 severity: .danger,
                 iconSymbol: "mic.slash.fill"
             )
-        case .sessionFailure(let err):
-            return Self.payloadForSessionFailure(err)
+        case .sessionFailure(let err, let retainedForRetry):
+            return Self.payloadForSessionFailure(err, retainedForRetry: retainedForRetry)
         case .partialTranscription(let summary):
             let failed = summary.failedChunkCount
             let total = summary.dispatchedChunkCount
-            let body: String
-            if failed == 1 {
-                body = "1 of \(total) chunks didn't transcribe — \(RecordingSession.failureMarker) was inserted in its place. Re-dictate just that part if you need it."
+            let marker = RecordingSession.failureMarker
+            let cause = failed == 1
+                ? "1 of \(total) chunks didn't transcribe — \(marker) was inserted in its place."
+                : "\(failed) of \(total) chunks didn't transcribe — \(marker) was inserted in their place."
+            // Non-nil `retained` is exactly what gave the row its retry
+            // action; without it the row is written but dead, and
+            // re-dictating is still the only way back.
+            let consequence: String
+            if summary.retained != nil {
+                consequence = Self.retainedGapClause
             } else {
-                body = "\(failed) of \(total) chunks didn't transcribe — \(RecordingSession.failureMarker) was inserted in their place. Re-dictate the missing parts if you need them."
+                consequence = failed == 1
+                    ? "Re-dictate just that part if you need it."
+                    : "Re-dictate the missing parts if you need them."
             }
             return ErrorPayload(
                 title: "Pasted with gaps",
-                description: body,
+                description: "\(cause) \(consequence)",
                 code: "INFO_PARTIAL",
                 severity: .neutral,
                 iconSymbol: "ellipsis.bubble"
@@ -2456,9 +2535,27 @@ enum NoTypeErrorKind {
     /// Translate any error thrown out of `RecordingSession.stop()` into
     /// a user-facing payload. We special-case the network and Gemini
     /// HTTP error codes — they're the most common and most actionable.
-    private static func payloadForSessionFailure(_ err: Error) -> ErrorPayload {
+    ///
+    /// `retainedForRetry` only ever changes the **consequence** clause;
+    /// every branch keeps naming its own cause, so offline, timed out,
+    /// throttled, server-error and region-blocked stay five distinct
+    /// messages — the broken history row deliberately doesn't name the
+    /// reason (plan R7), so this is the only place the user learns it.
+    /// The terminal branches (missing key, rejected key, content block,
+    /// no speech, and the unrecognised catch-all) ignore it entirely —
+    /// those sessions retain nothing by
+    /// `RecordingSession.shouldRetain(_:)`, so their copy must not start
+    /// advertising a retry that will not be there.
+    private static func payloadForSessionFailure(
+        _ err: Error,
+        retainedForRetry: Bool
+    ) -> ErrorPayload {
         if let urlError = err as? URLError {
-            return payloadForURLErrorCode(urlError.code.rawValue, fallbackDescription: urlError.localizedDescription)
+            return payloadForURLErrorCode(
+                urlError.code.rawValue,
+                fallbackDescription: urlError.localizedDescription,
+                retainedForRetry: retainedForRetry
+            )
         }
         // `GeminiClient.performOnce` wraps unhandled URLErrors as
         // `GeminiError.http(0, "URLError code=N: …")`. Pre-PR-#39
@@ -2470,7 +2567,11 @@ enum NoTypeErrorKind {
         // URLError-class HUDs as the native-URLError branch above.
         if let g = err as? GeminiClient.GeminiError, case let .http(0, body) = g,
            let code = NetworkErrorTranslator.extractURLErrorCode(from: body) {
-            return payloadForURLErrorCode(code, fallbackDescription: body)
+            return payloadForURLErrorCode(
+                code,
+                fallbackDescription: body,
+                retainedForRetry: retainedForRetry
+            )
         }
         if let g = err as? GeminiClient.GeminiError {
             switch g {
@@ -2493,7 +2594,11 @@ enum NoTypeErrorKind {
             case .http(let s, _) where s == 429:
                 return ErrorPayload(
                     title: "Rate limit reached",
-                    description: "Gemini throttled the request. Wait a moment and try again.",
+                    description: describe(
+                        "Gemini throttled the request. Wait a moment.",
+                        ifLost: "Wait a moment and try again.",
+                        retainedForRetry: retainedForRetry
+                    ),
                     code: "ERR_RATE_LIMIT · 429",
                     severity: .warning,
                     iconSymbol: "hourglass"
@@ -2501,7 +2606,11 @@ enum NoTypeErrorKind {
             case .http(let s, _) where s >= 500:
                 return ErrorPayload(
                     title: "Gemini is having trouble",
-                    description: "The service returned a server error. Wait a moment and try again.",
+                    description: describe(
+                        "The service returned a server error.",
+                        ifLost: "Wait a moment and try again.",
+                        retainedForRetry: retainedForRetry
+                    ),
                     code: "ERR_GEMINI · \(s)",
                     severity: .danger,
                     iconSymbol: "exclamationmark.triangle.fill"
@@ -2509,18 +2618,26 @@ enum NoTypeErrorKind {
             case .http(_, let body) where GeminiClient.GeminiError.isRegionBlocked(body: body):
                 return ErrorPayload(
                     title: "Gemini unavailable in your region",
-                    description: "The Gemini API is restricted in your country. Connect through a VPN and try again.",
+                    description: describe(
+                        "The Gemini API is restricted in your country. Connect through a VPN first.",
+                        ifLost: "Connect through a VPN and try again.",
+                        retainedForRetry: retainedForRetry
+                    ),
                     code: "ERR_REGION · 400",
                     severity: .danger,
                     iconSymbol: "exclamationmark.shield.fill"
                 )
             case .http(let s, let body):
                 let googleMsg = GeminiClient.GeminiError.sanitizedGoogleMessage(body: body)
-                let description = googleMsg.map { "HTTP \(s): \($0). Try again, or check Console for details." }
-                    ?? "Unexpected response (HTTP \(s)). Try again, or check Console for details."
+                let cause = googleMsg.map { "HTTP \(s): \($0)." }
+                    ?? "Unexpected response (HTTP \(s))."
                 return ErrorPayload(
                     title: "Gemini rejected the request",
-                    description: description,
+                    description: describe(
+                        cause,
+                        ifLost: "Try again, or check Console for details.",
+                        retainedForRetry: retainedForRetry
+                    ),
                     code: "ERR_GEMINI · \(s)",
                     severity: .danger,
                     iconSymbol: "exclamationmark.triangle.fill"
@@ -2536,7 +2653,11 @@ enum NoTypeErrorKind {
             case .empty:
                 return ErrorPayload(
                     title: "Nothing to transcribe",
-                    description: "Gemini returned an empty response. Try speaking a bit louder or holding the hotkey longer.",
+                    description: describe(
+                        "Gemini returned an empty response.",
+                        ifLost: "Try speaking a bit louder or holding the hotkey longer.",
+                        retainedForRetry: retainedForRetry
+                    ),
                     code: "ERR_EMPTY",
                     severity: .neutral,
                     iconSymbol: "waveform.slash"
@@ -2544,7 +2665,11 @@ enum NoTypeErrorKind {
             case .decoding:
                 return ErrorPayload(
                     title: "Couldn't read response",
-                    description: "Gemini returned an unexpected format. Try again — if it keeps happening, open an issue on GitHub.",
+                    description: describe(
+                        "Gemini returned an unexpected format. If it keeps happening, open an issue on GitHub.",
+                        ifLost: "Try again — if it keeps happening, open an issue on GitHub.",
+                        retainedForRetry: retainedForRetry
+                    ),
                     code: "ERR_DECODE",
                     severity: .danger,
                     iconSymbol: "exclamationmark.triangle.fill"
@@ -2556,7 +2681,11 @@ enum NoTypeErrorKind {
                 // gap and never surfaces here.
                 return ErrorPayload(
                     title: "Transcription cut short",
-                    description: "Gemini stopped before finishing. Try dictating in shorter bursts.",
+                    description: describe(
+                        "Gemini stopped before finishing.",
+                        ifLost: "Try dictating in shorter bursts.",
+                        retainedForRetry: retainedForRetry
+                    ),
                     code: "ERR_TRUNCATED",
                     severity: .neutral,
                     iconSymbol: "text.badge.xmark"
@@ -2584,13 +2713,26 @@ enum NoTypeErrorKind {
     /// code value. Shared between the native-`URLError` branch and the
     /// `GeminiError.http(0, "URLError code=N: …")` re-extraction
     /// branch so both paths render the same offline / timeout HUDs.
-    private static func payloadForURLErrorCode(_ rawCode: Int, fallbackDescription: String) -> ErrorPayload {
+    private static func payloadForURLErrorCode(
+        _ rawCode: Int,
+        fallbackDescription: String,
+        retainedForRetry: Bool
+    ) -> ErrorPayload {
         let code = URLError.Code(rawValue: rawCode)
         switch code {
         case .notConnectedToInternet, .networkConnectionLost:
             return ErrorPayload(
                 title: "No internet connection",
-                description: "NoType needs internet to transcribe. Reconnect and try again — your audio wasn't saved.",
+                description: describe(
+                    "NoType needs internet to transcribe. Reconnect first.",
+                    // The single most consequential false statement the
+                    // product could make once the recording is retained:
+                    // a user who reads it stops looking and re-dictates
+                    // something NoType is still holding. It survives only
+                    // for the case where it is still true — nothing kept.
+                    ifLost: "Reconnect and try again — your audio wasn't saved.",
+                    retainedForRetry: retainedForRetry
+                ),
                 code: "ERR_OFFLINE",
                 severity: .danger,
                 iconSymbol: "wifi.slash"
@@ -2598,15 +2740,27 @@ enum NoTypeErrorKind {
         case .timedOut:
             return ErrorPayload(
                 title: "Couldn't reach Gemini",
-                description: "The transcription request timed out. Check your connection and try again.",
+                description: describe(
+                    "The transcription request timed out. Check your connection.",
+                    ifLost: "Check your connection and try again.",
+                    retainedForRetry: retainedForRetry
+                ),
                 code: "ERR_NET_TIMEOUT",
                 severity: .danger,
                 iconSymbol: "exclamationmark.triangle.fill"
             )
         default:
+            // `fallbackDescription` is the OS's own sentence for this
+            // URLError code (or the wrapped body) — a cause with no
+            // consequence claim of its own, so the retained clause is
+            // appended and the pre-retention copy is the bare sentence.
+            // Not routed through `describe` because there is no distinct
+            // "if lost" advice to pass it.
             return ErrorPayload(
                 title: "Network error",
-                description: fallbackDescription,
+                description: retainedForRetry
+                    ? "\(fallbackDescription) \(retainedRecordingClause)"
+                    : fallbackDescription,
                 code: "ERR_NET_\(rawCode)",
                 severity: .danger,
                 iconSymbol: "wifi.exclamationmark"

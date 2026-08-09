@@ -17,7 +17,11 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
   gone; a dictation where nothing made it through disappeared entirely.
   Now that recording appears in your history marked as incomplete, and one
   tap re-sends just the parts that failed — filling the gaps in place. If
-  only some of them come back, the rest stay retryable.
+  only some of them come back, the rest stay retryable. The failure notice
+  says so too: it still tells you what went wrong — no internet, timed out,
+  Gemini busy — but now ends by telling you the recording is in your
+  history rather than that your audio wasn't saved. When nothing could be
+  kept, it still says so plainly.
 - The audio for those failed parts is held **in memory only**, and never
   written to disk. It's released as soon as the retry succeeds, when you
   delete the row, when the row falls out of the last-10 history window, or
