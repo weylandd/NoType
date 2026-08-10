@@ -185,7 +185,7 @@ round repeating the superseded plan's failure.
 | | interceptor **silent** | interceptor **logged an `OBJC THROW`** |
 |---|---|---|
 | **no crash** | Plan confirmed → §5. | **AE3** — issue still closes, *and* a thrower survives that this plan did not enumerate. Name it and extend the audit in `NoType/UI/CLAUDE.md`. |
-| **crash** | **AE4 — THIS PLAN IS WRONG.** See below. | **R3** — completed round, negative result. The log names the next target. Do not retry the same round in variations. |
+| **crash** | **AE4 — the interceptor missed a throw.** See below. (**Amended 2026-07-30**; this cell read *"THIS PLAN IS WRONG."*) | **R3** — completed round, negative result. The log names the next target. Do not retry the same round in variations. |
 
 > **ID note.** The plan's summary table (`…-plan.md` §26) once put the `AE4`
 > label on the crash + *logged* cell, disagreeing with its own normative `AE4`
@@ -194,19 +194,62 @@ round repeating the superseded plan's failure.
 > table has since been corrected to match this one; all four plan locations now
 > agree. The four branches themselves were never in dispute.
 
-**Crash + silent interceptor is the falsifier.** Handle it in this order:
+**Crash + silent interceptor — amended 2026-07-30.** This cell used to
+read *"THIS PLAN IS WRONG"*: armed-and-silent was taken to mean no ObjC
+exception was raised, therefore a swallowed exception did not explain the
+crash, therefore reopen diagnosis from the `.ips`. **That inference is
+unsound and must not be acted on** — see *"Why the old reading was
+retired"* below. Handle the quadrant in this order:
 
-1. **Check the R4a armed line first.** It separates *"the interceptor
-   never installed"* from *"it installed and nothing threw"*.
+1. **Check the R4a armed line first** — unchanged, and still the first
+   move. It separates *"the interceptor never installed"* from *"it
+   installed"*.
 2. **Armed line absent** → the round is **void**, not negative. The
    interceptor never installed. Re-run before drawing any conclusion.
-3. **Armed line present, no `OBJC THROW`** → no Objective-C exception was
-   raised in that process, so a swallowed exception does **not** explain
-   that machine's crash. **This plan's central premise is wrong.** Record
-   it as such on #82, treat the containment shapes (KTD5) as inapplicable
-   rather than as the next move, and **reopen diagnosis from the `.ips`**.
-   **Do not add a fifth suspect** — enumerating one more thrower is the
-   exact failure mode that cost the superseded plan three months.
+3. **Armed line present, no `OBJC THROW`** → the interceptor **missed a
+   throw that independently happened**. It is a failure of the
+   instrument, not evidence about the mechanism. Two live explanations,
+   and the next round chases these rather than a new suspect:
+   - **The throw bypassed `objc_setExceptionPreprocessor`** —
+     `objc_exception_rethrow` (a `@throw;` re-raised from inside a
+     `@catch` does not run the preprocessor), or a non-ObjC C++ throw.
+   - **The log record rolled over.** The unified log's persistent store
+     is a size-bounded ring. Check the `--last` window in §1 against how
+     long ago the crash actually happened, and whether the copy had been
+     running since before that window opened.
+
+   Record it on #82 as a **missed instrument**, not as a premise-level
+   negative. **Do not add a fifth suspect** — enumerating one more
+   thrower is the exact failure mode that cost the superseded plan three
+   months — and **do not remove the reader at the crash site** either,
+   which is what failed three times before that. Both warnings are
+   unchanged by the amendment; they are the reason this table exists.
+
+**Why the old reading was retired.** A field crash report from tester A
+on **`0.1.13-rc2` (build 17, macOS 26.2 25C56, 2026-07-30)** carries the
+`HIServices SOME_OTHER_THREAD_SWALLOWED_AT_LEAST_ONE_EXCEPTION` marker
+thread — launch `17:58:56.53`, marker `17:59:01.716` (T+5.2 s), crash
+`17:59:03.04` (1.3 s after the swallow) — with the family's exact
+signature: SIGSEGV `KERN_INVALID_ADDRESS` at `0x2`, `swift_getObjectType`
+← `swift_task_isMainExecutorImpl` ← `swift_task_isCurrentExecutorWithFlagsImpl`,
+faulting on a mouse-down through `NSGestureRecognizer` → SwiftUI
+`FullGestureCallbacks`. So an ObjC exception **was** swallowed, on a
+build that already carried the interceptor (shipped in `643ad17`; rc2 is
+`59ff2a7`). The chain was intact when it happened: the marker thread's
+name embeds a hash HIServices computes from
+`NSException.callStackReturnAddresses`, a fresh `NSException` carries
+**zero** of those until Foundation's preprocessor populates them, and an
+empty array aborts HIToolbox at `HIExceptions.mm:45` — which did not
+happen. And the interceptor is not displaced:
+`NoTypeTests/ExceptionBreadcrumbDisplacementProbeTests.swift` force-loads
+every framework the app pulls in after launch plus the host's real launch
+sequence and finds the preprocessor head still ours after each, and it is
+sentinel-validated (it correctly reports a known decoy head), so that is
+a measurement rather than blindness. **The plan's central premise is
+therefore corroborated twice, independently — the local probe and this
+report — not weakened.** What is still *not* known is which of NoType's
+calls throws: the suspects remain ranked, none is confirmed, and the
+crash is not fixed.
 
 One more branch worth naming: an `OBJC THROW` record naming a **CoreML /
 Espresso** exception re-arms Step 6 immediately, and **both** SileroVAD
