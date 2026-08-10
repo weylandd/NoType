@@ -1,7 +1,7 @@
 ---
 title: The macOS 26 executor-identity crash family is a swallowed ObjC exception, not a bad call site
 date: 2026-07-25
-last_updated: 2026-07-27
+last_updated: 2026-07-30
 category: runtime-errors
 module: UI
 problem_type: best_practice
@@ -13,10 +13,10 @@ applies_when:
   - "Deciding whether a per-call-site isolation annotation will actually end a crash or only relocate it"
   - "Any AppKit app crash whose faulting frame looks unrelated to anything the app recently changed"
 symptoms:
-  - "EXC_BAD_ACCESS (SIGSEGV) at a small integer address — 0x1e, 0x1, and 0x0 observed across the three incidents"
+  - "EXC_BAD_ACCESS (SIGSEGV) at a small integer address — 0x1e, 0x1, 0x0 and 0x2 observed across the four incidents"
   - "Faults in swift_getObjectType — or one frame deeper in objc_opt_class — reached via SerialExecutorRef::isMainExecutor() <- swift_task_isCurrentExecutorWithFlagsImpl"
   - "A parked background thread in the same report whose stack contains SOME_OTHER_THREAD_SWALLOWED_AT_LEAST_ONE_EXCEPTION"
-  - "The frame below the runtime differs every time: a TimelineView closure, an .onHover closure, then SwiftUI's own _ButtonGesture"
+  - "The frame below the runtime differs every time: a TimelineView closure, an .onHover closure, SwiftUI's own _ButtonGesture, then View.pressEvents under FullGestureCallbacks"
   - "Each per-call-site fix held at that site, and the crash reappeared at an unrelated site that still performed the check"
 root_cause: logic_error
 tags: [macos-26, concurrency, mainactor, executor, objc-exception, crash-family, diagnosis]
@@ -29,13 +29,16 @@ related_components: [UI, Onboarding, Recording, NoTypeApp]
 
 ## Context
 
-NoType has taken three crashes with an identical runtime signature. Each was investigated, documented, and fixed as if it were its own bug:
+NoType has taken three crashes with an identical runtime signature, each investigated, documented, and fixed as if it were its own bug — and then a fourth, on the build that shipped the fixes:
 
 | Date | Incident | Faulting address | Fix shape | What happened next |
 |---|---|---|---|---|
 | 2026-05-16 | `TimelineView` content closure calling a `@MainActor` instance method — [entry](./timelineview-mainactor-instance-method-crash-2026-05-16.md) | `0x1e` | Restructure the closure so no isolated instance method is called | Crash reappeared at `.onHover` |
 | 2026-05-19 | `.onHover` closure literal inheriting `@MainActor` — [entry](./onhover-mainactor-inheritance-crash-2026-05-19.md) | `0x1` | `dsOnHover`: `@Sendable` strips inheritance, `Task { @MainActor in … }` bridges back | Crash reappeared at a stock SwiftUI `Button` |
 | 2026-07-25 | Stock SwiftUI `Button`, inside Apple's own `_ButtonGesture` — [issue #82](https://github.com/weylandd/NoType/issues/82) | `0x0` | *(none — the check is inside Apple's binary)* | Cause found 2026-07-26 |
+| 2026-07-30 | `View.pressEvents` (`NoType/UI/DSComponents.swift:933`), reached on a mouse-down through `NSGestureRecognizer` → SwiftUI `FullGestureCallbacks` — tester A, `0.1.13-rc2` build 17, macOS 26.2 (25C56) | `0x2` | **None, deliberately** — this is a *fourth reader*, and deleting readers is what already failed three times (see *Guidance* 4) | Second independent confirmation of the mechanism; thrower still unnamed |
+
+**The fourth row is a confirmation, not a new bug.** That report carries the `SOME_OTHER_THREAD_SWALLOWED_AT_LEAST_ONE_EXCEPTION` marker thread on a build that already shipped the candidate fixes and the interceptor, which is what makes it evidence — see *The mechanism, end to end* for its timeline and what it does and does not establish. **Do not open a fix for `pressEvents`.**
 
 **The proven mechanism.** An Objective-C `NSException` raised on the main thread *inside a Swift-concurrency job* (`Task { @MainActor in … }` body, `await MainActor.run { … }` body) unwinds via `objc_exception_throw` straight through `libswift_Concurrency.dylib`. The runtime's `ExecutorTrackingInfo` — its record of "which executor is this thread currently on" — is a **stack-allocated, thread-local linked-list node, and its pop is not exception-safe**. Unwinding past it orphans the main thread's executor identity, leaving a pointer into a dead stack slot. AppKit catches the exception at the run-loop boundary and **resumes execution**. The next code to ask "am I on the main executor?" — `swift_task_isCurrentExecutorWithFlagsImpl` → `isMainExecutor()` → `swift_getObjectType(identity)` — reads that dead slot and SIGSEGVs.
 
@@ -50,7 +53,7 @@ It explains every fact the per-call-site framing could not:
 | Every per-call-site fix "held" and the crash moved | we kept deleting **readers** of the corrupt state, never the **corrupter** |
 | A ~675 ms gap between the swallowed exception and the SIGSEGV | corruption is latent until the next read |
 
-`TimelineView`, `.onHover`, and `_ButtonGesture` are not causes. They are witnesses.
+`TimelineView`, `.onHover`, `_ButtonGesture` and `View.pressEvents` are not causes. They are witnesses — four of them now, at four different addresses.
 
 ## Guidance
 
@@ -122,9 +125,17 @@ The user-facing cost is asymmetric in a way that shapes triage. Dictation runs t
 2. It unwinds through `libswift_Concurrency`, orphaning `ExecutorTrackingInfo::current()` — the pop has no landing pad, so the thread-local head is left pointing at a dead stack frame.
 3. AppKit / HIToolbox swallows it at the run-loop / event-dispatch boundary and parks the breadcrumb thread. Execution resumes.
 4. Whatever later reuses that stack memory becomes the main thread's "executor identity".
-5. The **next** executor check — a `_ButtonGesture` dispatch, `HoverResponder.updatePhase`, a `TimelineView` closure prologue, a `MainActor.assumeIsolated` — calls `swift_task_isCurrentExecutorWithFlagsImpl` → `isMainExecutor()` → `swift_getObjectType(garbage)` → SIGSEGV.
+5. The **next** executor check — a `_ButtonGesture` dispatch, a `FullGestureCallbacks` press dispatch into `View.pressEvents`, `HoverResponder.updatePhase`, a `TimelineView` closure prologue, a `MainActor.assumeIsolated` — calls `swift_task_isCurrentExecutorWithFlagsImpl` → `isMainExecutor()` → `swift_getObjectType(garbage)` → SIGSEGV.
 
 Observed timing in the v0.1.8 report (macOS 26.2 build 25C56, Mac15,7 / M3 Pro): launch `10:57:45.7231` → exception swallowed `10:57:49.189` (T+3.47 s) → SIGSEGV `10:57:49.8639` (T+4.14 s). The corruption and the crash are **675 ms and one unrelated user action apart**.
+
+**Second independent confirmation, 2026-07-30 — on a build carrying the fixes and the interceptor.** Tester A, `0.1.13-rc2` build 17, macOS 26.2 (25C56): launch `17:58:56.53` → marker thread `17:59:01.716` (T+5.2 s) → SIGSEGV `17:59:03.04` (1.3 s after the swallow), at `0x2`, `swift_getObjectType` ← `swift_task_isMainExecutorImpl` ← `swift_task_isCurrentExecutorWithFlagsImpl`, on a mouse-down through `NSGestureRecognizer` → `FullGestureCallbacks` → `View.pressEvents`. Three things follow, and the third is the one that catches people out:
+
+1. **An ObjC exception is still being swallowed after the first round of fixes.** The interceptor shipped in `643ad17`; rc2 is `59ff2a7`, so it was installed when this happened.
+2. **Foundation's preprocessor chain was intact at the time.** The marker thread's name embeds a hash HIServices computes from `NSException.callStackReturnAddresses`. A freshly constructed `NSException` carries **zero** of those until Foundation's preprocessor populates them, and an empty array aborts HIToolbox at `HIExceptions.mm:45` (`SIGABRT`) — which did not happen. So the chain ran.
+3. **A silent interceptor log does NOT mean nothing threw.** This report is the counter-example: the throw happened and the breadcrumb did not name it. The interceptor is not displaced — `NoTypeTests/ExceptionBreadcrumbDisplacementProbeTests.swift` force-loads every framework the app pulls in after launch (Sparkle, CoreML, AVFAudio, Vision, ScreenCaptureKit, AppKit, SwiftUI) plus the host's real launch sequence and finds the preprocessor head still ours after each, and it is sentinel-validated (it correctly reports a known decoy head rather than "still ours"). The remaining explanations for a silent log are a throw that **bypasses** `objc_setExceptionPreprocessor` — `objc_exception_rethrow`, i.e. `@throw;` re-raised from inside a `@catch`, or a non-ObjC C++ throw — or the size-bounded unified-log store **rolling the record over** before it was read. The plan's four-quadrant falsifier was amended on this evidence; see *Related*.
+
+**What this does not establish: the thrower.** The three fixes that shipped in `643ad17` — `MicProbe`'s tap format, `HUDPanel`'s geometry, the fixed-size window lock — were **candidates from a static + runtime audit, and not one of them was ever confirmed as the thrower**. They were worth shipping as latent-bug fixes on their own merits; they are not proof about this crash in either direction, and a recurrence after them is not evidence against the mechanism. The suspect list below stays ranked and unconfirmed.
 
 ### The breadcrumb, in a real crash report
 
@@ -202,12 +213,12 @@ SwiftUI _ButtonGesture fires MainActor.assumeIsolated
 - [`onhover-mainactor-inheritance-crash-2026-05-19.md`](./onhover-mainactor-inheritance-crash-2026-05-19.md) — second same-signature incident (`0x1`); also the source of the `dsOnHover` shape and of the rejection of `MainActor.assumeIsolated` as its bridge. Its `.ips` is the report that carried the breadcrumb.
 - [`audio-ioproc-mainactor-inheritance-crash-2026-05-19.md`](./audio-ioproc-mainactor-inheritance-crash-2026-05-19.md) — the **counter-example**, not a member. Different thread, different signal, deterministic, no breadcrumb; genuine isolation violation, correctly and permanently fixed.
 - [`sender-respawn-race-2026-05-16.md`](./sender-respawn-race-2026-05-16.md) — sibling macOS 26 concurrency-runtime oddity from the same discovery window; different mechanism.
-- `NoType/Diagnostics/ExceptionBreadcrumb.swift` + `NoTypeTests/ExceptionBreadcrumbTests.swift` — the shipped interceptor from *Guidance* step 2, and the guards that pin its chaining and redaction contracts. Its user-facing surface is the README's `## Known issues` retrieval recipe.
+- `NoType/Diagnostics/ExceptionBreadcrumb.swift` + `NoTypeTests/ExceptionBreadcrumbTests.swift` — the shipped interceptor from *Guidance* step 2, and the guards that pin its chaining and redaction contracts. `NoTypeTests/ExceptionBreadcrumbDisplacementProbeTests.swift` is the sentinel-validated probe that rules displacement out as the reason for a silent log. Its user-facing surface is the README's `## Known issues` retrieval recipe.
 - [`conventions/source-scan-guard-fidelity-2026-07-25.md`](../conventions/source-scan-guard-fidelity-2026-07-25.md) — why three of that interceptor's guards were green for reasons unrelated to their claim, including the one that passed on the chain-dropped `SIGABRT` outcome. It is also the authority behind *Prevention*'s rejection of a general scan, and behind `RaiseSiteScanner`'s presence complement.
 - `NoTypeTests/HUDPanelGeometryTests.swift` — `RaiseSiteScanner`, the narrow two-file guard from *Prevention*, its presence complement, and the fixtures pinning the scanner itself. `NoType/UI/CLAUDE.md` carries the rule it enforces and the audit table.
 - `docs/plans/2026-07-25-001-fix-macos-26-executor-crash-plan.md` — the staged investigation this entry came out of. Its stage B′ shipped and returned a negative result; its KD6 check-mode disproof is correct but moot. Read it as history, not as the current plan.
 - `docs/plans/2026-07-26-001-fix-swallowed-exception-executor-corruption-plan.md` — the current plan, replanned from the proven mechanism above. Step 2 / U2 shipped the interceptor.
-- [`docs/plans/2026-07-26-001-fix-swallowed-exception-executor-corruption-handoff-checklist.md`](../../plans/2026-07-26-001-fix-swallowed-exception-executor-corruption-handoff-checklist.md) — the runbook for that plan's Step 9 verification round: the `log show` retrieval command, the two-arm per-tester script, what to record on #82, and **the four-quadrant falsifier** — including the one quadrant (crash + silent-but-armed interceptor) that means this entry's cause is wrong and diagnosis reopens rather than a fifth suspect being added.
+- [`docs/plans/2026-07-26-001-fix-swallowed-exception-executor-corruption-handoff-checklist.md`](../../plans/2026-07-26-001-fix-swallowed-exception-executor-corruption-handoff-checklist.md) — the runbook for that plan's Step 9 verification round: the `log show` retrieval command, the two-arm per-tester script, what to record on #82, and **the four-quadrant falsifier**. **Amended 2026-07-30:** the crash + silent-but-armed quadrant used to read "this entry's cause is wrong, reopen diagnosis"; on the rc2 evidence above it now reads "the interceptor missed a throw that independently happened" — chase the bypass (`objc_exception_rethrow`, non-ObjC throw) and log rollover. Its operational instruction is unchanged: neither add a suspect thrower nor remove the reader at the crash site.
 - `GitHub issue weylandd/NoType#82` — the third incident, and where reporter results are recorded.
 - `NoType/UI/CLAUDE.md` — the two UI hard rules (`TimelineView` closure contents, `dsOnHover`) that mitigate the first two incidents, and the "Launch ordering" rule that stage B′ produced.
 - Upstream, same mechanism, Apple's own words: [swiftlang/swift#89197](https://github.com/swiftlang/swift/issues/89197) and [swiftlang/swift#86083](https://github.com/swiftlang/swift/issues/86083).
