@@ -17,9 +17,9 @@ execution: code
 - **Product authority.** The maintainer, acting as product owner, settled the storage shape, the raw-text posture, the display-time replacement pass, the migration reading, and the sequencing relative to the shipped retry feature. Nothing about which errors abort a session, and nothing about audio retention, is reopened.
 - **Authority hierarchy.** Requirements (R-IDs) win on product behavior. Key Decisions (KD-IDs) constrain them and carry provenance. Where this plan and a module `CLAUDE.md` disagree on an existing invariant, the module doc wins and the conflict is a blocker — except for the statements R16 names, which this work amends deliberately.
 - **Execution profile.** Refactor of the persisted history shape and its readers, across `NoType/History/`, `NoType/Recording/`, `NoType/UI/`, and `AppState`. One in-scope tidy-up rides along (R17). Roughly 110 existing tests change; see Dependencies / Assumptions.
-- **Stop conditions.** Stop and surface a blocker if: satisfying R1 would require serializing anything audio-shaped into `history.json`; satisfying R5 would require storing a copy of the dictionary on the entry; or the migration in R12 would require parsing an existing row's marker characters back into structure.
+- **Stop conditions.** Stop and surface a blocker if: satisfying R1 would require serializing anything audio-shaped into `history.json`; satisfying R5 would require storing a copy of the dictionary on the entry; or R12's marker parse would run on a row this build wrote — it exists to read legacy data once and must never become the working model.
 - **Tail ownership.** This plan does not own branch, commit, or PR mechanics. Work starts after the retry branch merges (KD4), from a branch off `origin/main`.
-- **Open blockers.** One: what a migrated legacy broken row looks like. Two further questions are deferred to planning. See Outstanding Questions.
+- **Open blockers.** None. Two questions are deferred to planning. See Outstanding Questions.
 
 ---
 
@@ -49,7 +49,7 @@ The index needed to place a recovery already exists on the audio side: `Retained
 - KD2. **Chunk text is stored raw as the model returned it; the user's dictionary replacements are applied to the assembled string at display and copy time.** (session-settled: user-approved — chosen over applying replacements per chunk at write time, where a pair whose phrase spans a chunk seam would stop matching, and over freezing the session's dictionary into the row, which puts a copy of the dictionary in every history row.) Governs R2, R5, R9, R10.
 - KD3. **A gap renders as `[…]` on screen, unchanged.** (session-settled: user-directed — chosen over changing the marker while the storage model was already changing: users recognise it and the retry feature just shipped it.) Governs R4.
 - KD4. **This work is a follow-on PR, after the retry branch merges.** (session-settled: user-directed — chosen over folding it into that branch: the branch is tested and works; the accepted cost is that the history format changes twice and some just-written code is rewritten.)
-- KD5. **Rows already on disk migrate as a single un-gapped chunk, keeping their current appearance.** (session-settled: user-approved — chosen over parsing their existing markers back into structure: retained audio never survives a restart, so no already-stored row can be retried regardless, and the parse would buy nothing.) Governs R12.
+- KD5. **A row already on disk migrates into whatever chunk shape reproduces what it looks like today**: a row carrying markers is split on them into text and gap chunks, an all-failed row's stored failure count becomes that many gap chunks, and an ordinary row becomes one un-gapped chunk. (session-settled: user-directed — chosen over migrating every row as a single un-gapped chunk, which was settled first and then withdrawn once it became clear it strips the error slot and the always-visible actions from broken rows the user already has. The user should not be able to tell the storage format changed. Parsing markers is a one-time read of legacy data, not a working model — it never runs on a row this build wrote.) Governs R12.
 - KD6. **Lifetime word counts continue to be taken from the assembled, post-replacement string.** (session-settled: user-approved — chosen over counting raw chunk text: a replacement pair that expands or collapses words would otherwise shift lifetime totals against their current meaning.) Governs R14.
 
 ### What changes shape
@@ -97,7 +97,7 @@ The paste string is unaffected: it is computed and sent at `NoType/Recording/Rec
 
 **Migration and compatibility**
 
-- R12. Every row already in `history.json` migrates as a single un-gapped chunk holding its stored text verbatim. Its existing marker characters stay ordinary characters and are never parsed back into gaps. What that leaves a legacy *broken* row looking like is open — see Outstanding Questions.
+- R12. Every row already in `history.json` migrates into the chunk shape without changing how it renders. A row whose text carries markers is split on them into alternating text and gap chunks; a row with empty text and a non-zero failure count becomes that many gap chunks; every other row becomes one un-gapped chunk holding its text verbatim. A migrated broken row therefore stays broken and keeps its error slot. Its chunk indices are positional rather than recovered — a legacy row never recorded which chunk failed — and nothing may depend on them, because no migrated row can be retried: its audio did not survive the restart that produced the migration.
 
 **Accounting and derived consumers**
 
@@ -159,11 +159,11 @@ The paste string is unaffected: it is computed and sent at `NoType/Recording/Rec
   - **When** the row is displayed after the retry settles.
   - **Then** the chunk reads `Kubernetes`, which is not what happens today.
 
-- AE5. An existing row's text is unchanged by the upgrade
+- AE5. An existing row still looks like itself after the upgrade
   - **Covers R12.**
-  - **Given** a stored row reading `Ship it by […] and review after.`
+  - **Given** two stored rows — one reading `Ship it by […] and review after.` with a failure count of one, and one with empty text and a failure count of three.
   - **When** the new build loads `history.json`.
-  - **Then** the row reads exactly as before, its brackets intact as ordinary characters, with nothing parsed back into a gap.
+  - **Then** the first renders exactly as before and stays visibly broken, the second renders three markers as it does today, and neither offers a retry.
 
 - AE6. Copy matches display
   - **Covers R6.**
@@ -198,15 +198,11 @@ The paste string is unaffected: it is computed and sent at `NoType/Recording/Rec
 - Roughly 110 existing tests across six files change: `RetryMergeTests` (23), `HistoryRowActionsTests` (23), `AppStateRetryTests` (21), `RecordingSessionPartialRecoveryTests` (17, partial), `AppStateRetentionTests` (15), `HistoryStoreTests` (15), plus mechanical fixture churn in `StatsStoreTests`. `RetainedAudioStoreTests` is UUID-keyed and unaffected. That churn is the cost of the change, not a sign it is going wrong — most of those tests pin the marker-scanning model this plan removes.
 - The index a recovery needs already exists on the audio side (`NoType/Recording/RetainedRecording.swift:54-58`); only the persisted entry lacks it. No new fact has to be captured during a session.
 - What gets pasted at the cursor need not change: the paste string is computed at `RecordingSession.swift:1145` and the entry is built afterwards at `:1148`.
-- Retained audio is memory-only and cannot survive a restart (`NoType/History/RetainedAudioStore.swift:80-85`; `RetainedRecording` is deliberately not `Codable`). This is what makes KD5's migration reading safe.
+- Retained audio is memory-only and cannot survive a restart (`NoType/History/RetainedAudioStore.swift:80-85`; `RetainedRecording` is deliberately not `Codable`). This is why KD5 can reproduce a legacy broken row's appearance without owing it a working retry — the audio was already gone before the migration ran.
 - Replacements move from once per session to once per render of a row. The pair list is user-authored and short and the strings are a few hundred characters, so this is not expected to constrain the design.
 - Word and session counts written on a retry (`AppState.settleRetry`) use whatever dictionary is current at that moment, which may differ from the session's. Accepted as sub-noise.
 
 ### Outstanding Questions
-
-**Resolve Before Planning**
-
-- What a migrated legacy *broken* row looks like. KD5 settles "a single un-gapped chunk, keeping their current appearance", and those two clauses part company on one row shape: under R12 a migrated row carries no gap, so R3 makes it not broken — it loses the error slot and its always-visible actions, and a legacy all-failed row (empty text, non-zero failure count) renders blank instead of the markers `HistoryRowView.displayText` synthesizes for it today. Two arms. Accept the change: these rows evict within ten sessions and their retry was already gone, so the cost is transient chrome. Or reconstruct gaps from the stored `failedChunkCount` for the empty-text case only, which preserves the appearance and still parses no markers, at the price of one migration branch. This blocks planning because it changes what a user sees on rows they already have.
 
 **Deferred to Planning**
 
