@@ -234,22 +234,62 @@ actor GeminiClient {
         return probe
     }
 
-    init() {
+    /// How long a request may go **without a byte moving** before
+    /// `URLSession` fails it (`timeoutIntervalForRequest`). The timer
+    /// resets on every transmitted byte, so for a non-streamed response
+    /// the interval it actually bounds is the gap from the last uploaded
+    /// byte to the first response byte — Gemini's think time plus any
+    /// transport stall. It is therefore a direct cap on how long a chunk
+    /// may take, not merely a stall detector.
+    ///
+    /// **This is the pre-cut value and R20 of
+    /// `docs/plans/2026-08-11-001-fix-dictation-delivery-reliability-plan.md`
+    /// still owns cutting it.** The cut is deliberately not made from
+    /// preference: KTD2 requires the new value to clear a *measured*
+    /// maximum for the two payload shapes the 2026-08-11 field sample
+    /// lacks — a full multi-chunk batch and a 180 s force-cut chunk
+    /// (`PauseDetector.maxChunkSamples`). Until that measurement exists
+    /// the ceiling stays where it has always been, because a value below
+    /// an unmeasured maximum converts "slow but succeeds" into a `[…]`
+    /// no retry can remove from the text already pasted into the user's
+    /// document.
+    ///
+    /// Hoisted out of `init` so it is nameable from a test at all (KTD3);
+    /// `GeminiRetryPolicyTests` pins both the value and the fact that
+    /// `makeSessionConfiguration()` actually applies it.
+    nonisolated static let requestInactivityBudget: TimeInterval = 30
+
+    /// Whole-transfer ceiling (`timeoutIntervalForResource`): the hard cap
+    /// on a single request from first byte to last, across any number of
+    /// idle periods.
+    ///
+    /// **An additional ceiling, never a fallback** (KTD1). The two timers
+    /// are independent and whichever fires first wins, so this one cannot
+    /// rescue a request `requestInactivityBudget` has already killed — it
+    /// only bounds the case where bytes keep trickling and the inactivity
+    /// timer keeps resetting. It stays at 30 s when the inactivity budget
+    /// is cut, which is also what keeps `PauseDetector`'s adaptive-ladder
+    /// prose (it cites the *resource* budget) correct and out of scope.
+    nonisolated static let resourceCeiling: TimeInterval = 30
+
+    /// The session configuration, built in one testable place so the two
+    /// budgets above are provably the ones that ship. Splitting this out
+    /// of `init` is the other half of KTD3: a constant nothing can read is
+    /// a constant no test can pin, and a test that pins the constant but
+    /// not its wiring stays green when the wiring is what breaks.
+    nonisolated static func makeSessionConfiguration() -> URLSessionConfiguration {
         let cfg = URLSessionConfiguration.default
-        cfg.timeoutIntervalForRequest = 30
-        // 30 s is the hard ceiling for *any* single request to settle.
-        // gemini-3.1-flash-lite handles a typical chunk (≤40 s of audio
-        // after the PauseDetector adaptive ladder; ~3-5 s wall-clock) in
-        // ~5 s; even the 180 s force-cut safety-net chunk (rare —
-        // requires 3 min of unbroken speech) sits comfortably under 30
-        // s of wall-clock processing. If we're still waiting at 30 s,
-        // something is wrong (Gemini outage, dead Wi-Fi, hung CDN edge)
-        // and a fast user-visible error beats waiting for a response
-        // that won't usefully come. Coupled with PauseDetector.swift —
-        // if chunk sizing increases dramatically, revisit.
-        cfg.timeoutIntervalForResource = 30
+        cfg.timeoutIntervalForRequest = requestInactivityBudget
+        cfg.timeoutIntervalForResource = resourceCeiling
+        // Off on purpose: `URLSession` must fail an offline request rather
+        // than park on it indefinitely. `sendRequest`'s reachability
+        // pre-check is what turns that failure into a fast one.
         cfg.waitsForConnectivity = false
-        self.session = URLSession(configuration: cfg)
+        return cfg
+    }
+
+    init() {
+        self.session = URLSession(configuration: Self.makeSessionConfiguration())
     }
 
     /// Output of `classifyApp(...)`. The classifier may return any of
@@ -880,10 +920,24 @@ actor GeminiClient {
                     mayBeEmpty: mayBeEmpty
                 )
             } catch let error as GeminiError {
-                let decision = retryDecision(for: error, attempt: attempt)
+                let decision = Self.retryDecision(for: error, attempt: attempt)
                 guard let delayMs = decision.delayMs else {
                     Self.log.error("\(logID) failed (attempt \(attempt), no retry): \(error.localizedDescription, privacy: .public)")
                     throw error
+                }
+                // R28 / KTD13: a network-class failure is, in the measured
+                // case, a dead *pooled connection* rather than a dead
+                // network — a request stalled for the full budget and the
+                // same payload answered in 1.7 s on a new connection
+                // moments later. Re-issuing over the socket that just went
+                // silent would re-inherit the fault and turn the retry into
+                // nothing but a second wait, so drop the pool first. This
+                // is the axis that can make the retry *succeed*, which is
+                // what distinguishes it from the longer-wait and
+                // longer-ladder alternatives KD7 rejected.
+                if Self.requiresFreshConnection(after: error) {
+                    Self.log.info("\(logID) network-class failure — dropping pooled connections before retry")
+                    await flushPooledConnections()
                 }
                 Self.log.info("\(logID) retrying after \(delayMs)ms (attempt \(attempt) → \(attempt + 1)): \(error.localizedDescription, privacy: .public)")
                 try await Task.sleep(for: .milliseconds(delayMs))
@@ -1007,9 +1061,45 @@ actor GeminiClient {
     /// Classifies a Gemini error into a retry decision. `delayMs == nil`
     /// means "don't retry, propagate". `attempt` is the 1-based count of
     /// the attempt that just failed.
-    private struct RetryDecision { let delayMs: Int? }
+    ///
+    /// Widened past `private` with `retryDecision` below, deliberately
+    /// (KTD3) — the ladder was unreachable from a test, so the change that
+    /// alters it is also the change that makes it provable.
+    struct RetryDecision: Equatable { let delayMs: Int? }
 
-    private func retryDecision(for error: GeminiError, attempt: Int) -> RetryDecision {
+    /// Does this failure mean the retry must not reuse the connection that
+    /// produced it?
+    ///
+    /// Exactly the network class — `.http(status: 0, _)`, which is where
+    /// `performOnce` wraps every `URLError`. A 429 or a 5xx came *back*
+    /// from Gemini over a demonstrably working connection, so dropping the
+    /// pool for those would cost a fresh TCP + TLS handshake to fix
+    /// nothing. The narrowness is the point: this answers "is the pipe
+    /// suspect", not "should we retry" (`retryDecision`) and not "what
+    /// does this mean for the session" (`RecordingSession.isTerminal`).
+    ///
+    /// Swept over the status space by `GeminiRetryPolicyTests` rather than
+    /// enumerated case by case, so a new status cannot quietly land in the
+    /// wrong class.
+    nonisolated static func requiresFreshConnection(after error: GeminiError) -> Bool {
+        if case .http(let status, _) = error { return status == 0 }
+        return false
+    }
+
+    /// Drops `URLSession`'s pooled connections so the next request opens a
+    /// new one. `flush(completionHandler:)` is the documented primitive
+    /// for this; there is no async spelling of it, hence the bridge.
+    ///
+    /// Safe to call mid-session because of invariant I1 — at most one
+    /// request is outstanding per session, so there is no sibling request
+    /// whose connection this could pull out from under.
+    private func flushPooledConnections() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            session.flush { continuation.resume() }
+        }
+    }
+
+    nonisolated static func retryDecision(for error: GeminiError, attempt: Int) -> RetryDecision {
         switch error {
         case .missingKey, .blocked, .empty, .decoding, .truncated:
             // `.truncated` re-issues identically → same cap hit; no point

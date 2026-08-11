@@ -219,6 +219,89 @@ final class GeminiClientOfflineShortCircuitTests: XCTestCase {
         )
     }
 
+    // MARK: - Position of the fresh-connection drop (R28 / KTD13)
+
+    /// A source guard in the same shape as the one above, for the same
+    /// reason: the property is structural. `GeminiRetryPolicyTests` proves
+    /// `requiresFreshConnection` answers correctly, but a predicate nobody
+    /// calls is a predicate that answers correctly into the void — and the
+    /// failure mode is silent, because a retry over the dead pooled
+    /// connection still *looks* like a retry. It just re-inherits the
+    /// stall.
+    ///
+    /// Absence assertions alone would be green on a file where the flush
+    /// was deleted, so this pins the destination too, per
+    /// `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`:
+    /// the helper exists, the retry loop calls it, the call is *gated* on
+    /// the predicate, and it happens before the re-issue rather than after.
+    ///
+    /// Limits, recorded so a green run is not over-trusted: this reads one
+    /// file and matches literal spellings, and it proves the call is
+    /// *present and ordered*, not that it is reached at runtime. Renaming
+    /// `flushPooledConnections` or `requiresFreshConnection` fails it
+    /// loudly — a review trigger, not a false negative.
+    func test_networkClassRetry_dropsThePooledConnection_beforeReissuing() throws {
+        let source = try String(
+            contentsOf: Self.repoRoot()
+                .appendingPathComponent("NoType/Gemini/GeminiClient.swift"),
+            encoding: .utf8
+        )
+
+        let sendRequest = try XCTUnwrap(
+            Self.body(ofFuncNamed: "sendRequest", in: source),
+            "Could not parse sendRequest — the guard lost its anchor."
+        )
+
+        // Destination: the helper actually exists. Without this, deleting
+        // it and its call site leaves every absence assertion green.
+        XCTAssertTrue(
+            source.contains("private func flushPooledConnections() async"),
+            "GeminiClient no longer declares flushPooledConnections — a network-class retry now reuses the connection that just went silent (R28)."
+        )
+        XCTAssertTrue(
+            source.contains("session.flush"),
+            "flushPooledConnections no longer calls session.flush — it is a no-op and the retry re-inherits the dead pooled connection."
+        )
+
+        // The call, scoped to the retry loop's own function.
+        let gateIdx = try XCTUnwrap(
+            sendRequest.range(of: "Self.requiresFreshConnection(after: error)"),
+            "sendRequest's retry path no longer consults requiresFreshConnection — either the drop became unconditional (a handshake cost on every 429 and 5xx) or it is gone."
+        ).lowerBound
+        let flushIdx = try XCTUnwrap(
+            sendRequest.range(of: "await flushPooledConnections()"),
+            "sendRequest never drops the pooled connections — the single network-class retry merely halves the wait instead of being able to succeed."
+        ).lowerBound
+
+        XCTAssertGreaterThan(
+            flushIdx, gateIdx,
+            "The flush must sit under the requiresFreshConnection gate, not ahead of it."
+        )
+
+        // Ordering against the re-issue. The drop is only useful before the
+        // next attempt goes out; after the sleep-and-loop it would apply to
+        // the attempt *after* the one it was meant to rescue.
+        let sleepIdx = try XCTUnwrap(
+            sendRequest.range(of: "try await Task.sleep(for: .milliseconds(delayMs))"),
+            "sendRequest's backoff sleep is gone — the ordering anchor for the connection drop is lost."
+        ).lowerBound
+        XCTAssertLessThan(
+            flushIdx, sleepIdx,
+            "The connection drop must happen before the retry is issued, otherwise it rescues the wrong attempt."
+        )
+
+        // The gate belongs to the retry loop, not to the pre-flight region
+        // the offline short-circuit occupies.
+        let loopIdx = try XCTUnwrap(
+            sendRequest.range(of: "while true {"),
+            "sendRequest no longer contains the `while true {` retry loop — the position anchor is gone."
+        ).lowerBound
+        XCTAssertGreaterThan(
+            gateIdx, loopIdx,
+            "The fresh-connection gate must live inside the retry loop; ahead of it, it would fire on a request that has not failed yet."
+        )
+    }
+
     // MARK: - Fixtures pinning the guard above
 
     func test_bodyExtractor_stopsAtTheFunctionsClosingBrace() throws {
