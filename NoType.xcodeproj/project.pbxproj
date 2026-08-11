@@ -151,6 +151,7 @@
 		B15CB641EC30CDD5F8B5F706 /* VersionBlock.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5206BE1EA69696E9C8D0EF05 /* VersionBlock.swift */; };
 		B21B4689815121986469D2AE /* AppIconView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54862A4A6851BE8C40376A68 /* AppIconView.swift */; };
 		B2859F6258353F0C1954186B /* please_summarize_en.m4a in Resources */ = {isa = PBXBuildFile; fileRef = DFA2FBFEEB1784A36F09930A /* please_summarize_en.m4a */; };
+		B28C1F840284E4132FFEEAA0 /* AppStateFocusNoticeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE92F3E49B329FE342FFC758 /* AppStateFocusNoticeTests.swift */; };
 		B33CB5AD3E3E83E924EC8887 /* ScreenCaptureContextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 770E18D42907F91130DCDFBE /* ScreenCaptureContextTests.swift */; };
 		B4662B9B6E98FC2513E4CCC1 /* ContextSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7C09AE05BF032CD7B5770A5 /* ContextSnapshot.swift */; };
 		B5330409B8D70A6AFB289363 /* MissingKeyHUDRetryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 447B22F729A10F8BC4E21E17 /* MissingKeyHUDRetryTests.swift */; };
@@ -381,6 +382,7 @@
 		B9FA5AFDC5821D5F1A2B8E52 /* HUDController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HUDController.swift; sourceTree = "<group>"; };
 		BA8AE201CC1EEB3F8E565157 /* MicProbeFormatGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicProbeFormatGateTests.swift; sourceTree = "<group>"; };
 		BE2087FB33165669192D10D0 /* HUDPanelGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HUDPanelGeometry.swift; sourceTree = "<group>"; };
+		BE92F3E49B329FE342FFC758 /* AppStateFocusNoticeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStateFocusNoticeTests.swift; sourceTree = "<group>"; };
 		BF63CF893691C7C9ED9A4745 /* InstructionsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstructionsStore.swift; sourceTree = "<group>"; };
 		BF64DF751173D1C9DE2854C3 /* AccessibilityPermission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityPermission.swift; sourceTree = "<group>"; };
 		C0DC7098DB4AFCBD975E3972 /* TokenUsageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenUsageTests.swift; sourceTree = "<group>"; };
@@ -723,6 +725,7 @@
 				F6A0D6ADDA12FA10A1E3ACE6 /* AccessibilityTreeTests.swift */,
 				DCA5FB3C3828964C7E9459BB /* AppCategorizerTests.swift */,
 				67209BBACC09FAEF03E3D049 /* AppStateAxRevokeTests.swift */,
+				BE92F3E49B329FE342FFC758 /* AppStateFocusNoticeTests.swift */,
 				C75089A302B529DDA7E35D26 /* AppStateKeyStateTests.swift */,
 				F4BE88EB6ACCD424B3321269 /* AppStateRetentionTests.swift */,
 				54DD38D0DF7C8AC0329335D6 /* AppStateRetryTests.swift */,
@@ -1157,6 +1160,7 @@
 				9C237DBBF80FA182F5A0E73E /* AccessibilityTreeTests.swift in Sources */,
 				5097DA3AD9FD99E4673191AF /* AppCategorizerTests.swift in Sources */,
 				E19915FAB511F15AA3EE5AAF /* AppStateAxRevokeTests.swift in Sources */,
+				B28C1F840284E4132FFEEAA0 /* AppStateFocusNoticeTests.swift in Sources */,
 				F3E438E99FC779E5733328ED /* AppStateKeyStateTests.swift in Sources */,
 				68A3B41C9BE52C9AF1EA9F08 /* AppStateRetentionTests.swift in Sources */,
 				0FBD33A91775E046087E2E1A /* AppStateRetryTests.swift in Sources */,

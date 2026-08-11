@@ -1672,19 +1672,23 @@ final class AppState {
                     Self.log.warning(
                         "session transcript contains \(sessionSummary.failedChunkCount) failure marker(s) of \(sessionSummary.dispatchedChunkCount) chunk(s)"
                     )
-                    // `.partialTranscription` is titled "Pasted with gaps"
-                    // and tells the user to re-dictate "just that part".
-                    // Both sentences are false when the destination
-                    // changed: nothing was pasted, so *no* part arrived.
-                    // U4 replaces this arm with the combined notice that
-                    // carries the gap count and a Copy action (KTD9);
-                    // until then the honest interim behaviour is the same
-                    // silence a withheld session with no gaps already
-                    // gets, not a notice asserting a paste that never
-                    // happened.
-                    if !sessionSummary.pasteWithheldForDestinationChange {
-                        self.surfaceError(.partialTranscription(summary: sessionSummary))
-                    }
+                }
+                // At most one notice per session, chosen by the pure seam
+                // rather than by an `if` chain here — this method cannot be
+                // stood up in a test, and which notice wins *is* KTD9.
+                // `showErrorHUD` replaces rather than stacks, so a second
+                // call would silently discard the first. The withhold is
+                // logged by `stop()` itself, at `.notice`.
+                //
+                // Fired after `hideTranscribingHUD()` above so the panel it
+                // replaces is already gone, and after `recordHistoryEntry`
+                // so "the transcript is in your history" is true by the
+                // time the user reads it.
+                if let notice = NoTypeErrorKind.noticeForFinishedSession(
+                    entry: entry,
+                    summary: sessionSummary
+                ) {
+                    self.surfaceError(notice)
                 }
                 // Fold into lifetime stats — survives the history cap so
                 // the Home tab's totals / top-apps / heatmap keep
@@ -2442,6 +2446,66 @@ enum NoTypeErrorKind {
     /// this HUD, so the row's retryability is readable from the payload
     /// itself.
     case partialTranscription(summary: RecordingSession.SessionSummary)
+    /// Session finished, but the user had moved to a different process by
+    /// the time the transcript was ready, so the paste was withheld
+    /// (`RecordingSession.shouldWithholdPaste`, R23 / R24 / KD8). The row
+    /// was written; nothing appeared where the user was looking, which is
+    /// why this notice exists at all (R25). Neutral severity — the
+    /// dictation succeeded, it just has nowhere safe to land.
+    ///
+    /// **Two associated values, with a deliberate split of duties.**
+    /// `summary` is the only source of the destination's name and of the
+    /// gap counts: the name was frozen at the stop by U3's
+    /// `freezePasteDestination(_:)` and rides this channel precisely so
+    /// the notice never re-reads `NSWorkspace.frontmostApplication` —
+    /// by notice time the user has moved again and that read answers a
+    /// different question. `entry` supplies one thing and one thing only,
+    /// the string the Copy action places (R30), and it does so through
+    /// `HistoryRowView.displayText(for:)` — the same accessor the row's
+    /// own copy button uses — so the notice and the row cannot hand the
+    /// user two different transcripts.
+    ///
+    /// `entry.failedChunkCount` mirrors `summary.failedChunkCount` and is
+    /// deliberately *not* what the copy reads: `.partialTranscription`
+    /// counts from the summary, and one source keeps the two notices'
+    /// count wording from drifting. The summary is also the only side
+    /// carrying `dispatchedChunkCount`, the "of M" denominator.
+    case pasteWithheld(entry: HistoryEntry, summary: RecordingSession.SessionSummary)
+
+    /// The single notice a finished session surfaces, or `nil` for the
+    /// ordinary session that pasted everything it transcribed.
+    ///
+    /// **Exactly one, and the order is the contract (KTD9).**
+    /// `HUDController.showErrorHUD` replaces rather than stacks, so two
+    /// `surfaceError` calls in one arm leave whichever ran last and the
+    /// other is simply lost. A session that both lost chunks and changed
+    /// destination is not a rare intersection — a stalled network drops
+    /// chunks *and* creates the wait during which the user switches away,
+    /// so it is the ordinary bad session — and the withheld notice is the
+    /// one that must survive: it is the only one carrying an action, and
+    /// `.partialTranscription` would be false twice over on that session
+    /// ("Pasted with gaps" when nothing was pasted, "re-dictate just that
+    /// part" when no part arrived). The gap count is folded into the
+    /// withheld notice's own copy instead, which is what stops Copy from
+    /// handing over a transcript with unannounced holes.
+    ///
+    /// Written as a pure seam rather than an `if` chain inside
+    /// `AppState.finalizeRecording` because that method cannot be stood
+    /// up in a test — it needs a live `RecordingSession` — and this
+    /// choice is the whole of KTD9. Same reasoning as
+    /// `RecordingSession.shouldWithholdPaste` and `HistoryRowView.actions`.
+    static func noticeForFinishedSession(
+        entry: HistoryEntry,
+        summary: RecordingSession.SessionSummary
+    ) -> NoTypeErrorKind? {
+        if summary.pasteWithheldForDestinationChange {
+            return .pasteWithheld(entry: entry, summary: summary)
+        }
+        if summary.hasFailures {
+            return .partialTranscription(summary: summary)
+        }
+        return nil
+    }
 
     /// The consequence clause a recoverable-class failure ends with when
     /// the recording survived into a retryable history row (R6).
@@ -2524,11 +2588,11 @@ enum NoTypeErrorKind {
             return Self.payloadForSessionFailure(err, retainedForRetry: retainedForRetry)
         case .partialTranscription(let summary):
             let failed = summary.failedChunkCount
-            let total = summary.dispatchedChunkCount
             let marker = RecordingSession.failureMarker
+            let lost = Self.chunkLossPhrase(summary)
             let cause = failed == 1
-                ? "1 of \(total) chunks didn't transcribe — \(marker) was inserted in its place."
-                : "\(failed) of \(total) chunks didn't transcribe — \(marker) was inserted in their place."
+                ? "\(lost) — \(marker) was inserted in its place."
+                : "\(lost) — \(marker) was inserted in their place."
             // Non-nil `retained` is exactly what gave the row its retry
             // action; without it the row is written but dead, and
             // re-dictating is still the only way back.
@@ -2547,7 +2611,59 @@ enum NoTypeErrorKind {
                 severity: .neutral,
                 iconSymbol: "ellipsis.bubble"
             )
+        case .pasteWithheld(_, let summary):
+            // The destination was frozen at the stop and travels on the
+            // summary. Never re-read here: `NSWorkspace.frontmostApplication`
+            // at notice time names wherever the user has drifted to since,
+            // which is the one place the transcript is guaranteed *not* to
+            // have been headed.
+            //
+            // The fallback is unreachable on today's gate — a withhold
+            // needs `destinationPID > 0`, so something was frontmost — but
+            // `NSRunningApplication.localizedName` is optional and a
+            // nameless process would otherwise render "headed for ,".
+            let destination = summary.pasteDestinationAppName ?? "the app you were in"
+            let cause = "This dictation was headed for \(destination), which is no longer the active app."
+            // Ahead of the copy consequence, so the user knows the
+            // transcript they are about to take has holes in it before
+            // they take it (KTD9). Worded for a transcript that was never
+            // pasted: `.partialTranscription`'s "was inserted in its
+            // place" describes text in the user's document, and there is
+            // no such text here.
+            let gaps: String
+            if summary.hasFailures {
+                let marker = RecordingSession.failureMarker
+                let lost = Self.chunkLossPhrase(summary)
+                gaps = summary.failedChunkCount == 1
+                    ? " \(lost), so \(marker) marks the gap."
+                    : " \(lost), so \(marker) marks the gaps."
+            } else {
+                gaps = ""
+            }
+            // R29: no part of the transcript appears in either string.
+            // This panel renders over whatever the user moved to, which
+            // may be a screen share or a call.
+            return ErrorPayload(
+                title: "Transcript ready, not pasted",
+                description: "\(cause)\(gaps) Nothing was pasted — the transcript is in your history, and Copy puts it on your clipboard.",
+                code: "INFO_NOT_PASTED",
+                severity: .neutral,
+                iconSymbol: "doc.on.clipboard",
+                retryLabel: "Copy",
+                retryKind: .accent
+            )
         }
+    }
+
+    /// "2 of 4 chunks didn't transcribe" — the count phrase both
+    /// gap-bearing notices open with.
+    ///
+    /// Shared so the two cannot drift on the count itself while staying
+    /// free to differ on what follows it: one describes markers sitting in
+    /// the user's document, the other markers in a transcript that never
+    /// left the app.
+    private static func chunkLossPhrase(_ summary: RecordingSession.SessionSummary) -> String {
+        "\(summary.failedChunkCount) of \(summary.dispatchedChunkCount) chunks didn't transcribe"
     }
 
     var retryHandler: (@MainActor (AppState?) -> Void)? {
@@ -2597,6 +2713,35 @@ enum NoTypeErrorKind {
                 // front of whatever the user was previously in (Slack /
                 // Notes / ...). Same pattern as `HistoryPopover.openSettings`.
                 NSApp.activate(ignoringOtherApps: true)
+            }
+        case .pasteWithheld(let entry, _):
+            // The second catalog entry to ship an action button, and it is
+            // not the dead-button class `MissingKeyHUDRetryTests` guards:
+            // that regression is `retryLabel != nil && retryHandler == nil`,
+            // and this handler is both wired and self-contained — it writes
+            // the clipboard and needs no AppState, no window raise, no
+            // navigation, so it cannot half-work.
+            //
+            // Nor is it the "second retry entry point" the same file argues
+            // against for `.sessionFailure`. That objection is about
+            // duplicating an affordance the history row already owns on a
+            // panel that auto-dismisses in 8 s. Copy is the *only*
+            // affordance this moment offers — the paste the user was
+            // expecting did not happen — and the row's own copy button
+            // remains the durable path once the panel is gone.
+            //
+            // `HistoryRowView.displayText(for:)` rather than `entry.text`:
+            // R30 requires the notice to place exactly the string the row
+            // shows, and those differ for a session that recovered nothing
+            // (stored `""`, rendered as synthesised markers). Going through
+            // the row's own accessor is what makes them the same string by
+            // construction instead of by coincidence.
+            return { _ in
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(
+                    HistoryRowView.displayText(for: entry),
+                    forType: .string
+                )
             }
         default:
             return nil

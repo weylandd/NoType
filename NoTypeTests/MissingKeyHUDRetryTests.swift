@@ -82,6 +82,45 @@ final class MissingKeyHUDRetryTests: XCTestCase {
         // the dead-button regression this file exists for.
         XCTAssertNil(NoTypeErrorKind.sessionFailure(StubError(), retainedForRetry: false).retryHandler)
         XCTAssertNil(NoTypeErrorKind.sessionFailure(StubError(), retainedForRetry: true).retryHandler)
+        // The gap notice stays button-less on purpose: the text is
+        // already in the user's document and the history row owns the
+        // retry. Its withheld sibling is the one that ships an action —
+        // see `AppStateFocusNoticeTests`.
+        XCTAssertNil(
+            NoTypeErrorKind.partialTranscription(
+                summary: Self.summary(failed: 1, dispatched: 3)
+            ).retryHandler
+        )
+    }
+
+    // MARK: - Fixtures
+
+    private static func summary(
+        failed: Int,
+        dispatched: Int,
+        withheld: Bool = false
+    ) -> RecordingSession.SessionSummary {
+        RecordingSession.SessionSummary(
+            failedChunkCount: failed,
+            dispatchedChunkCount: dispatched,
+            tokens: .zero,
+            model: .flashLite,
+            pasteWithheldForDestinationChange: withheld,
+            pasteDestinationAppName: withheld ? "Mail" : nil
+        )
+    }
+
+    /// The notice's `entry` supplies only the Copy string, which this
+    /// file never reads — it sweeps for label-without-handler. What the
+    /// copy actually places is pinned in `AppStateFocusNoticeTests`.
+    private static func entry() -> HistoryEntry {
+        HistoryEntry(
+            id: UUID(),
+            text: "the transcript",
+            sourceAppName: "Slack",
+            sourceBundleID: "com.tinyspeck.slackmacgap",
+            timestamp: Date()
+        )
     }
 
     // MARK: - retryLabel-without-retryHandler smoke check
@@ -103,15 +142,28 @@ final class MissingKeyHUDRetryTests: XCTestCase {
         //      only changes the description's consequence clause, but
         //      listing both is what keeps this guard honest if a future
         //      change ever gives the retained variant its own button.
-        //   5. `.partialTranscription(_)` — SKIPPED. Constructing it
-        //      requires a real `RecordingSession.SessionSummary`
-        //      fixture; its payload deliberately has no `retryLabel`,
-        //      so the regression class this test protects against
-        //      cannot apply to it.
+        //   5. `.partialTranscription(_)` — in `kinds` below. It needs a
+        //      `RecordingSession.SessionSummary` fixture, which is why it
+        //      was originally skipped; the summary's initializer is
+        //      hand-written with defaulted trailing parameters, so one
+        //      costs four arguments and the skip no longer pays for
+        //      itself. Its payload deliberately has no `retryLabel`.
+        //   6. `.pasteWithheld(entry:summary:)` — in `kinds` below, and
+        //      the first entry since `.missingAPIKey` that *does* ship a
+        //      `retryLabel`. **This is why the guard exists, not an
+        //      exception to it**: the regression it catches is a label
+        //      with no handler, and this case's Copy button is exactly
+        //      the shape that could regress into one. It is not the
+        //      "second retry entry point" objection recorded above
+        //      either — that argues against duplicating an affordance the
+        //      history row already owns, whereas Copy is the only
+        //      affordance a withheld paste offers, its handler needs no
+        //      `AppState` and no window, and the row's own copy button
+        //      stays the durable path once the 8 s panel is gone.
         //
-        // If you add a sixth case, add it here and update the
+        // If you add a seventh case, add it here and update the
         // inventory comment. `NoTypeErrorKind` does not (and cannot
-        // easily) conform to `CaseIterable` because three cases carry
+        // easily) conform to `CaseIterable` because four cases carry
         // associated values, so this manual list is the contract.
         let kinds: [NoTypeErrorKind] = [
             .missingAPIKey,
@@ -119,6 +171,12 @@ final class MissingKeyHUDRetryTests: XCTestCase {
             .sessionStartFailed(StubError()),
             .sessionFailure(StubError(), retainedForRetry: false),
             .sessionFailure(StubError(), retainedForRetry: true),
+            .partialTranscription(summary: Self.summary(failed: 1, dispatched: 3)),
+            // Both gap outcomes: the flag changes the description only,
+            // but a future change that gave the gapless variant a
+            // different action would otherwise sweep past unnoticed.
+            .pasteWithheld(entry: Self.entry(), summary: Self.summary(failed: 0, dispatched: 3, withheld: true)),
+            .pasteWithheld(entry: Self.entry(), summary: Self.summary(failed: 2, dispatched: 4, withheld: true)),
         ]
         for kind in kinds {
             if kind.payload.retryLabel != nil {
