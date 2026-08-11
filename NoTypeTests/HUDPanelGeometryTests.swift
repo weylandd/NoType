@@ -271,9 +271,11 @@ final class HUDPanelGeometryTests: XCTestCase {
     }
 
     func test_topRightOrigin_nonFiniteInsets_areSanitisedToZero() throws {
-        // `HUDController.repositionPermissionPanels` accumulates
-        // `topInset` from `panel.frame.height`, so one corrupt card's
-        // frame would otherwise travel into the next card's origin.
+        // `HUDPanelGeometry.column` accumulates each row's `topInset` from
+        // the measured heights above it, so one corrupt panel's frame would
+        // otherwise travel into every origin below it. The column sanitises
+        // that itself now; this stays because `topRightOrigin` is a
+        // chokepoint for any caller, not a guard on one.
         let placement = try XCTUnwrap(HUDPanelGeometry.topRightOrigin(
             visibleFrame: Self.laptopVisibleFrame,
             panelSize: NSSize(width: 300, height: 148),
@@ -425,6 +427,174 @@ final class HUDPanelGeometryTests: XCTestCase {
         }
     }
 
+    // MARK: - The column: the collision this whole seam exists to stop
+
+    // THE regression. Before `column(_:topInset:gap:)` existed, every HUD kind
+    // was placed by handing `HUDController.topInset` straight to
+    // `topRightOrigin`, so any two co-visible panels resolved to the *same*
+    // point at the same `NSWindow.Level.statusBar`. Two borderless panels
+    // superimposed, each with a 22 × 22 close button in the same corner, is
+    // indistinguishable from a close button that does nothing: the click
+    // reaches the front panel only, and the one behind it is revealed in
+    // exactly the place the user just clicked.
+    //
+    // These assert distinctness first and arithmetic second, in that order of
+    // importance — a column that stacks in the wrong order is a cosmetic bug,
+    // a column that stacks two panels at one inset is the reported one.
+
+    func test_column_noTwoOccupantsEverShareAnInset() {
+        let column = HUDPanelGeometry.column(
+            HUDPanelGeometry.Slot.allCases.map { .init(slot: $0, height: 120) },
+            topInset: 38,
+            gap: 10
+        )
+        let insets = column.rows.map(\.topInset)
+        XCTAssertEqual(insets.count, HUDPanelGeometry.Slot.allCases.count)
+        XCTAssertEqual(
+            Set(insets).count, insets.count,
+            "two HUD panels resolved to the same top inset — that is the superposition that reads as a dead close button"
+        )
+    }
+
+    func test_column_singleOccupant_sitsAtTheColumnTopInset() {
+        let column = HUDPanelGeometry.column(
+            [.init(slot: .error, height: 148)], topInset: 38, gap: 10
+        )
+        XCTAssertEqual(column.rows, [.init(slot: .error, topInset: 38)])
+        XCTAssertEqual(column.sanitised, [])
+    }
+
+    func test_column_accumulatesHeightPlusGapPerRow() {
+        let column = HUDPanelGeometry.column(
+            [
+                .init(slot: .error, height: 100),
+                .init(slot: .recording, height: 60),
+                .init(slot: .microphoneCard, height: 90)
+            ],
+            topInset: 38,
+            gap: 10
+        )
+        XCTAssertEqual(
+            column.rows,
+            [
+                .init(slot: .error, topInset: 38),
+                .init(slot: .recording, topInset: 148),          // 38 + 100 + 10
+                .init(slot: .microphoneCard, topInset: 218)      // 148 + 60 + 10
+            ]
+        )
+    }
+
+    func test_column_sortsBySlot_soCollectionOrderCannotChangeTheLayering() {
+        // The controller collects live panels in whatever order its stored
+        // properties happen to be read. If that order reached the layout, the
+        // layering would be an accident of the collecting code.
+        let reversed = HUDPanelGeometry.column(
+            [
+                .init(slot: .microphoneCard, height: 50),
+                .init(slot: .accessibilityCard, height: 50),
+                .init(slot: .error, height: 50)
+            ],
+            topInset: 0,
+            gap: 0
+        )
+        XCTAssertEqual(reversed.rows.map(\.slot), [.error, .accessibilityCard, .microphoneCard])
+    }
+
+    func test_slotOrder_errorOwnsTheTopSlot() {
+        // Pins the ruling in `Slot`'s doc-comment: the error HUD is the only
+        // surface that auto-dismisses, so burying it under a permission card
+        // the user has been ignoring means they never read it.
+        XCTAssertEqual(HUDPanelGeometry.Slot.allCases.first, .error)
+        XCTAssertTrue(HUDPanelGeometry.Slot.error < .recording)
+        XCTAssertTrue(HUDPanelGeometry.Slot.error < .accessibilityCard)
+    }
+
+    func test_column_empty_producesNoRows() {
+        let column = HUDPanelGeometry.column([], topInset: 38, gap: 10)
+        XCTAssertEqual(column.rows, [])
+        XCTAssertEqual(column.sanitised, [])
+    }
+
+    // MARK: - The column: unusable heights
+
+    // A skipped row would advance the accumulator by nothing and put the next
+    // panel back on top of this one — re-creating the superposition on the one
+    // path where something has already gone wrong. `seedContentSize.height` is
+    // the substitute because it is what `HUDPanel.applyValidated(contentSize:)`
+    // leaves a rejected panel at, so on the path that produces a non-finite
+    // measurement it is also the panel's real on-screen height.
+
+    func test_column_nonFiniteHeight_isSubstitutedWithTheSeedHeight_andReported() {
+        let column = HUDPanelGeometry.column(
+            [
+                .init(slot: .error, height: .nan),
+                .init(slot: .recording, height: 60)
+            ],
+            topInset: 38,
+            gap: 10
+        )
+        XCTAssertEqual(column.sanitised, [.error])
+        XCTAssertEqual(
+            column.rows,
+            [
+                .init(slot: .error, topInset: 38),
+                .init(
+                    slot: .recording,
+                    topInset: 38 + HUDPanelGeometry.seedContentSize.height + 10
+                )
+            ],
+            "a row whose height did not measure must still push the row below it clear of itself"
+        )
+    }
+
+    func test_column_infiniteHeight_isSubstituted_notPropagated() {
+        // `infinity > 0` is true, so a positivity-only check waves it through
+        // and every inset below becomes infinity — the same mutation
+        // `sizeRejection` is written against.
+        let column = HUDPanelGeometry.column(
+            [
+                .init(slot: .error, height: .infinity),
+                .init(slot: .recording, height: 60)
+            ],
+            topInset: 38,
+            gap: 10
+        )
+        XCTAssertEqual(column.sanitised, [.error])
+        XCTAssertTrue(
+            column.rows.allSatisfy { $0.topInset.isFinite },
+            "an infinite height propagated into the insets below it"
+        )
+    }
+
+    func test_column_nonPositiveHeight_isSubstituted_andReported() {
+        let column = HUDPanelGeometry.column(
+            [
+                .init(slot: .error, height: 0),
+                .init(slot: .recording, height: -5),
+                .init(slot: .transcribing, height: 40)
+            ],
+            topInset: 0,
+            gap: 0
+        )
+        XCTAssertEqual(column.sanitised, [.error, .recording])
+        XCTAssertEqual(
+            column.rows.map(\.topInset),
+            [0, HUDPanelGeometry.seedContentSize.height, HUDPanelGeometry.seedContentSize.height * 2]
+        )
+    }
+
+    func test_column_cleanHeights_reportNothingSanitised() {
+        // The complement: `sanitised` must be empty on the ordinary path, or
+        // the controller logs a substitution warning on every layout and the
+        // signal is worthless.
+        let column = HUDPanelGeometry.column(
+            HUDPanelGeometry.Slot.allCases.map { .init(slot: $0, height: 0.5) },
+            topInset: 38,
+            gap: 10
+        )
+        XCTAssertEqual(column.sanitised, [])
+    }
+
     // MARK: - Raise-site guard: the tree
 
     // The rule these pin is in `NoType/UI/CLAUDE.md` — a raise-prone AppKit /
@@ -482,6 +652,80 @@ final class HUDPanelGeometryTests: XCTestCase {
             bare `removeTap` in the `engine.start()` catch arm, safe only by local reasoning \
             about the two lines above it.
             """
+        )
+    }
+
+    func test_placementGuard_hudController_everyPlacementGoesThroughTheColumn() throws {
+        let source = try Self.appSource(RaiseSiteScanner.hudControllerPath)
+        XCTAssertTrue(
+            source.contains("final class HUDController"),
+            "\(RaiseSiteScanner.hudControllerPath) no longer declares HUDController — the scan lost its subject."
+        )
+
+        let unguarded = RaiseSiteScanner.unguardedCalls(
+            inSource: source, rules: RaiseSiteScanner.hudControllerRules
+        )
+        XCTAssertEqual(
+            unguarded.map(\.description), [],
+            """
+            \(RaiseSiteScanner.hudControllerPath): a HUD panel is positioned outside `relayout()`.
+
+            Every `positionTopRight` call in this file must take its inset from \
+            `HUDPanelGeometry.column(_:topInset:gap:)`. A placement written anywhere else \
+            hands a panel the raw `topInset` again, which is how all four HUD kinds ended up \
+            superimposed at one point at one window level — and superimposed panels read to \
+            the user as a close button that does not work. See NoType/UI/CLAUDE.md \
+            "HUD slots & widths".
+            """
+        )
+    }
+
+    func test_placementGuard_hudController_columnIsPresentInvokedAndStillConsulted() throws {
+        // The presence complement required by
+        // `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`.
+        // The absence test above is trivially green on a file where `relayout`
+        // was deleted, was never called, or had decayed into placing panels
+        // without asking the column — which is the whole regression, restored.
+        let source = try Self.appSource(RaiseSiteScanner.hudControllerPath)
+        XCTAssertEqual(
+            RaiseSiteScanner.presenceFailures(
+                inSource: source, rules: RaiseSiteScanner.hudControllerRules
+            ).map(\.description),
+            [],
+            "\(RaiseSiteScanner.hudControllerPath): the column chokepoint is dead, unreachable, or no longer consults HUDPanelGeometry."
+        )
+    }
+
+    func test_placementGuard_hudController_everyShowAndHideRelayouts() throws {
+        // The scan above cannot see this: a `hideErrorHUD` that drops its
+        // panel without calling `relayout()` writes no `positionTopRight` at
+        // all, so it escapes an absence-only guard entirely — and leaves every
+        // row below the closed one parked in its old place, with a hole where
+        // the dismissed panel was. The column is only correct if *every*
+        // mutation of the panel set re-derives it.
+        let source = try Self.appSource(RaiseSiteScanner.hudControllerPath)
+        let code = LaunchPathScanner.strippingCommentsAndStrings(source)
+        let mutators = [
+            "func presentMissing", "func reconcileGranted", "func hidePermissionsHUD",
+            "func dismissPermissionPanel", "func showRecordingHUD", "func hideRecordingHUD",
+            "func showTranscribingHUD", "func hideTranscribingHUD",
+            "func showErrorHUD", "func hideErrorHUD"
+        ]
+        let functions = LaunchPathScanner.functionBodies(in: code)
+        var missing: [String] = []
+        for mutator in mutators {
+            let name = String(mutator.dropFirst("func ".count))
+            guard let body = functions.first(where: { $0.name == name })?.body else {
+                missing.append("\(name) is no longer declared")
+                continue
+            }
+            if !LaunchPathScanner.line(body, contains: "relayout (") {
+                missing.append("\(name) mutates the panel set without calling relayout()")
+            }
+        }
+        XCTAssertEqual(
+            missing, [],
+            "\(RaiseSiteScanner.hudControllerPath): a show/hide leaves the column stale."
         )
     }
 
@@ -830,6 +1074,7 @@ enum RaiseSiteScanner {
 
     static let hudPanelPath = "NoType/UI/HUDPanel.swift"
     static let micProbePath = "NoType/Onboarding/MicProbe.swift"
+    static let hudControllerPath = "NoType/UI/HUDController.swift"
 
     /// Reported as the scope of a hit that sits inside no `func` / `init` body
     /// — a `deinit`, or type scope.
@@ -915,6 +1160,20 @@ enum RaiseSiteScanner {
         Rule(mutator: "setFrame (", chokepoint: "applyValidated", mustValidate: [], mustOccur: false),
         Rule(mutator: "setFrameTopLeftPoint (", chokepoint: "applyValidated", mustValidate: [], mustOccur: false),
         Rule(mutator: "setFrameSize (", chokepoint: "applyValidated", mustValidate: [], mustOccur: false)
+    ]
+
+    /// Not a *raise* rule — the same chokepoint shape applied to a placement
+    /// defect. `positionTopRight` raises nothing; what it does when written
+    /// outside `relayout()` is hand a panel the raw `topInset` again, which is
+    /// how four HUD kinds came to share one point at one window level. The
+    /// scanner does not care which kind of invariant a chokepoint enforces,
+    /// only that one function owns the call and still consults its helper.
+    static let hudControllerRules: [Rule] = [
+        Rule(
+            mutator: "positionTopRight (",
+            chokepoint: "relayout",
+            mustValidate: ["HUDPanelGeometry.column ("]
+        )
     ]
 
     static let micProbeRules: [Rule] = [

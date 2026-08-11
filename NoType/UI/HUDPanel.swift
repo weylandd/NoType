@@ -95,6 +95,19 @@ final class HUDPanel: NSPanel {
     override var canBecomeKey: Bool  { false }
     override var canBecomeMain: Bool { false }
 
+    /// Re-measure the SwiftUI content and apply it as the panel's size.
+    ///
+    /// Split out of ``positionTopRight(topInset:rightInset:)`` because
+    /// `HUDController` lays its panels out as a **column**: every panel's
+    /// height has to be known before *any* panel's origin can be computed,
+    /// so the measure pass and the place pass have to be separable. The
+    /// place pass still measures again — a panel positioned on its own is
+    /// the common case and must not depend on the caller having measured.
+    func sizeToFit() {
+        layoutIfNeeded()
+        applyValidated(contentSize: hostingView.fittingSize)
+    }
+
     /// Place the panel anchored to the top-right of the active screen, with
     /// CSS-style `top` and `right` insets relative to the visible frame.
     func positionTopRight(topInset: CGFloat, rightInset: CGFloat) {
@@ -107,8 +120,7 @@ final class HUDPanel: NSPanel {
             return
         }
         // Make sure the panel has been sized to its current content first.
-        layoutIfNeeded()
-        applyValidated(contentSize: hostingView.fittingSize)
+        sizeToFit()
 
         // Derived from `frame.size` *after* the size mutation above, so a
         // rejected measurement still yields a real top-right point from

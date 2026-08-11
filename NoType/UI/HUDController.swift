@@ -1,7 +1,20 @@
 import AppKit
+import os
 import SwiftUI
 
 /// Manages the floating HUD panels.
+///
+/// **Every panel this class owns shares one screen region** — a single
+/// top-right column, laid out by `relayout()`. Nothing is positioned
+/// anywhere else, and no panel is positioned on its own: a show or a hide
+/// of *any* kind re-lays out *all* of them. That is the whole point.
+/// Previously each kind handed `topInset` verbatim to
+/// `HUDPanel.positionTopRight`, so two co-visible panels landed at the same
+/// point at the same window level — and superimposed panels read as a
+/// broken close button, because the click reaches only the front one and
+/// the one behind it is revealed in the same place. See
+/// `HUDPanelGeometry.Slot` for the ordering, and for why the error HUD
+/// owning the top slot is not the same thing as it "showing alone".
 ///
 /// **Permissions HUD**: each missing permission has its own NSPanel so cards
 /// look like distinct glass surfaces. Cards are *only* surfaced explicitly —
@@ -13,6 +26,8 @@ import SwiftUI
 /// from press-time (`startedAt`, target app name).
 @MainActor
 final class HUDController {
+    private static let log = Logger(subsystem: "app.notype", category: "ui.hud")
+
     private let permissions: PermissionsViewModel
 
     private var permissionPanels: [PermissionKind: HUDPanel] = [:]
@@ -32,7 +47,11 @@ final class HUDController {
     private let rightInset:  CGFloat = 16
     private let cardGap:     CGFloat = 10
 
-    private static let order: [PermissionKind] = [.accessibility, .microphone]
+    // The card ordering that used to live here as `Self.order` is now
+    // `HUDPanelGeometry.Slot`'s declaration order, alongside the other three
+    // HUD kinds — the two orderings were never independent, and keeping them
+    // in separate places is how the cards ended up stacked correctly among
+    // themselves while colliding with everything else.
 
     init(permissions: PermissionsViewModel) {
         self.permissions = permissions
@@ -68,7 +87,7 @@ final class HUDController {
             )
             permissionPanels[kind] = HUDPanel(rootView: card)
         }
-        repositionPermissionPanels()
+        relayout()
     }
 
     /// Auto-hide-only update. Removes panels for kinds whose permission was
@@ -80,7 +99,7 @@ final class HUDController {
             permissionPanels.removeValue(forKey: kind)
             dismissedKinds.remove(kind)
         }
-        repositionPermissionPanels()
+        relayout()
     }
 
     /// Sweep all permission panels (used when everything is granted).
@@ -91,6 +110,7 @@ final class HUDController {
         }
         permissionPanels.removeAll()
         dismissedKinds.removeAll()
+        relayout()
     }
 
     private func dismissPermissionPanel(for kind: PermissionKind) {
@@ -98,17 +118,71 @@ final class HUDController {
         permissionPanels[kind]?.close()
         permissionPanels.removeValue(forKey: kind)
         dismissedKinds.insert(kind)
-        repositionPermissionPanels()
+        relayout()
     }
 
-    private func repositionPermissionPanels() {
-        var top = topInset
-        for kind in Self.order {
-            guard let panel = permissionPanels[kind] else { continue }
-            panel.layoutIfNeeded()
-            panel.positionTopRight(topInset: top, rightInset: rightInset)
+    // MARK: - Column layout
+
+    /// The single placement path. **Every live panel is re-placed on every
+    /// call**, because a column is not a per-panel property: hiding the row
+    /// above changes where every row below it belongs, and showing a new
+    /// top-slot panel moves everything down. A show or hide that skipped
+    /// this would leave a hole where the dismissed panel was, or park a new
+    /// one on top of a live one.
+    ///
+    /// The slot ordering and the arithmetic both live in the pure
+    /// `HUDPanelGeometry` — an `NSPanel` cannot be stood up in a unit test,
+    /// and the part worth testing here is "no two panels resolve to the same
+    /// inset", which is arithmetic. Same extraction rationale as
+    /// `topRightOrigin`. `HUDPanelGeometryTests`' source guard pins that
+    /// `positionTopRight` is reached only from here, that this method still
+    /// consults the column, and that every show/hide still calls it.
+    private func relayout() {
+        let occupants: [(slot: HUDPanelGeometry.Slot, panel: HUDPanel)] = [
+            errorPanel.map        { (HUDPanelGeometry.Slot.error, $0) },
+            recordingPanel.map    { (HUDPanelGeometry.Slot.recording, $0) },
+            transcribingPanel.map { (HUDPanelGeometry.Slot.transcribing, $0) },
+            permissionPanels[.accessibility].map { (HUDPanelGeometry.Slot.accessibilityCard, $0) },
+            permissionPanels[.microphone].map    { (HUDPanelGeometry.Slot.microphoneCard, $0) }
+        ].compactMap { $0 }
+
+        // One persisted breadcrumb per layout change, naming which slots are
+        // occupied. This is the record whose *absence* made a "the close
+        // button does nothing" report undiagnosable from logs alone: the
+        // question that had to be answered was "were two panels up at the
+        // same time", and nothing in this file used to say. Slot names only
+        // — never a payload, which carries user-visible failure text.
+        guard !occupants.isEmpty else {
+            Self.log.notice("HUD column: empty")
+            return
+        }
+
+        // Measure everything before placing anything: row N's inset is the
+        // accumulation of the heights of rows 0..<N.
+        for occupant in occupants { occupant.panel.sizeToFit() }
+
+        let column = HUDPanelGeometry.column(
+            occupants.map { .init(slot: $0.slot, height: $0.panel.frame.height) },
+            topInset: topInset,
+            gap: cardGap
+        )
+        if !column.sanitised.isEmpty {
+            let terms = column.sanitised.map(\.description).joined(separator: ", ")
+            Self.log.error(
+                "HUD column laid out against assumed heights: \(terms, privacy: .public) did not measure"
+            )
+        }
+        Self.log.notice(
+            "HUD column: \(column.rows.map(\.slot.description).joined(separator: ", "), privacy: .public)"
+        )
+
+        // Looked up by slot rather than zipped against `occupants`: the
+        // column re-sorts, so positional correspondence would be a silent
+        // coupling to an ordering this method deliberately does not own.
+        for row in column.rows {
+            guard let panel = occupants.first(where: { $0.slot == row.slot })?.panel else { continue }
+            panel.positionTopRight(topInset: row.topInset, rightInset: rightInset)
             panel.show()
-            top += panel.frame.height + cardGap
         }
     }
 
@@ -141,17 +215,15 @@ final class HUDController {
             samplesProvider: samplesProvider,
             onDismiss: onCancel
         )
-        let panel = HUDPanel(rootView: view)
-        panel.layoutIfNeeded()
-        panel.positionTopRight(topInset: topInset, rightInset: rightInset)
-        panel.show()
-        recordingPanel = panel
+        recordingPanel = HUDPanel(rootView: view)
+        relayout()
     }
 
     func hideRecordingHUD() {
         recordingPanel?.hide()
         recordingPanel?.close()
         recordingPanel = nil
+        relayout()
     }
 
     // MARK: - Transcribing HUD
@@ -173,6 +245,7 @@ final class HUDController {
 
         transcribingPanel?.hide()
         transcribingPanel?.close()
+        transcribingPanel = nil
 
         let view = TranscribingHUD(
             targetAppName: targetAppName,
@@ -180,17 +253,15 @@ final class HUDController {
                 self?.hideTranscribingHUD()
             }
         )
-        let panel = HUDPanel(rootView: view)
-        panel.layoutIfNeeded()
-        panel.positionTopRight(topInset: topInset, rightInset: rightInset)
-        panel.show()
-        transcribingPanel = panel
+        transcribingPanel = HUDPanel(rootView: view)
+        relayout()
     }
 
     func hideTranscribingHUD() {
         transcribingPanel?.hide()
         transcribingPanel?.close()
         transcribingPanel = nil
+        relayout()
     }
 
     // MARK: - Error HUD
@@ -207,6 +278,7 @@ final class HUDController {
     ) {
         errorPanel?.hide()
         errorPanel?.close()
+        errorPanel = nil
         errorAutoDismiss?.cancel()
 
         let view = ErrorHUD(
@@ -225,11 +297,8 @@ final class HUDController {
                 }
             }
         )
-        let panel = HUDPanel(rootView: view)
-        panel.layoutIfNeeded()
-        panel.positionTopRight(topInset: topInset, rightInset: rightInset)
-        panel.show()
-        errorPanel = panel
+        errorPanel = HUDPanel(rootView: view)
+        relayout()
 
         if let delay = autoDismissAfter {
             errorAutoDismiss = Task { @MainActor [weak self] in
@@ -246,5 +315,6 @@ final class HUDController {
         errorPanel?.hide()
         errorPanel?.close()
         errorPanel = nil
+        relayout()
     }
 }

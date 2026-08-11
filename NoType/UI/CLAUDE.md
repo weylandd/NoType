@@ -107,14 +107,25 @@ Why each rule exists (rationale, rejected alternatives, the bugs that produced t
 
 ## HUD slots & widths
 
-| HUD | Width | Trigger | Hides on |
-|---|---|---|---|
-| Recording | 300 pt | Hotkey press | Hotkey release |
-| Transcribing | 220 pt | Hotkey release | Paste success / cancel / error |
-| Error | 320 pt | Any user-actionable failure | Dismiss / retry / 8 s auto |
-| Permission card | 300 pt each | Launch / menu-bar click / hotkey w/ missing mic | Granted / user X |
+| Slot | HUD | Width | Trigger | Hides on |
+|---|---|---|---|---|
+| 0 | Error | 320 pt | Any user-actionable failure | Dismiss / retry / 8 s auto |
+| 1 | Recording | 300 pt | Hotkey press | Hotkey release |
+| 2 | Transcribing | 220 pt | Hotkey release | Paste success / cancel / error |
+| 3 | Permission card — Accessibility | 300 pt | Launch / menu-bar click | Granted / user X |
+| 4 | Permission card — Microphone | 300 pt | Launch / menu-bar click / hotkey w/ missing mic | Granted / user X |
 
-Only one of {recording, transcribing} is visible at a time. Permission cards stack underneath. Error HUD shows alone.
+**Every one of these lives in a single top-right column**, top-anchored at `topInset` 38 with a 10 pt gap, laid out by `HUDController.relayout()` from the pure `HUDPanelGeometry.column(_:topInset:gap:)`. The `Slot` column above is `HUDPanelGeometry.Slot`'s declaration order, which is the whole layering — nothing else decides it, and the order the controller happens to collect its live panels in cannot change it (the column sorts).
+
+**`relayout()` is the only placement path, and every show *and every hide* calls it.** A column is not a per-panel property: hiding the row above moves every row below it, and showing a new top-slot panel moves everything down. Three source guards in `HUDPanelGeometryTests` pin this — every `positionTopRight` in `HUDController.swift` sits inside `relayout`, `relayout` still consults `HUDPanelGeometry.column`, and each of the ten show/hide methods still calls it. The third is not redundant: a hide that drops its panel without relayouting writes no `positionTopRight` at all, so it escapes an absence-only scan entirely.
+
+**Why this is structural rather than cosmetic.** Until 2026-08-11 all four kinds handed `topInset` verbatim to `HUDPanel.positionTopRight`, so any two co-visible panels were *superimposed* at one point at one `NSWindow.Level.statusBar`. Two borderless panels stacked in Z, each with a 22 pt `DSCloseButton` in the same corner, is indistinguishable from a close button that does not work: the click reaches the front panel only, and the identical-looking one behind it is revealed in exactly the place the user just clicked. **The permission cards were already stacked correctly among themselves** (the old `repositionPermissionPanels` accumulator) — which is precisely how the collision survived: the one pair anybody looked at was fine, and the ordering that made it fine lived in a private `[PermissionKind]` that the other three kinds could not participate in. That ordering is now in `Slot` alongside them.
+
+**Only one of {recording, transcribing} is ever visible** — `showTranscribingHUD` closes the recording panel. Their relative rank therefore resolves nothing in practice; it exists so the column has a total order, which is what makes it testable.
+
+**Slot 0 is not "the error HUD shows alone."** That was the previous claim in this file and it was never implemented; it also should not be. A permission card names something the app cannot function without, and suppressing it to make room for a transient toast trades one lost message for another. What the error HUD gets is the *top* slot — it is the only surface that auto-dismisses, so burying it under a card the user has been ignoring for a week means they never read it. Nothing is force-hidden.
+
+**Diagnosability.** `relayout()` emits one `.notice` per layout change on `app.notype` / `ui.hud`, naming the occupied slots and nothing else (never a payload — those carry user-visible failure text). The absence of exactly this record is what made a "the X doesn't dismiss it" report undiagnosable from logs: the question that had to be answered was "were two panels up at once", and until this line existed nothing in the module said.
 
 ## Onboarding wizard contract
 
