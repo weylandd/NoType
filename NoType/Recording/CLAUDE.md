@@ -76,7 +76,17 @@ Note what the bound does **not** change: no error moves between the terminal and
 
 With the Gemini module's reachability pre-check in place (`sendRequest` fails immediately when the system reports no path), this bound is *not* redundant: the pre-check deliberately refuses to short-circuit a path that is `.satisfied`, so a captive portal, a dead router, a DNS blackhole or a dropped VPN still reaches the 30 s timeout per chunk. That is precisely the case this bound covers.
 
-`AppState.finalizeRecording` reads `session.summary` after `stop()` returns; when `hasFailures` is true it surfaces a neutral "Pasted with gaps" HUD telling the user how many chunks ended up as markers.
+`AppState.finalizeRecording` reads `session.summary` after `stop()` returns; when `hasFailures` is true it surfaces a neutral "Pasted with gaps" HUD telling the user how many chunks ended up as markers — **unless the paste was withheld** (next section), in which case that HUD is skipped, because its title and its "re-dictate just that part" advice are both false statements about a session that pasted nothing.
+
+## Destination guard (the paste is withheld when the process changed)
+
+A transcript is pasted only into the process the user dictated into (R23 / KD8). `start()` freezes the frontmost pid into `sourcePID`; `stop()` re-reads the frontmost pid at the last synchronous instruction before ⌘V and consults the pure `shouldWithholdPaste(sourcePID:currentPID:)`.
+
+- **Conservative by construction.** Withholds only on a positively-known mismatch — both identifiers `> 0` and different. Unknown (`0` for no frontmost app, `-1` for an application with no pid) pastes, because a missing fact is never evidence of a mismatch, and a wrong withhold silently swallows an ordinary dictation.
+- **Process identity, not bundle identity** (KD9), and **window identity is not considered** (R26) — two windows of one process share a pid.
+- **It skips only the paste.** The entry build and `history.append` run on both arms; folding this into the throwing `shouldAbortBeforePaste` would route to the catch arm and write no row, which is the opposite of R24 (KTD6).
+- **It depends on NoType's own panels never taking frontmost.** `HUDPanel` is a `.nonactivatingPanel` refusing key and main, so the transcribing HUD on screen during every session cannot make the gate fire. A regression there withholds *every* dictation, not a rare one.
+- The outcome rides `SessionSummary.pasteWithheldForDestinationChange` (KTD7). The user-facing notice that consumes it is a separate unit; until it lands, a withheld session is silent apart from a `.notice` log line.
 
 ## Retention for retry
 
@@ -139,6 +149,7 @@ The class is `final` for the deinit safety net only — `IOPMAssertionRelease` r
 - `NoTypeTests/RetainedRecordingTests.swift` — pins `shouldRetain`'s matrix and its no-drift property against `isTerminal` (swept over the HTTP status space), `retainedPayload`'s filtering and ascending order, `mergeRetained`'s accumulation, and the non-serializability guard behind the memory-only contract.
 - `NoTypeTests/SplitRetryNetworkBoundTests.swift` — pins `isNetworkClass` (swept over the status space), `shouldAbandonSplitRetry`'s three-term truth table, `abandonedAccounting`, `chunkCounts`, and the critical composition: an undispatched chunk's audio and original index reach the retained payload identically to a dispatched-and-failed chunk's.
 - `NoTypeTests/RecordingSessionOCRGateTests.swift` — pins the pure `shouldRunOCR` gate (fallback toggle × Screen Recording permission × pid).
+- `NoTypeTests/RecordingSessionFocusGuardTests.swift` — pins the pure `shouldWithholdPaste` gate (mismatch withholds, unknown-either-side pastes, swept over the pid space) **and**, in the `SplitRetryNetworkBoundTests` source-scan shape, `stop()`'s wiring around it: the gate runs after the cancellation re-check, compares the frozen `sourcePID`, the withheld arm neither pastes nor throws nor returns, and `makeHistoryEntry` / `history.append` sit outside both arms (R24). Also pins the `sourcePID = pid` freeze in `start()`, whose deletion turns the feature off with the predicate table still green.
 - `NoTypeTests/HallucinationLengthGateTests.swift` — pins the pure `HallucinationLengthGate` decision (word/char ceilings, AND-mode, floor, edges) against representative fixture transcripts.
 - `NoTypeTests/AudioDeviceManagerTests.swift` — pins the pure `pickEffectiveDevice` policy (pin-wins, BT-classic / BLE-Audio fallback, no-built-in graceful degrade, off-switch honoured), the `Device.isBluetooth` / `isBuiltIn` transport-type matrix, and the HAL stream-format helpers (`avAudioFormat(from:)` round-trip for built-in 44.1 kHz mono, USB 48 kHz mono, aggregate 48 kHz stereo shapes).
 - `NoTypeTests/AudioRecorderHALTests.swift` — `AudioRecorder.AudioError` `errorDescription` contract (no-input-device / stream-format-unavailable / converter-create / IOProc-create / IOProc-start surfaces consumed by `AppState.surfaceError`) plus the load-bearing constants `outputSampleRate = 16 000` and `frameSize = 4 096`. Live-mic behaviour is out of scope per the hard rule — see hardware-smoke protocol in plan 2026-05-18-001 §85–88.

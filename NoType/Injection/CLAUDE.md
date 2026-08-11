@@ -13,7 +13,7 @@ Pastes the final transcript at the user's cursor via clipboard + ⌘V.
 1. **Boundary normalisation is client-side source of truth.** The model's leading-space + terminal-punct choices are advisory; `finalizeForInsertion` runs once before paste and corrects deterministically.
 2. **`PasteboardSnapshot` captures ALL types** (string, RTF, image, file URL, custom UTI). Restore is faithful.
 3. **Restore delay default = 150 ms** (`PasteSettings.defaultRestoreDelayMs`). User-tunable 50–500 ms in 10-ms steps. UserDefaults key `notype.pasteRestoreDelayMs`. Read on every paste — no restart needed.
-4. **Inject only on session end**, after all chunks have responded. No mid-recording injection (architecture invariant I5 in `docs/architecture/overview.md`).
+4. **Inject only on session end**, after all chunks have responded. No mid-recording injection (architecture invariant I5 in `docs/architecture/overview.md`). **And only into the process the user dictated into** — `RecordingSession.stop()` compares the frontmost pid against the one frozen at session start and, on a mismatch, never calls `paste` at all (R23 / KD8; the gate lives in `NoType/Recording/`, see its "Destination guard" section). This module is unchanged by that: a withheld paste simply doesn't reach it, so the pasteboard is never captured, never written, and never restored.
 
 ## Hard rules
 
@@ -55,6 +55,7 @@ Empirically: AppKit native ~50 ms; Slack / Discord 100–150 ms; heavy Electron 
 | Cursor not in a text field / app rejects ⌘V | Paste happens, nothing visible. Toast "could not paste". |
 | User cancels mid-session | Don't paste, don't restore. Clipboard unchanged. |
 | Empty transcript | Skip injection entirely. Don't touch clipboard. |
+| User switched to a different app during transcription | `paste` is never called (`RecordingSession.shouldWithholdPaste`). Clipboard untouched; the transcript still goes to its history row. |
 | Loses focus permission mid-paste | `CGEvent.post` silently no-ops; clipboard has our text; restore runs. Acceptable. |
 
 ## Testing

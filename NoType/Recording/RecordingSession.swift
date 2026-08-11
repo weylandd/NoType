@@ -135,10 +135,11 @@ final class RecordingSession {
     /// swallows an ordinary dictation every time the frontmost app can't
     /// be read, whereas the case this gate exists for is rare and
     /// recoverable from the history row. `NSWorkspace` answers `nil` when
-    /// nothing is frontmost (stored as `0`) and
-    /// `NSRunningApplication.processIdentifier` answers `-1` once the
-    /// process is gone, so "known" is `> 0` rather than "non-zero" — a
-    /// plain `!=` comparison would read `-1` as a live mismatch.
+    /// nothing is frontmost (stored as `0`), and
+    /// `NSRunningApplication.processIdentifier` is documented to answer
+    /// `-1` when it has no pid for the application. So "known" is
+    /// `> 0` rather than "non-zero": a plain `!=` comparison would read
+    /// the `-1` sentinel as a live mismatch and withhold against it.
     ///
     /// **Process identity, not bundle identity** (KD9): an application
     /// that quits and relaunches mid-transcription counts as changed,
@@ -150,6 +151,15 @@ final class RecordingSession {
     /// NoType itself being frontmost — the user opened the popover while
     /// waiting — withholds like any other mismatch. There is deliberately
     /// no self-carve-out: it is not the process they dictated into.
+    ///
+    /// **That absence is only safe because NoType's own windows never
+    /// take frontmost by themselves.** `HUDPanel` is a
+    /// `.nonactivatingPanel` that refuses both key and main, so the
+    /// transcribing HUD on screen during *every* session cannot make
+    /// this gate fire; only a deliberate click on NoType can. If that
+    /// panel configuration ever regresses, this gate stops being rare —
+    /// it withholds every dictation, silently. Anything that makes a
+    /// NoType window activate on its own has to be weighed here first.
     ///
     /// **This is not `shouldAbortBeforePaste`, and must not be folded
     /// into it** (KTD6). That gate aborts by *throwing*, which routes
@@ -542,12 +552,15 @@ final class RecordingSession {
     private var sourceApp: NSRunningApplication?
     /// Process identifier of `sourceApp`, frozen at session start.
     ///
-    /// Stored rather than derived from `sourceApp` on demand:
-    /// `NSRunningApplication.processIdentifier` starts answering `-1`
-    /// once the process exits, so reading it later would report the
-    /// application the user dictated into as unknown precisely when it
-    /// has been replaced. `0` means there was no frontmost application
-    /// at start — the "unknown" `shouldWithholdPaste` pastes through.
+    /// Stored rather than derived from `sourceApp` on demand.
+    /// `NSRunningApplication.processIdentifier` is documented to answer
+    /// `-1` when it has no pid for the application, and an exited
+    /// process is observed to reach that state; either way, reading it
+    /// later risks reporting the application the user dictated into as
+    /// unknown precisely when it has been replaced — which is the case
+    /// the gate exists to catch. Freezing it removes the question.
+    /// `0` means there was no frontmost application at start — the
+    /// "unknown" `shouldWithholdPaste` pastes through.
     private var sourcePID: pid_t = 0
     /// Set by `stop()` when `shouldWithholdPaste` fired, and surfaced on
     /// `SessionSummary` for `AppState` (KTD7). Stays `false` for every
@@ -1226,18 +1239,13 @@ final class RecordingSession {
             throw failure ?? CancellationError()
         }
 
-        // Last synchronous instruction before the paste (KTD5): is the
-        // application about to receive ⌘V still the one the user dictated
-        // into? Everything from the cancellation guard above to here runs
-        // without suspending on the main actor, so this reading of the
-        // frontmost process is the freshest one that can still be acted
-        // on. A transcript that arrives after the user has moved on must
-        // not be typed into whatever document is now under the cursor
-        // (KD8) — but it is a good transcript, so unlike the abort gate
-        // above this one skips *only* the paste and falls through to the
-        // entry build and `history.append` unchanged (R24, KTD6).
-        // `AppState` reads the fact off `summary` and tells the user
-        // their transcript is waiting.
+        // Last synchronous instruction before the paste (KTD5). Everything
+        // from the cancellation guard above to here runs without suspending
+        // on the main actor, and `TextInjector.paste` posts ⌘V before its
+        // own first suspension point, so this is the freshest reading of
+        // the frontmost process that can still be acted on. Why a mismatch
+        // skips only the paste — and must not be folded into the throwing
+        // gate above — is on `shouldWithholdPaste`'s doc-comment (R24, KTD6).
         let currentPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
         pasteWithheldForDestinationChange = Self.shouldWithholdPaste(
             sourcePID: sourcePID,
@@ -1246,7 +1254,14 @@ final class RecordingSession {
         if pasteWithheldForDestinationChange {
             // Fact only — never the transcript, and never the app's name
             // or bundle id: this line is about where the user went.
-            Self.log.info("paste withheld: destination process changed since session start")
+            //
+            // `.notice` rather than `.info`: this is the one session
+            // outcome that ends in *nothing appearing* for the user, so
+            // "my dictation vanished" has to be answerable from the log
+            // store after the fact, and `.info` is not persisted there.
+            // Not `.warning` — the guard doing its job is correct
+            // behaviour, not a degradation the app caused.
+            Self.log.notice("paste withheld: destination process changed since session start")
         } else {
             await TextInjector.paste(final)
         }
@@ -1255,8 +1270,16 @@ final class RecordingSession {
         let entry = makeHistoryEntry(text: final)
         await history.append(entry)
 
+        // `paste=` names a paste. On the withheld arm there wasn't one, so
+        // report that rather than timing the guard and passing it off as
+        // paste latency. Explicitly `.public`: a non-literal String
+        // interpolation is redacted by default, and this value is a
+        // fixed word or a duration, never user content.
+        let pasteField = pasteWithheldForDestinationChange
+            ? "withheld"
+            : "\(Int(tPaste.timeIntervalSince(tGemini)*1000))ms"
         Self.log.info(
-            "session timing: drain=\(Int(tStream.timeIntervalSince(t0)*1000))ms gemini=\(Int(tGemini.timeIntervalSince(tStream)*1000))ms paste=\(Int(tPaste.timeIntervalSince(tGemini)*1000))ms total=\(Int(Date().timeIntervalSince(t0)*1000))ms chunks=\(self.chunkCounter)"
+            "session timing: drain=\(Int(tStream.timeIntervalSince(t0)*1000))ms gemini=\(Int(tGemini.timeIntervalSince(tStream)*1000))ms paste=\(pasteField, privacy: .public) total=\(Int(Date().timeIntervalSince(t0)*1000))ms chunks=\(self.chunkCounter)"
         )
         return entry
     }

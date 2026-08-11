@@ -1624,9 +1624,21 @@ final class AppState {
                 self.hud.hideTranscribingHUD()
                 if sessionSummary.hasFailures {
                     Self.log.warning(
-                        "session paste contains \(sessionSummary.failedChunkCount) failure marker(s) of \(sessionSummary.dispatchedChunkCount) chunk(s)"
+                        "session transcript contains \(sessionSummary.failedChunkCount) failure marker(s) of \(sessionSummary.dispatchedChunkCount) chunk(s)"
                     )
-                    self.surfaceError(.partialTranscription(summary: sessionSummary))
+                    // `.partialTranscription` is titled "Pasted with gaps"
+                    // and tells the user to re-dictate "just that part".
+                    // Both sentences are false when the destination
+                    // changed: nothing was pasted, so *no* part arrived.
+                    // U4 replaces this arm with the combined notice that
+                    // carries the gap count and a Copy action (KTD9);
+                    // until then the honest interim behaviour is the same
+                    // silence a withheld session with no gaps already
+                    // gets, not a notice asserting a paste that never
+                    // happened.
+                    if !sessionSummary.pasteWithheldForDestinationChange {
+                        self.surfaceError(.partialTranscription(summary: sessionSummary))
+                    }
                 }
                 // Fold into lifetime stats — survives the history cap so
                 // the Home tab's totals / top-apps / heatmap keep
