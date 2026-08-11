@@ -38,6 +38,15 @@ import XCTest
 ///     A missing fact is never evidence of a mismatch — withholding on
 ///     one would silently swallow ordinary dictations whenever the
 ///     frontmost app could not be read.
+///
+/// **A second gate reads the same frozen destination, and answers a
+/// different question.** `shouldDiscardInsertionContext(sourcePID:
+/// destinationPID:)` compares the destination against the process the
+/// session *started* in, to decide whether the cursor context captured at
+/// start still describes the document the transcript is landing in. Its
+/// table is under "The cursor-context gate" below, together with the
+/// independence cases — a hands-free dictation is cross-application *and*
+/// pastes, which is the pair a reader is most likely to conflate.
 final class RecordingSessionFocusGuardTests: XCTestCase {
 
     /// Stand-ins for real `pid_t` values. Nothing in the predicate reads
@@ -259,6 +268,161 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
         XCTAssertTrue(withheldOnly.pasteWithheldForDestinationChange)
     }
 
+    // MARK: - The cursor-context gate
+
+    /// `InsertionTarget` is read once, in the context phase of `start()`,
+    /// from the focused field of the application frontmost *then*. Since
+    /// the 2026-08-11 ruling moved the destination to the stop, that is no
+    /// longer necessarily where the transcript lands — so
+    /// `finalizeForInsertion` can be handed one application's cursor text
+    /// while pasting into another's document. Its trailing-punctuation
+    /// strip is destructive: a period the user dictated is deleted on the
+    /// strength of a character read out of a different window.
+    ///
+    /// The gate's table is the same shape as `shouldWithholdPaste`'s —
+    /// both identifiers known and different — over a different pair of
+    /// identifiers.
+
+    func test_startedAndStoppedInTheSameProcess_keepsTheContext() {
+        // The ordinary hold-to-talk dictation, and the overwhelming
+        // majority of sessions. The cursor context was read in the same
+        // document the paste lands in, so both of `finalizeForInsertion`'s
+        // corrections are about the right text.
+        XCTAssertFalse(RecordingSession.shouldDiscardInsertionContext(
+            sourcePID: stoppedIn,
+            destinationPID: stoppedIn
+        ))
+    }
+
+    func test_startedAndStoppedInDifferentProcesses_discardsTheContext() {
+        // The maintainer's ruling: "if I started recording in one window
+        // and pressed stop in a different window, then everything has
+        // already changed, and those formatting corrections should not be
+        // applied."
+        let startedIn: pid_t = 333
+        XCTAssertTrue(RecordingSession.shouldDiscardInsertionContext(
+            sourcePID: startedIn,
+            destinationPID: stoppedIn
+        ))
+    }
+
+    func test_unknownSource_keepsTheContext() {
+        // Nothing was frontmost at session start (or the read failed).
+        // Conservative in the same direction as the paste gate: a missing
+        // fact never triggers the defensive path. Chosen deliberately —
+        // an unknown identifier is a failed read on what is almost always
+        // an ordinary same-application dictation, not evidence of a move.
+        XCTAssertFalse(RecordingSession.shouldDiscardInsertionContext(
+            sourcePID: 0,
+            destinationPID: stoppedIn
+        ))
+    }
+
+    func test_unknownDestination_keepsTheContext() {
+        // The freeze found nothing frontmost at the stop, or never ran.
+        XCTAssertFalse(RecordingSession.shouldDiscardInsertionContext(
+            sourcePID: stoppedIn,
+            destinationPID: 0
+        ))
+    }
+
+    func test_bothUnknown_keepTheContext() {
+        XCTAssertFalse(RecordingSession.shouldDiscardInsertionContext(
+            sourcePID: 0,
+            destinationPID: 0
+        ))
+    }
+
+    func test_terminatedSourceProcess_keepsTheContext() {
+        // `NSRunningApplication.processIdentifier` answers -1 once the
+        // process is gone, and `sourcePID` is frozen precisely so that
+        // sentinel is never what gets compared. Read through the same
+        // `> 0` rule anyway: a plain `!=` would call -1 a mismatch.
+        XCTAssertFalse(RecordingSession.shouldDiscardInsertionContext(
+            sourcePID: -1,
+            destinationPID: stoppedIn
+        ))
+    }
+
+    func test_terminatedDestination_keepsTheContext() {
+        XCTAssertFalse(RecordingSession.shouldDiscardInsertionContext(
+            sourcePID: stoppedIn,
+            destinationPID: -1
+        ))
+    }
+
+    func test_onlyAPositivelyKnownMoveDiscardsTheContext_overThePIDSpace() {
+        // Property form, written as a sweep for the same reason the paste
+        // gate's is: a future term added to the predicate fails here
+        // loudly rather than only in whichever single case it broke.
+        let values: [pid_t] = [-2, -1, 0, 1, 42, 333, 501, 812, 99_999]
+        for source in values {
+            for destination in values {
+                let expected = source > 0 && destination > 0 && source != destination
+                XCTAssertEqual(
+                    RecordingSession.shouldDiscardInsertionContext(
+                        sourcePID: source,
+                        destinationPID: destination
+                    ),
+                    expected,
+                    "source=\(source) destination=\(destination)"
+                )
+            }
+        }
+    }
+
+    // MARK: - The two gates are independent
+
+    func test_handsFreeWalk_discardsTheContext_andStillPastes() {
+        // Start in A, walk to B, stop there, still in B when the
+        // transcript is ready. The cursor context describes A's document
+        // and must go; the paste is aimed at B and must happen. A change
+        // that folded these two questions into one would break exactly
+        // this flow — the whole reason the destination moved to the stop.
+        let startedIn: pid_t = 333
+        let stoppedAndStillIn = stoppedIn
+
+        XCTAssertTrue(RecordingSession.shouldDiscardInsertionContext(
+            sourcePID: startedIn,
+            destinationPID: stoppedAndStillIn
+        ))
+        XCTAssertFalse(RecordingSession.shouldWithholdPaste(
+            destinationPID: stoppedAndStillIn,
+            currentPID: stoppedAndStillIn
+        ))
+    }
+
+    func test_movedAwayDuringTranscription_withholds_andKeepsTheContext() {
+        // The mirror case. Start and stop in A, then switch to B while
+        // waiting. The context is still about A — the place the paste was
+        // aimed at — so there is nothing stale to discard; what fires is
+        // the paste gate.
+        XCTAssertFalse(RecordingSession.shouldDiscardInsertionContext(
+            sourcePID: stoppedIn,
+            destinationPID: stoppedIn
+        ))
+        XCTAssertTrue(RecordingSession.shouldWithholdPaste(
+            destinationPID: stoppedIn,
+            currentPID: somewhereElse
+        ))
+    }
+
+    func test_bothFire_whenTheUserWalkedAndThenMovedAgain() {
+        // Start in A, stop in B, then move to C during transcription.
+        // Nothing pastes, and the row's text is still finalized — against
+        // `.unknown` rather than A's cursor — so both gates matter on the
+        // same session and neither subsumes the other.
+        let startedIn: pid_t = 333
+        XCTAssertTrue(RecordingSession.shouldDiscardInsertionContext(
+            sourcePID: startedIn,
+            destinationPID: stoppedIn
+        ))
+        XCTAssertTrue(RecordingSession.shouldWithholdPaste(
+            destinationPID: stoppedIn,
+            currentPID: somewhereElse
+        ))
+    }
+
     // MARK: - The wiring the table above does not prove
 
     /// Everything above pins the *predicate*. That leaves the claims the
@@ -363,6 +527,106 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
         XCTAssertLessThan(
             pasteArm.close, append.lowerBound,
             "history.append moved inside a branch of the paste gate — a withheld session's transcript would exist nowhere (R24)."
+        )
+    }
+
+    /// The cursor-context gate's wiring, which its table proves nothing
+    /// about: deleting the call, or keeping it and feeding
+    /// `finalizeForInsertion` the cached context anyway, leaves every case
+    /// in "The cursor-context gate" above green while the destructive
+    /// correction it exists to prevent runs on every hands-free
+    /// dictation. Same source-scan shape and same limits as the guard
+    /// above — literal spellings, comments stripped first, presence rather
+    /// than reachability.
+    func test_stopWiring_discardsTheStaleCursorContext_beforeFinalizing() throws {
+        let stopBody = try XCTUnwrap(
+            Self.body(ofFuncNamed: "stop", in: Self.recordingSessionSource()),
+            "Could not parse stop() — the guard lost its anchor."
+        )
+
+        let gate = try XCTUnwrap(
+            stopBody.range(of: "Self.shouldDiscardInsertionContext("),
+            "stop() no longer consults the cursor-context gate, so a hands-free dictation is finalized against the document it started in — and a sentence-final period the user dictated is stripped on the strength of a character read out of another window."
+        )
+        XCTAssertEqual(
+            stopBody.components(separatedBy: "Self.shouldDiscardInsertionContext(").count - 1, 1,
+            "The gate is consulted more than once in stop(). Every assertion below anchors on the first occurrence, so a second call deciding a different `target` passes them all."
+        )
+        XCTAssertTrue(
+            stopBody.contains("sourcePID: sourcePID"),
+            "The gate must compare the pid frozen at session start. Re-deriving it from `sourceApp` reads -1 once that process exits, which the predicate treats as unknown — the context would then be kept for exactly the cross-application session it must be dropped for."
+        )
+        XCTAssertTrue(
+            stopBody.contains("destinationPID: destinationPID"),
+            "The gate must compare against the destination frozen at the stop, not against a fresh read. A paste-time read would make this the paste gate's question instead of its own."
+        )
+
+        // It has to run before the correction it governs.
+        let finalize = try XCTUnwrap(
+            stopBody.range(of: "TextInjector.finalizeForInsertion("),
+            "stop() no longer finalizes the transcript for insertion — re-derive this guard against whatever replaced it."
+        )
+        XCTAssertLessThan(
+            gate.lowerBound, finalize.lowerBound,
+            "The cursor-context gate runs after the text has already been finalized, so its verdict changes nothing."
+        )
+
+        let open = try XCTUnwrap(
+            stopBody.range(of: "{", range: gate.upperBound..<stopBody.endIndex),
+            "The gate's result no longer opens a branch."
+        )
+        let discardArm = try XCTUnwrap(Self.block(from: open.lowerBound, in: stopBody))
+        XCTAssertTrue(
+            discardArm.body.contains("target = .unknown"),
+            "The discard arm no longer substitutes `.unknown`. `.empty` is not a synonym for it: `.empty` claims the field is empty, which suppresses the defensive leading space AND re-enables the trailing-punctuation strip — the destructive correction this gate exists to avoid."
+        )
+        XCTAssertFalse(
+            discardArm.body.contains("cachedContext"),
+            "The discard arm still reads the session's captured context. That stale value is the one thing it must not pass on."
+        )
+
+        let elseBrace = try XCTUnwrap(
+            stopBody[discardArm.close...].range(of: "else {"),
+            "The gate lost its else arm — an ordinary same-application dictation would finalize against `.unknown` and pick up a stray leading space on every paste."
+        )
+        let keepArm = try XCTUnwrap(
+            Self.block(from: stopBody.index(before: elseBrace.upperBound), in: stopBody)
+        )
+        XCTAssertTrue(
+            keepArm.body.contains("cachedContext?.insertionTarget"),
+            "The non-discard arm no longer feeds the captured cursor context, so the common case lost its boundary normalisation entirely."
+        )
+    }
+
+    /// The other end of that comparison. Deleting the freeze leaves
+    /// `sourcePID` at its `0` default, which the predicate reads as
+    /// "unknown" and keeps the context for — the feature is silently off
+    /// and every case in its table still passes. The single-read
+    /// assertions are the second half: `sourceApp`, the OCR gate's pid and
+    /// `sourcePID` all have to come from one `NSWorkspace` read, or the
+    /// application this session believes it began in can differ between
+    /// the three consumers.
+    func test_startFreezesTheSourceProcess_fromTheReadItAlreadyPerforms() throws {
+        let startBody = try XCTUnwrap(
+            Self.body(ofFuncNamed: "start", in: Self.recordingSessionSource()),
+            "Could not parse start() — the guard lost its anchor."
+        )
+
+        XCTAssertTrue(
+            startBody.contains("sourcePID = pid"),
+            "start() no longer freezes the process the session began in, so the cursor-context gate compares against 0 and never fires."
+        )
+        XCTAssertEqual(
+            startBody.components(separatedBy: "sourcePID =").count - 1, 1,
+            "The source process is frozen more than once in start(). The later write wins, and one placed after a suspension would name an application the session did not begin in."
+        )
+        XCTAssertEqual(
+            startBody.components(separatedBy: "NSWorkspace.shared.frontmostApplication").count - 1, 1,
+            "start() reads the frontmost application more than once. One read feeds `sourceApp`, the OCR gate and `sourcePID`; a second read is a second answer, and the session would then hold two disagreeing accounts of where it began."
+        )
+        XCTAssertFalse(
+            startBody.contains("#if"),
+            "start() grew a conditional-compilation block. The scan matches text, not the built configuration, so a freeze inside `#if DEBUG` reads as present here and ships absent."
         )
     }
 

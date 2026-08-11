@@ -202,6 +202,79 @@ final class RecordingSession {
         return destinationPID != currentPID
     }
 
+    /// Pure gate: was this session's cursor context read in a *different*
+    /// application than the one the transcript is going to land in — so
+    /// that `TextInjector.finalizeForInsertion` would be correcting the
+    /// paste against another document's text?
+    ///
+    /// Returns `true` — discard the context and hand
+    /// `finalizeForInsertion` `InsertionTarget.unknown` instead — iff
+    /// **both** identifiers are known and they differ.
+    ///
+    /// **Why this exists.** `InsertionTarget` is captured once, in the
+    /// context phase of `start()`, from the focused field of whatever
+    /// application was frontmost then (`NoType/Context/CLAUDE.md`
+    /// invariant 6). Under the 2026-08-11 product ruling the transcript no
+    /// longer necessarily lands there: a hands-free locked dictation
+    /// starts in application A, walks to B, and stops — and is delivered
+    /// into B. `textBefore` / `textAfter` then describe A's document while
+    /// the paste happens in B's, and both of `finalizeForInsertion`'s
+    /// corrections become guesses about the wrong text. One of them is
+    /// destructive: it **strips a sentence-final `.` / `!` / `?`** when
+    /// `textAfter` looks like the middle of a sentence, so a period the
+    /// user dictated is silently deleted on the strength of a character
+    /// read out of an entirely different window. The maintainer's ruling:
+    /// "if I started recording in one window and pressed stop in a
+    /// different window, then everything has already changed, and those
+    /// formatting corrections should not be applied."
+    ///
+    /// **Why `.unknown` and not `.empty`.** `.unknown` is precisely "we do
+    /// not know what is around the cursor" — the branch that already
+    /// exists for Electron and web-views, where `kAXValueAttribute` is not
+    /// exposed. It prepends the defensive leading space and skips the
+    /// trailing-punctuation strip, which is exactly the right behaviour
+    /// under the same uncertainty. `.empty` would be a *claim* that the
+    /// field is empty: it suppresses the leading space and re-enables the
+    /// strip, asserting a fact we do not have.
+    ///
+    /// **This is not `shouldWithholdPaste`, and the two must not be
+    /// conflated.** That gate compares the frozen destination against the
+    /// frontmost process *at paste time* and answers "may we paste at
+    /// all". This one compares the frozen destination against the process
+    /// the session *started* in and answers "is the context we captured
+    /// about the place we are pasting into". Both can be true, both can be
+    /// false, and neither implies the other:
+    ///
+    ///   * hands-free — start in A, stop in B, still in B when the
+    ///     transcript is ready: this gate fires, the paste gate does not,
+    ///     and the paste goes through with a defensive boundary;
+    ///   * ordinary — start and stop in A, then switch to B during
+    ///     transcription: the paste gate fires, this one does not.
+    ///
+    /// **Conservative in the same direction as the paste gate** (KD9): an
+    /// unknown identifier on either side keeps the context, i.e. keeps the
+    /// behaviour that shipped before this gate existed. That is a
+    /// deliberate choice, not the only defensible one — the defensive path
+    /// is *milder* than the destructive correction it avoids, so "discard
+    /// when unsure" could be argued. It was rejected for two reasons.
+    /// Reading `> 0` as "known" the same way `shouldWithholdPaste` does
+    /// keeps one notion of process identity in the paste region rather
+    /// than two that can drift apart. And an unknown identifier is not
+    /// evidence of a move: it is a failed `NSWorkspace` read on what is
+    /// almost always an ordinary same-application dictation, which would
+    /// then acquire a stray leading space for nothing.
+    ///
+    /// **Process identity, not bundle identity** (KD9), and **window
+    /// identity is not considered** (R26) — inherited by comparing the
+    /// same two identifiers the paste gate does.
+    nonisolated static func shouldDiscardInsertionContext(
+        sourcePID: pid_t,
+        destinationPID: pid_t
+    ) -> Bool {
+        guard sourcePID > 0, destinationPID > 0 else { return false }
+        return sourcePID != destinationPID
+    }
+
     enum SessionError: Error, LocalizedError {
         case notStarted
         case noSpeech
@@ -598,10 +671,28 @@ final class RecordingSession {
     /// time the user actually spoke.
     private var stoppedAt: Date?
     private var sourceApp: NSRunningApplication?
+    /// Process identifier of the application the session *started* in —
+    /// the one whose focused field `InsertionTarget` was read from, and
+    /// therefore the one this session's cursor context describes. Frozen
+    /// from the same `NSWorkspace` read `start()` already performs for
+    /// `sourceApp` and the OCR gate; never re-derived, for the same reason
+    /// `destinationPID` is not (an `NSRunningApplication` answers `-1`
+    /// once its process is gone, which reads as "unknown" precisely when
+    /// the identity has changed).
+    ///
+    /// Read once, by `shouldDiscardInsertionContext` in `stop()`. It is
+    /// deliberately **not** what the paste gate compares — the destination
+    /// is the stop-moment application (KD9 as amended), and this is where
+    /// the dictation began.
+    ///
+    /// `0` when nothing was frontmost at session start — the "unknown"
+    /// `shouldDiscardInsertionContext` keeps the context for.
+    private var sourcePID: pid_t = 0
     /// Process identifier of the application this session's transcript is
     /// aimed at — the one frontmost at the moment the user *stopped*
-    /// recording. Written once by `freezePasteDestination(_:)`; read once
-    /// by the destination gate in `stop()`.
+    /// recording. Written once by `freezePasteDestination(_:)`; read in
+    /// `stop()` by the destination gate and, against `sourcePID`, by
+    /// `shouldDiscardInsertionContext`.
     ///
     /// Stored rather than derived from an `NSRunningApplication` on
     /// demand. `NSRunningApplication.processIdentifier` is documented to
@@ -863,12 +954,19 @@ final class RecordingSession {
             name: frontmost?.localizedName ?? "Unknown",
             bundleID: frontmost?.bundleIdentifier ?? "unknown.bundle"
         )
-        // Consumed by the OCR gate below, and by nothing else. The paste
-        // destination is deliberately *not* frozen here: it is the
-        // application the user is in when they stop, which
+        // Consumed by the OCR gate below and frozen into `sourcePID` for
+        // the cursor-context gate in `stop()`. One read of `NSWorkspace`
+        // feeds all three, so the application this session believes it
+        // began in cannot drift between them.
+        //
+        // The paste *destination* is deliberately not frozen here: it is
+        // the application the user is in when they stop, which
         // `AppState.finalizeRecording` freezes via
-        // `freezePasteDestination(_:)`. See `shouldWithholdPaste`.
+        // `freezePasteDestination(_:)`. See `shouldWithholdPaste`. What is
+        // frozen here is the other end of that comparison — where the
+        // dictation began, which is what the cursor context describes.
         let pid: pid_t = frontmost?.processIdentifier ?? 0
+        sourcePID = pid
 
         // OCR fallback is opt-in via Screen Recording permission AND the
         // user's in-app "Use screen capture for context" toggle (frozen
@@ -1295,7 +1393,28 @@ final class RecordingSession {
         // computed — same reasoning as `InsertionTarget.unknown` itself:
         // we genuinely don't know what's around the cursor, so let
         // `finalizeForInsertion` use its defensive leading-space path.
-        let target = cachedContext?.insertionTarget ?? .unknown
+        //
+        // And take that same `.unknown` path when the context was read in
+        // a different application than the one we're pasting into — the
+        // hands-free flow, where the user dictates in A, walks to B and
+        // stops there. The text around A's cursor says nothing about B's
+        // document, and acting on it would silently delete a period the
+        // user dictated. `shouldDiscardInsertionContext` carries the
+        // reasoning, including why this is a different question from the
+        // paste gate further down.
+        let target: InsertionTarget
+        if Self.shouldDiscardInsertionContext(
+            sourcePID: sourcePID,
+            destinationPID: destinationPID
+        ) {
+            // Fact only — no transcript, no application names, no cursor
+            // text. `.info`: this is a formatting nuance on a session that
+            // still pastes, not an outcome the user would report.
+            Self.log.info("insertion context discarded: the session started in a different process than the one it is pasting into")
+            target = .unknown
+        } else {
+            target = cachedContext?.insertionTarget ?? .unknown
+        }
         let finalRaw = TextInjector.finalizeForInsertion(
             stitched,
             textBeforeCursor: target.textBefore,
