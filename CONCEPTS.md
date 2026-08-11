@@ -9,10 +9,22 @@ Seeded from the dictation-delivery area (capture → transcription → delivery)
 ## Dictation
 
 ### Recording session
-One push-to-talk dictation: everything between the user pressing the hotkey and releasing it, plus the transcription and paste that follow. It is the unit almost every rule in this project is scoped to — one context snapshot, one frozen set of instructions and dictionary entries, one stitched transcript, one paste.
+One dictation: everything from the user starting the hotkey to the moment they stop it, plus the transcription and delivery that follow. Usually that is a single hold of the key — but a session can also be *locked*, in which case start and stop are two separate gestures that may happen at different times and in different applications. It is the unit almost every rule in this project is scoped to — one context snapshot, one frozen set of instructions and dictionary entries, one stitched transcript, one delivery.
 *Avoid:* "session" unqualified, when a network session could also be meant.
 
-A recording session is a value with a lifetime, not a global: it is created on press and dropped after delivery, and there is no "current session" singleton. Text is delivered exactly once, at the end — never mid-session.
+A recording session is a value with a lifetime, not a global: it is created when recording starts and dropped after delivery, and there is no "current session" singleton. Text is delivered at the end, never mid-session, and **at most** once — a delivery aimed at an application the user has since left is withheld rather than pasted.
+
+### Locked session
+A recording session that keeps running hands-free after the user lets go of the hotkey, until a separate deliberate stop. It exists so a long dictation does not require holding a key down, and so the user can move around while talking.
+
+It is the mode in which a session's start and its end stop being the same event: the user can begin dictating in one application, walk to another, and stop there. Any fact captured at the start on the assumption that nothing moves is wrong for a locked session — which is why the place a transcript is delivered to is decided at the stop, not at the start.
+
+### Paste destination
+The application a finished transcript is delivered into: the one frontmost at the moment the user *stopped*, not the one the dictation began in. For an ordinary hold-to-talk dictation those are the same; for a locked session they routinely differ, and the stop is the one that counts, because stopping somewhere is how the user aims the text.
+
+Transcription takes time, so the destination is checked once more immediately before the text is typed. If the user has moved on in the meantime, the delivery is **withheld** — nothing is typed into a document they never meant to edit, and the transcript is kept on its history row instead. A withheld delivery is a designed outcome, not a failure.
+
+Where the dictation *happened* is a different fact, recorded separately for per-application statistics, and it stays fixed at the start even though the destination does not.
 
 ### Chunk
 A slice of a recording session's audio, cut at a natural speech pause, that is transcribed as one unit. A session produces one chunk per pause plus a final one on release; a long unbroken monologue is force-cut so no chunk grows unbounded.
