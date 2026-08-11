@@ -22,7 +22,7 @@ It is the mode in which a session's start and its end stop being the same event:
 ### Paste destination
 The application a finished transcript is delivered into: the one frontmost at the moment the user *stopped*, not the one the dictation began in. For an ordinary hold-to-talk dictation those are the same; for a locked session they routinely differ, and the stop is the one that counts, because stopping somewhere is how the user aims the text.
 
-Transcription takes time, so the destination is checked once more immediately before the text is typed. If the user has moved on in the meantime, the delivery is **withheld** — nothing is typed into a document they never meant to edit, and the transcript is kept on its history row instead. A withheld delivery is a designed outcome, not a failure.
+Transcription takes time, so the destination is checked once more immediately before the text is typed. If the user has moved on in the meantime, the delivery is **withheld** — nothing is typed into a document they never meant to edit, and the transcript is kept on its history row instead, with a notice naming where it had been headed. A withheld delivery is a designed outcome, not a failure, but it is never a silent one: the user was expecting text to appear somewhere and it did not.
 
 Where the dictation *happened* is a different fact, recorded separately for per-application statistics, and it stays fixed at the start even though the destination does not.
 
@@ -40,6 +40,11 @@ A gap marker is what makes partial delivery possible: the surviving chunks are s
 The failure class meaning *the transport itself did not answer* — nothing came back from the server, as opposed to the server answering with a refusal or an error. It is distinguished from every other failure because it is the only one where the connection itself is suspect, so it is the only one whose retry is issued over a fresh connection rather than the one that just went silent.
 
 Distinct from a rate-limit or a server error: those came *back* over a demonstrably working connection, so they are retried as-is. *Offline* — the system reporting no network path at all — is answered without issuing a request at all, but it deliberately reports itself downstream as this same class, so that nothing after the point of failure has to know the difference.
+
+### Notice
+The one transient panel a finished dictation raises to tell the user something they would otherwise have to infer — that chunks were lost to gap markers, or that delivery was withheld because they had moved on. An ordinary dictation that delivered everything raises none.
+
+**At most one per dictation, and that is a constraint rather than a habit:** a second notice *replaces* the first rather than stacking beside it, so raising two silently discards one. Which one survives is therefore a decision made up front, not an accident of which code path ran last. A notice names the cause and then the consequence; only the consequence varies with what was kept, because the cause is the only place the user ever learns *why* — the history row deliberately does not carry it. A notice offers an action only where the surface it points at offers the same one: a panel promising something the row will not do is worse than a panel promising nothing. Because the panel draws over whatever application the user has moved to — possibly a screen share or a call — it never renders any of the transcript itself.
 
 ## Flagged ambiguities
 
