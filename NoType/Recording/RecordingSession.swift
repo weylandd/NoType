@@ -309,6 +309,14 @@ final class RecordingSession {
     /// might succeed. Swept over the whole status space by
     /// `SplitRetryNetworkBoundTests` rather than spot-checked, so a widened
     /// range cannot slip through.
+    ///
+    /// **Its twin is `GeminiClient.requiresFreshConnection(after:)`**, which
+    /// asks the same status-0 question one layer down to decide whether the
+    /// retry must drop the connection pool. Unlike the two classifiers
+    /// above, this pair has no adjacency to lean on and no compiler term
+    /// either — neither is an exhaustive switch, so widening one raises
+    /// nothing at the other. `GeminiRetryPolicyTests` pins them equal across
+    /// the status space instead; widen one and you have to widen the other.
     nonisolated static func isNetworkClass(_ error: Error) -> Bool {
         guard let gerr = error as? GeminiClient.GeminiError,
               case .http(let status, _) = gerr else { return false }

@@ -36,6 +36,7 @@ External SPM dependencies: **Sparkle 2** (auto-updates, see ADR-017 and `NoType/
 
 Read these in order when onboarding:
 
+- **@CONCEPTS.md** — shared domain vocabulary (recording session, chunk, gap marker, network class) plus the ambiguous words to qualify; read it first so the other docs' nouns mean what they say.
 - **@docs/architecture/overview.md** — current-state snapshot (Mermaid data flow, module table, external integrations, threading model, invariants). Regenerate when drift appears, don't hand-edit for accuracy.
 - **@docs/architecture.md** — short index pointing at `architecture/overview.md` and the solutions store.
 - **@docs/decisions.md** — index of architecture decisions → per-decision files in `docs/solutions/`.
