@@ -167,6 +167,18 @@ final class RecordingSession {
     /// waiting — withholds like any other mismatch. There is deliberately
     /// no self-carve-out: it is not the process they stopped in.
     ///
+    /// **The stop-moment freeze adds the mirror case, and it is not the
+    /// same case.** A user who *stops* with NoType frontmost makes NoType
+    /// the destination, so if they are still there at paste time nothing
+    /// mismatches and ⌘V lands in whatever field they left focused —
+    /// dictating into our own Dictionary or Instructions fields works, and
+    /// a popover left open swallows the paste into nothing. Both follow
+    /// from the rule rather than escaping it: NoType is only ever the
+    /// destination when the user deliberately put it in front, and the
+    /// transcript is in history either way. Do not "fix" this by excluding
+    /// our own pid — that reintroduces a withhold for a place the user
+    /// chose, which is the shape the 2026-08-11 ruling reversed.
+    ///
     /// **That absence is only safe because NoType's own windows never
     /// take frontmost by themselves.** `HUDPanel` is a
     /// `.nonactivatingPanel` that refuses both key and main, so the
@@ -989,12 +1001,6 @@ final class RecordingSession {
         recorder.recentSamples(count: count)
     }
 
-    /// Localised name of the app that was frontmost at session start —
-    /// used as the paste target label in the transcribing HUD.
-    var sourceAppName: String? {
-        sourceApp?.localizedName
-    }
-
     /// Best-effort cancel: stop capturing, drop any in-flight sender,
     /// and discard accumulated responses. Pasting is skipped.
     func cancel() async {
@@ -1177,9 +1183,22 @@ final class RecordingSession {
     ///
     /// Never called → `0` / `nil`, which the gate reads as unknown and
     /// pastes through, matching the pre-guard behaviour.
-    func freezePasteDestination(_ app: NSRunningApplication?) {
+    ///
+    /// **Returns the frozen name so the transcribing HUD can label itself
+    /// from the same statement that arms the gate.** The HUD tells the
+    /// user where the transcript is about to land, so it has to name the
+    /// destination, not the application the session began in — under the
+    /// 2026-08-11 ruling those differ for every hands-free dictation that
+    /// walks somewhere else, and a label naming the wrong one is the same
+    /// class of false statement as the "Pasted with gaps" notice that used
+    /// to advise re-dictating a part that was never pasted. Returning it
+    /// rather than exposing a second accessor is what makes the two
+    /// impossible to drift: there is one read of `NSWorkspace`, and the
+    /// label and the comparison are the same value by construction.
+    func freezePasteDestination(_ app: NSRunningApplication?) -> String? {
         destinationPID = app?.processIdentifier ?? 0
         destinationAppName = app?.localizedName
+        return destinationAppName
     }
 
     /// Stop audio capture immediately, without draining or sending.

@@ -380,6 +380,13 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
     /// inside the `Task` — or into `stop()`, which that `Task` calls —
     /// reopens exactly that window while leaving every other assertion in
     /// this file green.
+    ///
+    /// **The occurrence count is load-bearing, not defensive style.** Every
+    /// ordering assertion below anchors on the *first* match, so a second
+    /// freeze added after the suspension is invisible to all of them while
+    /// being the exact bug they exist to prevent: the later call is the one
+    /// that wins, and it reads the frontmost application at a moment the
+    /// user was never promised. One call, or this guard proves nothing.
     func test_finalizeRecording_freezesTheDestination_beforeThePathSuspends() throws {
         let body = try XCTUnwrap(
             Self.body(ofFuncNamed: "finalizeRecording", in: Self.appStateSource()),
@@ -394,7 +401,23 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
             body.contains("freezePasteDestination(NSWorkspace.shared.frontmostApplication)"),
             "The destination must be the application frontmost at the stop. Passing anything derived from the session's own start-time state restores the behaviour the 2026-08-11 ruling reversed: a hands-free locked dictation that walks to another application delivers nothing."
         )
+        XCTAssertEqual(
+            body.components(separatedBy: "session.freezePasteDestination(").count - 1, 1,
+            "The destination is frozen more than once in finalizeRecording. Every ordering assertion here anchors on the first occurrence, so a second freeze sitting after the suspension passes them all and still overwrites the destination with a later reading — the precise failure this guard exists to catch."
+        )
 
+        // A `#if` around the freeze would satisfy every literal assertion
+        // above while compiling the call out of the shipping configuration.
+        XCTAssertFalse(
+            body.contains("#if"),
+            "finalizeRecording grew a conditional-compilation block. The scan matches text, not the built configuration, so a freeze inside `#if DEBUG` reads as present here and is absent from the release binary. Re-derive this guard before adding one."
+        )
+
+        // Currently subsumed by the `Task {` assertion below — `finalizeRecording`
+        // is synchronous, so an `await` ahead of the freeze does not compile at
+        // all. Kept because that is a property of today's signature, not of the
+        // contract: the day this method becomes `async`, this is the assertion
+        // that still holds the line.
         let firstAwait = try XCTUnwrap(
             body.range(of: "await "),
             "finalizeRecording no longer awaits anything — this guard's ordering assertion has lost its meaning and needs rewriting, not deleting."
@@ -411,6 +434,50 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
         XCTAssertLessThan(
             freeze.lowerBound, firstTask.lowerBound,
             "The freeze moved inside the stop task. That task is scheduled, not immediate: the main actor can service an app-switch before its body runs."
+        )
+
+        // The production comment claims the freeze is the first statement
+        // after the session guard, and `recordingState = .sending` is the
+        // statement it claims to precede. Pinning it keeps the claim and the
+        // code from drifting apart without anything failing.
+        let stateChange = try XCTUnwrap(
+            body.range(of: "recordingState = .sending"),
+            "finalizeRecording no longer marks the session as sending — re-derive this guard against whatever replaced it."
+        )
+        XCTAssertLessThan(
+            freeze.lowerBound, stateChange.lowerBound,
+            "Statements moved ahead of the freeze. Each one is a chance for a future edit to slip a suspension in front of the destination read; the freeze stays first so that cannot happen quietly."
+        )
+    }
+
+    /// The transcribing HUD is on screen for the whole transcription wait
+    /// and names where the transcript is going, so it has to be fed the
+    /// frozen destination. It was fed `session.sourceAppName` — the
+    /// *session-start* application — which named the wrong window for
+    /// every hands-free dictation that walked somewhere else, the same
+    /// class of false statement as a "Pasted with gaps" notice on a
+    /// session that pasted nothing.
+    ///
+    /// Reverting it is invisible to every other assertion in this file, so
+    /// it gets its own: the label must come from the freeze's return value,
+    /// which is the same read the gate compares.
+    func test_transcribingHUD_isLabelledFromTheFrozenDestination() throws {
+        let body = try XCTUnwrap(
+            Self.body(ofFuncNamed: "finalizeRecording", in: Self.appStateSource()),
+            "Could not parse finalizeRecording() — the guard lost its anchor."
+        )
+
+        XCTAssertTrue(
+            body.contains("let destinationName = session.freezePasteDestination("),
+            "The HUD label no longer comes from the freeze's return value. One read of NSWorkspace has to feed both the label and the comparison, or the HUD can name one application while the transcript is aimed at another."
+        )
+        XCTAssertTrue(
+            body.contains("let target = destinationName ??"),
+            "The transcribing HUD's target label is derived from something other than the frozen destination."
+        )
+        XCTAssertFalse(
+            body.contains("sourceAppName"),
+            "The HUD label reads the session-start application again. That is the application the user began in, not the one the transcript is headed for — under the 2026-08-11 ruling those differ for every hands-free dictation that walks somewhere else."
         )
     }
 
@@ -518,6 +585,28 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
         XCTAssertTrue(stripped.contains("let kept = 1"))
     }
 
+    /// The line-comment sibling of the mutation above. A `/* … */` around
+    /// the freeze turns the feature off while leaving every literal this
+    /// guard searches for in the file, so a stripper that handled only
+    /// `//` would stay green on it. Neither scanned file carries a block
+    /// comment today — which is why this has to be a fixture rather than
+    /// something the real scan would have surfaced.
+    func test_commentStripping_hidesBlockCommentedCode_andSparesURLLiterals() {
+        let stripped = Self.strippingComments("""
+        /* an older copy: session.freezePasteDestination(NSWorkspace.shared.frontmostApplication) */
+        let feed = "https://weylandd.github.io/NoType/appcast.xml"
+        let live = session.freezePasteDestination(NSWorkspace.shared.frontmostApplication)
+        """)
+        XCTAssertEqual(
+            stripped.components(separatedBy: "session.freezePasteDestination(").count - 1, 1,
+            "Only the live call may survive. A block-commented copy satisfying the presence needle is the mutation this stripper exists to catch."
+        )
+        XCTAssertTrue(
+            stripped.contains("https://weylandd.github.io/NoType/appcast.xml"),
+            "A URL literal's `//` was read as a comment. Truncating a line is how an absence assertion passes for the wrong reason."
+        )
+    }
+
     func test_blockExtractor_stopsAtTheMatchingBrace() throws {
         let source = "if a { inner { nested } done } after"
         let open = try XCTUnwrap(source.range(of: "{")).lowerBound
@@ -575,16 +664,42 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
     /// explaining where each must and must not appear, so an absence
     /// assertion over un-stripped text would fail on the comments alone.
     ///
-    /// Naive about `//` inside string literals, which can only delete
-    /// text and so can only cause a loud failure, never a silent pass.
+    /// **Block comments are stripped too, and that is not symmetry for its
+    /// own sake.** A `/* … */` around the freeze disables the feature while
+    /// leaving every literal this guard searches for intact, so a line-only
+    /// stripper is green on exactly the mutation it was written to catch —
+    /// the same hole `GeminiClientOfflineShortCircuitTests`' stripper
+    /// already closed, ported here rather than rediscovered. Neither
+    /// scanned file contains a block comment today; that makes the gap
+    /// latent, not absent, and latent is what a guard is for.
+    ///
+    /// The `://` sentinel is the companion trap: without it the line pass
+    /// truncates every URL literal at its scheme. **Do not restate the old
+    /// claim that mangling a string literal "can only cause a loud failure,
+    /// never a silent pass"** — that was true when this file only asserted
+    /// presence, and stopped being true when it grew absence assertions
+    /// (`start()` must not contain `destinationPID`; the withheld arm must
+    /// not contain `TextInjector.paste(`). Deleting text is exactly how an
+    /// absence assertion passes for the wrong reason.
     private static func strippingComments(_ source: String) -> String {
-        source
+        // The sentinel must not itself contain `//`, or the line pass below
+        // truncates every URL literal at the scheme.
+        let urlSchemeSentinel = "\u{1}"
+        var s = source.replacingOccurrences(of: "://", with: urlSchemeSentinel)
+
+        while let open = s.range(of: "/*"),
+              let close = s.range(of: "*/", range: open.upperBound..<s.endIndex) {
+            s.replaceSubrange(open.lowerBound..<close.upperBound, with: "")
+        }
+
+        return s
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { line -> Substring in
                 guard let comment = line.range(of: "//") else { return line }
                 return line[line.startIndex..<comment.lowerBound]
             }
             .joined(separator: "\n")
+            .replacingOccurrences(of: urlSchemeSentinel, with: "://")
     }
 
     private static func source(of repoRelativePath: String) -> String {

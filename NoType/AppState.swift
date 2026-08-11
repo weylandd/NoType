@@ -1597,7 +1597,11 @@ final class AppState {
         // the stop rather than delaying this capture.) Reading it later —
         // inside `stop()`, say — reopens the window this ordering closes,
         // because `stop()` runs from the `Task` below.
-        session.freezePasteDestination(NSWorkspace.shared.frontmostApplication)
+        //
+        // The name it returns is the transcribing HUD's label — the same
+        // value the gate compares, so the HUD cannot name one application
+        // while the transcript is aimed at another.
+        let destinationName = session.freezePasteDestination(NSWorkspace.shared.frontmostApplication)
 
         recordingState = .sending
         // Hotkey released → stop capturing *now* so the mic is truly
@@ -1615,7 +1619,22 @@ final class AppState {
         // Mac can't sleep mid-call. `releaseMusicInterruption()` is
         // idempotent, so the arms below no longer re-call it.
         releaseMusicInterruption()
-        let target = session.sourceAppName ?? "the focused app"
+        // Where the transcript is headed, not where the session began.
+        // Those are the same application for an ordinary hold-to-talk
+        // dictation and different ones for every hands-free dictation that
+        // walks somewhere else, and this HUD is on screen for the whole
+        // wait — naming the starting application would tell the user to
+        // watch the wrong window.
+        //
+        // NoType itself is a legitimate answer here: the user stopped with
+        // our own window frontmost, the gate will compare against it, and
+        // ⌘V will land in whatever field they left focused. Naming it is
+        // the honest reading and it matches what they just did — the one
+        // thing this label must never do is name somewhere the text isn't
+        // going. `nil` (nothing frontmost) keeps the pre-existing vague
+        // fallback, which is still true: the gate reads that as unknown
+        // and pastes wherever focus is at paste time.
+        let target = destinationName ?? "the focused app"
         // Dismiss-only: the X button hides the HUD without cancelling the
         // in-flight Gemini call. Transcription continues and the paste
         // still fires when ready. Escape (handled globally via the
