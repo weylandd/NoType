@@ -150,11 +150,11 @@ final class GeminiClientOfflineShortCircuitTests: XCTestCase {
     /// or restructuring the loop away from `while true` makes it fail
     /// loudly — fine, that is a review trigger, not a false negative.
     func test_shortCircuitThrows_beforeTheRetryLoop_andNotInsidePerformOnce() throws {
-        let source = try String(
+        let source = Self.strippingComments(try String(
             contentsOf: Self.repoRoot()
                 .appendingPathComponent("NoType/Gemini/GeminiClient.swift"),
             encoding: .utf8
-        )
+        ))
 
         let probeCall = "reachabilityProbe().isDefinitelyOffline()"
 
@@ -234,6 +234,16 @@ final class GeminiClientOfflineShortCircuitTests: XCTestCase {
     /// `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`:
     /// the helper exists, the retry loop calls it, the call is *gated* on
     /// the predicate, and it happens before the re-issue rather than after.
+    /// Three of those assertions are narrower than they look, and each is
+    /// narrow because the wider form was **verified green** under a live
+    /// mutation rather than reasoned about. The gate needle carries its
+    /// `if ` — without it, inverting the gate to `if !…` (which flushes on
+    /// 429 and 5xx and never on the class R28 is about) passes everything
+    /// here. The `session.flush` check reads `flushPooledConnections`'s own
+    /// body rather than the whole file. And every needle runs against
+    /// comment-stripped source, because body-scoping alone was *still*
+    /// green on a helper hollowed out with the old call left in the note —
+    /// see `strippingComments`.
     ///
     /// Limits, recorded so a green run is not over-trusted: this reads one
     /// file and matches literal spellings, and it proves the call is
@@ -241,11 +251,11 @@ final class GeminiClientOfflineShortCircuitTests: XCTestCase {
     /// `flushPooledConnections` or `requiresFreshConnection` fails it
     /// loudly — a review trigger, not a false negative.
     func test_networkClassRetry_dropsThePooledConnection_beforeReissuing() throws {
-        let source = try String(
+        let source = Self.strippingComments(try String(
             contentsOf: Self.repoRoot()
                 .appendingPathComponent("NoType/Gemini/GeminiClient.swift"),
             encoding: .utf8
-        )
+        ))
 
         let sendRequest = try XCTUnwrap(
             Self.body(ofFuncNamed: "sendRequest", in: source),
@@ -258,15 +268,27 @@ final class GeminiClientOfflineShortCircuitTests: XCTestCase {
             source.contains("private func flushPooledConnections() async"),
             "GeminiClient no longer declares flushPooledConnections — a network-class retry now reuses the connection that just went silent (R28)."
         )
+        // Scoped to the helper's own body, not the file. A file-wide
+        // `contains` is green on a hollowed helper whose body was commented
+        // out with the old call left in the note — a routine "disable while
+        // investigating" shape that kills R28 silently.
+        let flushBody = try XCTUnwrap(
+            Self.body(ofFuncNamed: "flushPooledConnections", in: source),
+            "Could not parse flushPooledConnections — the guard lost its anchor."
+        )
         XCTAssertTrue(
-            source.contains("session.flush"),
+            flushBody.contains("session.flush"),
             "flushPooledConnections no longer calls session.flush — it is a no-op and the retry re-inherits the dead pooled connection."
         )
 
-        // The call, scoped to the retry loop's own function.
+        // The call, scoped to the retry loop's own function. The `if ` is
+        // part of the needle on purpose: without it, inverting the gate to
+        // `if !Self.requiresFreshConnection(...)` — which flushes on 429 and
+        // 5xx and never on the class R28 is about — satisfies every
+        // assertion below.
         let gateIdx = try XCTUnwrap(
-            sendRequest.range(of: "Self.requiresFreshConnection(after: error)"),
-            "sendRequest's retry path no longer consults requiresFreshConnection — either the drop became unconditional (a handshake cost on every 429 and 5xx) or it is gone."
+            sendRequest.range(of: "if Self.requiresFreshConnection(after: error) {"),
+            "sendRequest's retry path no longer gates on requiresFreshConnection in the expected shape — the drop may have become unconditional (a handshake cost on every 429 and 5xx), inverted, or removed."
         ).lowerBound
         let flushIdx = try XCTUnwrap(
             sendRequest.range(of: "await flushPooledConnections()"),
@@ -287,7 +309,7 @@ final class GeminiClientOfflineShortCircuitTests: XCTestCase {
         ).lowerBound
         XCTAssertLessThan(
             flushIdx, sleepIdx,
-            "The connection drop must happen before the retry is issued, otherwise it rescues the wrong attempt."
+            "The connection drop must sit ahead of the backoff sleep, which is the only fixed landmark between it and the re-issue. Below the sleep there is nothing left to pin it against, and a drop that slides past the loop edge would apply to the attempt after the one it was meant to rescue."
         )
 
         // The gate belongs to the retry loop, not to the pre-flight region
@@ -302,7 +324,74 @@ final class GeminiClientOfflineShortCircuitTests: XCTestCase {
         )
     }
 
+    // MARK: - The shipped session derives from the named budgets
+
+    /// `GeminiRetryPolicyTests` proves `makeSessionConfiguration()` applies
+    /// `requestInactivityBudget` and `resourceCeiling`. Nothing proved the
+    /// `URLSession` the app actually uses comes *from* that factory — and a
+    /// factory nobody calls is the mirror image of the absence-only trap in
+    /// `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`
+    /// ("a test that only asserts 'not at A' is satisfied by 'nowhere at
+    /// all'"). Here: a test that proves the factory is right is satisfied by
+    /// nothing calling the factory.
+    ///
+    /// The mutation this closes: give `init()` its own configuration with a
+    /// literal timeout. Every assertion in `GeminiRetryPolicyTests` stays
+    /// green, `makeSessionConfiguration()` becomes dead code, and a stalled
+    /// chunk costs whatever the literal says. That is exactly where R20's
+    /// cut would land — it would move a constant nothing reads.
+    ///
+    /// A source assertion rather than a behavioural one because `session` is
+    /// `private`; widening it to read `.configuration` from a test would
+    /// trade an encapsulation boundary for the same fact. Same trade, and
+    /// the same shape, as
+    /// `LaunchOrderingTests.test_launchWork_isActuallyWiredUp_fromNoTypeAppInit`.
+    func test_shippedSession_isBuiltFromTheNamedBudgetFactory() throws {
+        let source = Self.strippingComments(try String(
+            contentsOf: Self.repoRoot()
+                .appendingPathComponent("NoType/Gemini/GeminiClient.swift"),
+            encoding: .utf8
+        ))
+
+        XCTAssertTrue(
+            source.contains("self.session = URLSession(configuration: Self.makeSessionConfiguration())"),
+            "GeminiClient's URLSession is no longer derived from makeSessionConfiguration(). The named budgets are then decorative — the factory's own tests stay green while the shipped session carries whatever was built by hand."
+        )
+
+        // Uniqueness, so the assertion above cannot be satisfied by a
+        // surviving call beside a second session that carries its own
+        // budgets and is the one that actually ships.
+        XCTAssertEqual(
+            source.components(separatedBy: "URLSession(configuration:").count - 1, 1,
+            "Expected exactly one URLSession construction in GeminiClient.swift. A second one would carry its own budgets, unreached by every test that pins the named ones."
+        )
+    }
+
     // MARK: - Fixtures pinning the guard above
+
+    /// The mutation that defeated this guard's first draft, as a fixture:
+    /// a commented-out call must not satisfy a needle, and a URL literal
+    /// must survive the stripper.
+    func test_commentStripper_dropsTextThatDoesNotRun_andKeepsURLLiterals() {
+        let source = """
+        private func flushPooledConnections() async {
+            // Disabled while investigating: session.flush { continuation.resume() }
+        }
+        /* an older copy: session.flush { } */
+        let endpoint = URL(string: "https://example.com/v1beta/models")!
+        func live() { session.flush { } }
+        """
+        let stripped = Self.strippingComments(source)
+
+        XCTAssertEqual(
+            stripped.components(separatedBy: "session.flush").count - 1, 1,
+            "Only the one live call may survive. The line-commented and block-commented copies are exactly the mutation this stripper exists to catch."
+        )
+        XCTAssertTrue(
+            stripped.contains("https://example.com/v1beta/models"),
+            "A URL literal's `//` must not be read as a comment — GeminiClient.swift carries endpoint literals."
+        )
+    }
 
     func test_bodyExtractor_stopsAtTheFunctionsClosingBrace() throws {
         let source = """
@@ -330,6 +419,48 @@ final class GeminiClientOfflineShortCircuitTests: XCTestCase {
         let b = try XCTUnwrap(Self.body(ofFuncNamed: "b", in: source))
         XCTAssertTrue(b.contains("isDefinitelyOffline"))
         XCTAssertFalse(b.contains("let x = 1"))
+    }
+
+    /// The scanned source with comments removed, so a needle can only match
+    /// code that actually runs.
+    ///
+    /// **Added because scoping was not enough.** The `session.flush` check
+    /// below was first scoped to `flushPooledConnections`'s own body, which
+    /// looked sufficient — and a live mutation walked straight through it:
+    /// comment the body out, leave `// Disabled while investigating:
+    /// session.flush { … }` in its place, and the assertion still matched,
+    /// inside the right function, on text that no longer executes. Every
+    /// other needle in this file had the same hole. "Disable while
+    /// investigating" is the routine way matching-text and
+    /// matching-behaviour come apart, per
+    /// `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`.
+    ///
+    /// Limits, recorded so the green is not over-trusted: block comments are
+    /// stripped non-recursively (Swift permits nesting), and `//` inside a
+    /// string literal is stripped too — except the `://` of a URL, which is
+    /// protected, because `GeminiClient.swift` carries endpoint literals.
+    /// No needle in this file sits on a line with another `//`-bearing
+    /// literal. It is deliberately naive: a wrong parse here fails *loud*
+    /// (the anchor stops resolving), which is the safe direction.
+    private static func strippingComments(_ source: String) -> String {
+        // The sentinel must not itself contain `//`, or the line pass below
+        // truncates every URL literal at the scheme. (It did, on the first
+        // draft; the fixture test is what caught it.)
+        let urlSchemeSentinel = "\u{1}"
+        var s = source.replacingOccurrences(of: "://", with: urlSchemeSentinel)
+
+        while let open = s.range(of: "/*"),
+              let close = s.range(of: "*/", range: open.upperBound..<s.endIndex) {
+            s.replaceSubrange(open.lowerBound..<close.upperBound, with: "")
+        }
+
+        let lines = s.split(separator: "\n", omittingEmptySubsequences: false).map { line -> Substring in
+            guard let comment = line.range(of: "//") else { return line }
+            return line[line.startIndex..<comment.lowerBound]
+        }
+
+        return lines.joined(separator: "\n")
+            .replacingOccurrences(of: urlSchemeSentinel, with: "://")
     }
 
     /// Brace-balanced slice of a named function's body: locate `func

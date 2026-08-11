@@ -106,6 +106,32 @@ Implemented via `retryDecision(for:attempt:)`:
 - HTTP 4xx other than 429 → no retry.
 - `GeminiError.truncated` (`finishReason == MAX_TOKENS`) → no retry (an identical re-issue truncates identically; recovered one layer up as a `[…]` gap marker).
 
+**The network-class retry — and only that one — is issued over a fresh
+connection** (R28 / KTD13). `requiresFreshConnection(after:)` gates a
+`flushPooledConnections()` call (`URLSession.flush`) between the failure and
+the backoff sleep, because the measured failure was a dead *pooled
+connection*, not a dead network: a request stalled for the full budget and
+the same payload answered in 1.7 s on a new connection moments later.
+Re-issuing over the socket that just went silent re-inherits the fault and
+turns the retry into nothing but a second wait. A 429 or a 5xx came *back*
+from Gemini over a demonstrably working connection, so those arms do not pay
+for a handshake. Two things about it are load-bearing:
+
+- **`requiresFreshConnection` has a twin — `RecordingSession.isNetworkClass(_:)`.**
+  Both are `.http(status: 0, _)`. They are separate because they answer for
+  different consumers (drop the pool / bound `splitRetry`), and nothing
+  structural keeps them agreeing across the module boundary, so
+  `GeminiRetryPolicyTests` pins them equal over the status space. Widen one,
+  widen the other.
+- **`flushPooledConnections` is safe beside a sibling request, and invariant
+  I1 is not the reason.** I1 bounds one *recording* session's transcription
+  traffic; `classifyApp` and `validateKey` share the same `URLSession` and
+  bypass `sendRequest` entirely, and `classifyApp` is fire-and-forget
+  launched by the recording-start path itself. What makes it safe is that
+  `flush` clears the idle connection cache and affects only *future*
+  requests. `reset(completionHandler:)` and `invalidateAndCancel()` do
+  disturb in-flight work and must not be substituted.
+
 Each attempt logs `attempt=N`. These retries are the HTTP-level safety net inside one Gemini call. **Session-level resilience lives one layer up** in `RecordingSession`: if a call still fails after exhausting its retries, the session classifies the error as terminal (auth, blocked, encode, cancellation) or recoverable (everything else — HTTP, empty, decoding, `.truncated`). Recoverable failures become `RecordingSession.failureMarker` ("[…]") at stitch time and a batched call gets split into N independent `transcribe` retries first. The session aborts only on terminal errors or when every dispatched chunk failed. See `NoType/Recording/CLAUDE.md` "Partial recovery".
 
 `sendRequest` also inspects the candidate's `finishReason` after parsing (response-parsing only — no prompt or cache-prefix change): a content block (SAFETY/RECITATION/PROHIBITED_CONTENT/BLOCKLIST/SPII/IMAGE_SAFETY) throws `GeminiError.blocked` (terminal, same as a prompt-level block); `MAX_TOKENS` throws `GeminiError.truncated` (recoverable → gap marker); `STOP` / absent / unrecognised keep the text. Pinned by `GeminiFinishReasonTests`.
@@ -123,7 +149,8 @@ Each attempt logs `attempt=N`. These retries are the HTTP-level safety net insid
 - `NoTypeTests/PromptEvalTests.swift` + `NoTypeTests/PromptEvalHarness.swift` — live-API behavioural eval. Drives 9 audio fixtures through the prompts and asserts on substring / word-count / wordCountCeiling. Gated by Keychain entry `app.notype.tests.gemini` (or `NOTYPE_GEMINI_KEY` env). Skips cleanly when neither is set.
 - `NoTypeTests/AppCategorizerTests.swift` — pins the classifier JSON parser.
 - `NoTypeTests/NetworkReachabilityTests.swift` — pins the offline verdict's conservatism (only `.unsatisfied`; `nil` / `.requiresConnection` / an unrecognised future case all answer "not offline"), the `NWPath.Status` mapping, the first-delivery wait cap, and last-writer-wins on `record`. `test_liveProbe_onAnOnlineMachine_doesNotReportOffline` starts a **real** `NWPathMonitor` and asserts a value rather than skipping — deliberate, but it means the suite fails on a genuinely offline machine. Don't run the suite with Wi-Fi off during an offline smoke test and read that failure as a regression.
-- `NoTypeTests/GeminiClientOfflineShortCircuitTests.swift` — pins the short-circuit error's *shape* (same `.http(0, "URLError code=…")` both producers build, still recoverable and retainable downstream), the log-only status-0 description arm, and the *position* of the check via a source guard: present in `sendRequest`, absent from `performOnce`, and gating an actual `throw` ahead of the retry loop.
+- `NoTypeTests/GeminiRetryPolicyTests.swift` — pins the HTTP retry ladder (swept over the status space, not enumerated), `requiresFreshConnection` and its agreement with `RecordingSession.isNetworkClass`, and the two named `URLSession` budgets plus the fact that `makeSessionConfiguration()` applies them. None of it was reachable from a test before U1 of `docs/plans/2026-08-11-001-fix-dictation-delivery-reliability-plan.md` widened them past `private` (KTD3).
+- `NoTypeTests/GeminiClientOfflineShortCircuitTests.swift` — pins the short-circuit error's *shape* (same `.http(0, "URLError code=…")` both producers build, still recoverable and retainable downstream), the log-only status-0 description arm, and the *position* of the check via a source guard: present in `sendRequest`, absent from `performOnce`, and gating an actual `throw` ahead of the retry loop. It carries a second source guard for the R28 connection drop (present, gated, ordered ahead of the backoff) and one pinning that the shipped `URLSession` is built from `makeSessionConfiguration()` — without that last one, a hand-rolled config in `init()` leaves every budget test green while the app ships a different timeout.
 
 ## Pointers
 

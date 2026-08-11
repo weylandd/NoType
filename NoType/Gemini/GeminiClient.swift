@@ -840,6 +840,9 @@ actor GeminiClient {
     /// - HTTP 4xx other than 429: no retry; fail immediately.
     /// - `GeminiError.blocked` / `.empty` / `.decoding` / `.missingKey`:
     ///   non-retryable.
+    /// - A network-class retry additionally **drops the pooled connections**
+    ///   before re-issuing (R28 / KTD13) — see `requiresFreshConnection(after:)`
+    ///   and `flushPooledConnections()`. The other arms do not.
     ///
     /// Before any of that, a pre-flight reachability check short-circuits
     /// the call when the system reports no network path. **That throw sits
@@ -1058,47 +1061,17 @@ actor GeminiClient {
         return (trimmed, TokenUsage(from: parsed.usageMetadata))
     }
 
-    /// Classifies a Gemini error into a retry decision. `delayMs == nil`
-    /// means "don't retry, propagate". `attempt` is the 1-based count of
-    /// the attempt that just failed.
+    /// One failed attempt's place on the retry ladder. `delayMs == nil`
+    /// means "don't retry, propagate".
     ///
     /// Widened past `private` with `retryDecision` below, deliberately
     /// (KTD3) — the ladder was unreachable from a test, so the change that
     /// alters it is also the change that makes it provable.
-    struct RetryDecision: Equatable { let delayMs: Int? }
+    struct RetryDecision { let delayMs: Int? }
 
-    /// Does this failure mean the retry must not reuse the connection that
-    /// produced it?
-    ///
-    /// Exactly the network class — `.http(status: 0, _)`, which is where
-    /// `performOnce` wraps every `URLError`. A 429 or a 5xx came *back*
-    /// from Gemini over a demonstrably working connection, so dropping the
-    /// pool for those would cost a fresh TCP + TLS handshake to fix
-    /// nothing. The narrowness is the point: this answers "is the pipe
-    /// suspect", not "should we retry" (`retryDecision`) and not "what
-    /// does this mean for the session" (`RecordingSession.isTerminal`).
-    ///
-    /// Swept over the status space by `GeminiRetryPolicyTests` rather than
-    /// enumerated case by case, so a new status cannot quietly land in the
-    /// wrong class.
-    nonisolated static func requiresFreshConnection(after error: GeminiError) -> Bool {
-        if case .http(let status, _) = error { return status == 0 }
-        return false
-    }
-
-    /// Drops `URLSession`'s pooled connections so the next request opens a
-    /// new one. `flush(completionHandler:)` is the documented primitive
-    /// for this; there is no async spelling of it, hence the bridge.
-    ///
-    /// Safe to call mid-session because of invariant I1 — at most one
-    /// request is outstanding per session, so there is no sibling request
-    /// whose connection this could pull out from under.
-    private func flushPooledConnections() async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            session.flush { continuation.resume() }
-        }
-    }
-
+    /// Classifies a Gemini error into a retry decision. `delayMs == nil`
+    /// means "don't retry, propagate". `attempt` is the 1-based count of
+    /// the attempt that just failed.
     nonisolated static func retryDecision(for error: GeminiError, attempt: Int) -> RetryDecision {
         switch error {
         case .missingKey, .blocked, .empty, .decoding, .truncated:
@@ -1126,6 +1099,68 @@ actor GeminiClient {
                 // 4xx other than 429 (401, 403, 400, 404, …) — never retry.
                 return RetryDecision(delayMs: nil)
             }
+        }
+    }
+
+    /// Does this failure mean the retry must not reuse the connection that
+    /// produced it? (R28 / KTD13.)
+    ///
+    /// Exactly the status-0 class. That is where `performOnce` wraps every
+    /// `URLError` — and also where it reports a non-`HTTPURLResponse`
+    /// response, which is unreachable for an `https://` endpoint, so
+    /// folding it in costs nothing and keeps this a single equality rather
+    /// than a body sniff. A 429 or a 5xx came *back* from Gemini over a
+    /// demonstrably working connection, so dropping the pool for those
+    /// would buy a fresh TCP + TLS handshake and fix nothing.
+    ///
+    /// **Its twin is `RecordingSession.isNetworkClass(_:)`**, which asks the
+    /// same question one layer up to bound `splitRetry`. They are separate
+    /// because they answer for different consumers, but they must agree on
+    /// what "network class" *means* — widen one and you have to widen the
+    /// other, and adjacency cannot enforce that across a module boundary.
+    /// `GeminiRetryPolicyTests` pins them equal across the status space
+    /// instead. Distinct from the other two classifiers this sits beside:
+    /// it answers "is the pipe suspect", not "should we retry"
+    /// (`retryDecision`) and not "what does this mean for the session"
+    /// (`RecordingSession.isTerminal`).
+    ///
+    /// Swept over the status space by `GeminiRetryPolicyTests` rather than
+    /// enumerated case by case, so a new status cannot quietly land in the
+    /// wrong class.
+    nonisolated static func requiresFreshConnection(after error: GeminiError) -> Bool {
+        if case .http(let status, _) = error { return status == 0 }
+        return false
+    }
+
+    /// Drops `URLSession`'s idle pooled connections so the next request
+    /// opens a new one. `flush(completionHandler:)` is the documented
+    /// primitive for this; there is no async spelling of it, hence the
+    /// bridge.
+    ///
+    /// **Safe while a sibling request is outstanding — and invariant I1 is
+    /// not the reason.** I1 bounds one *recording* session's transcription
+    /// traffic to one in-flight request; it says nothing about
+    /// `classifyApp` and `validateKey`, which share this same `session` and
+    /// bypass `sendRequest` entirely. `classifyApp` is fire-and-forget
+    /// launched by the recording-start path itself, so a sibling request is
+    /// the normal case here, not a corner. What makes the call safe is the
+    /// primitive: `flush` clears the idle connection cache and affects only
+    /// *future* requests; it does not cancel or disturb tasks already
+    /// running. **Do not substitute `reset(completionHandler:)` or
+    /// `invalidateAndCancel()`** — those do disturb concurrent work, and
+    /// nothing in this file would stop them.
+    ///
+    /// The bridge is deliberately unbounded and not cancellation-aware.
+    /// `flush` does local work (cache plus cookie/credential storage), not
+    /// network I/O, so there is no transport to hang on — and a
+    /// `RecordingSession.withDeadline`-style race would not bound it
+    /// anyway: a task group awaits every child at scope exit, and
+    /// `cancelAll()` cannot interrupt a continuation only the completion
+    /// handler can resume. A real bound would need an unstructured task,
+    /// which is not worth it for a local flush.
+    private func flushPooledConnections() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            session.flush { continuation.resume() }
         }
     }
 

@@ -20,7 +20,6 @@ import XCTest
 final class GeminiRetryPolicyTests: XCTestCase {
 
     private typealias Client = GeminiClient
-    private typealias Decision = GeminiClient.RetryDecision
 
     private func decide(_ error: GeminiClient.GeminiError, _ attempt: Int) -> Int? {
         Client.retryDecision(for: error, attempt: attempt).delayMs
@@ -29,6 +28,16 @@ final class GeminiRetryPolicyTests: XCTestCase {
     private func http(_ status: Int) -> GeminiClient.GeminiError {
         .http(status: status, body: "body for \(status)")
     }
+
+    /// The non-`.http` cases, in one place so the three sweeps below cannot
+    /// drift into covering different subsets of the enum.
+    private static let nonHTTPErrors: [(String, GeminiClient.GeminiError)] = [
+        ("missingKey", .missingKey),
+        ("blocked", .blocked("SAFETY")),
+        ("empty", .empty),
+        ("decoding", .decoding(NSError(domain: "test", code: 1))),
+        ("truncated", .truncated),
+    ]
 
     // MARK: - The stalled-transport arm (status 0)
 
@@ -98,14 +107,7 @@ final class GeminiRetryPolicyTests: XCTestCase {
     // MARK: - Terminal and non-retryable error classes
 
     func test_nonRetryableErrorClasses_returnNoDelay() {
-        let cases: [(String, GeminiClient.GeminiError)] = [
-            ("missingKey", .missingKey),
-            ("blocked", .blocked("SAFETY")),
-            ("empty", .empty),
-            ("decoding", .decoding(NSError(domain: "test", code: 1))),
-            ("truncated", .truncated),
-        ]
-        for (name, error) in cases {
+        for (name, error) in Self.nonHTTPErrors {
             for attempt in 1...3 {
                 XCTAssertNil(
                     decide(error, attempt),
@@ -127,26 +129,47 @@ final class GeminiRetryPolicyTests: XCTestCase {
             "A status-0 failure is where every URLError is wrapped — the measured case is a dead pooled connection, so the retry must not reuse it."
         )
 
-        for status in 100...599 where status != 0 {
+        // Starts below zero on purpose: with a `100...` floor the `where`
+        // clause below could never fire, and a widening of the predicate to
+        // `status <= 0` would have passed every assertion in this file.
+        for status in -5...599 where status != 0 {
             XCTAssertFalse(
                 Client.requiresFreshConnection(after: http(status)),
-                "HTTP \(status) arrived from Gemini over a demonstrably working connection — dropping the pool would cost a handshake to fix nothing."
+                "HTTP \(status) is not the status-0 transport class — dropping the pool for it would cost a handshake to fix nothing."
             )
         }
     }
 
     func test_freshConnection_isNotDemandedByNonHTTPErrors() {
-        let cases: [(String, GeminiClient.GeminiError)] = [
-            ("missingKey", .missingKey),
-            ("blocked", .blocked("SAFETY")),
-            ("empty", .empty),
-            ("decoding", .decoding(NSError(domain: "test", code: 1))),
-            ("truncated", .truncated),
-        ]
-        for (name, error) in cases {
+        for (name, error) in Self.nonHTTPErrors {
             XCTAssertFalse(
                 Client.requiresFreshConnection(after: error),
                 "\(name) is not a transport failure — it never reaches the flush, and none of these is retried anyway."
+            )
+        }
+    }
+
+    /// `requiresFreshConnection` has a twin one layer up:
+    /// `RecordingSession.isNetworkClass(_:)` asks the same "is the transport
+    /// down" question to bound `splitRetry`. They are deliberately separate
+    /// functions in separate modules, so nothing structural keeps them
+    /// agreeing — widen one and the connection-flush decision silently
+    /// stops matching the abandon bound. Pinned over the value axis,
+    /// because the compiler owns only the case axis (see
+    /// `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`).
+    func test_freshConnectionPredicate_agreesWithRecordingSessionsNetworkClass() {
+        for status in -5...699 {
+            XCTAssertEqual(
+                Client.requiresFreshConnection(after: http(status)),
+                RecordingSession.isNetworkClass(http(status)),
+                "HTTP \(status): GeminiClient.requiresFreshConnection and RecordingSession.isNetworkClass disagree about what the network class is."
+            )
+        }
+        for (name, error) in Self.nonHTTPErrors {
+            XCTAssertEqual(
+                Client.requiresFreshConnection(after: error),
+                RecordingSession.isNetworkClass(error),
+                "\(name): the two network-class predicates disagree."
             )
         }
     }
@@ -156,7 +179,7 @@ final class GeminiRetryPolicyTests: XCTestCase {
     /// failure we actually re-issue. A fresh connection for a request that
     /// is never retried would be a pure handshake cost.
     func test_everyFreshConnectionCase_isAlsoRetriedAtLeastOnce() {
-        for status in 0...599 where Client.requiresFreshConnection(after: http(status)) {
+        for status in -5...599 where Client.requiresFreshConnection(after: http(status)) {
             XCTAssertNotNil(
                 decide(http(status), 1),
                 "HTTP \(status) demands a fresh connection but is never retried — the flush would be dead cost."
