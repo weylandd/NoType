@@ -149,6 +149,15 @@ struct NoTypeApp: App {
         let categorizer  = AppCategorizer(client: gemini, store: instructions)
         let dictionary   = DictionaryStore()
         let onboarding   = OnboardingState()
+        // Constructed here rather than left to `AppState.init`'s default
+        // argument. A default argument is evaluated at this call site but
+        // its `RetainedAudioStore(` text lives in `AppState`'s parameter
+        // list, and `LaunchPathScanner.constructedTypeNames` only reads
+        // initializer *bodies* — so the defaulted form would put the type
+        // on the launch path while making it invisible to the scan that
+        // enforces the launch-ordering rule for everything on that path.
+        // Naming it here keeps the guard honest.
+        let retained     = RetainedAudioStore()
 
         let appearance = AppearanceController()
         let updates    = UpdateController()
@@ -161,7 +170,8 @@ struct NoTypeApp: App {
             instructionsStore: instructions,
             appCategorizer: categorizer,
             dictionaryStore: dictionary,
-            onboarding: onboarding
+            onboarding: onboarding,
+            retainedAudio: retained
         )
 
         _permissions = State(wrappedValue: perms)

@@ -35,10 +35,16 @@ boilerplate moved here.
 ## Hard rules
 
 - **Don't add a fifth store without considering the cap.** Four stores
-  is the entire population; if you need a fifth, audit whether the new
-  store's lifecycle / retention rules really match this helper's
-  one-file-per-snapshot model, or whether it needs a different shape
-  (e.g., SQLite, append-only log).
+  is the entire population *of this helper's consumers*; if you need a
+  fifth, audit whether the new store's lifecycle / retention rules
+  really match this helper's one-file-per-snapshot model, or whether it
+  needs a different shape (e.g., SQLite, append-only log).
+  `NoType/History/RetainedAudioStore.swift` is the worked example of
+  that audit coming out "different shape": it is named `…Store` and sits
+  beside `HistoryStore`, but it touches no file, uses nothing here, and
+  has no on-disk representation to recover from — its lifetime contract
+  is the ten-entry history *window*, not a snapshot file. It is not a
+  fifth consumer and does not count against this rule.
 - **Don't add per-store branching here.** If a store needs different
   encoder strategy, atomic-write policy, or recovery behaviour, build
   it on top of these helpers — don't push the variation into the

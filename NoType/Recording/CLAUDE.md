@@ -11,6 +11,7 @@
 - `PauseDetector.swift` — turns Silero frame probabilities into chunk boundaries.
 - `ChunkBuilder.swift` — encodes PCM slices to AAC-in-M4A blobs.
 - `RecordingSession.swift` — orchestrates the above; owns session lifecycle; drives the batched sender.
+- `RetainedRecording.swift` — the escaping payload a session hands out for a later retry: the encoded audio of chunks whose Gemini call failed in the retainable class, plus the frozen `ContextSnapshot` and model needed to re-issue them. **Memory-only, deliberately not `Codable`** — see "Retention for retry" below and `NoType/History/CLAUDE.md` invariant 4.
 - `HallucinationLengthGate.swift` — pure post-response sanity check. Drops transcripts whose word AND char rate exceed plausible dictation speed for the audio duration (4 wps / 18 cps, AND-mode, floor 4w / 18c). Catches Gemini Lite's conversational-fallback hallucinations on short low-info audio (BT-HFP mic). Wired into `RecordingSession.processBatch` and `splitRetry` success arms. Lives here (not in `NoType/Gemini/`) because the gate is a post-response policy with no Gemini API coupling — its domain is "did the audio duration justify this transcript length?" against `AudioRecorder.outputSampleRate`.
 - `Resources/SileroVAD.mlmodelc` — compiled CoreML model (FluidInference/silero-vad-coreml repack).
 
@@ -27,7 +28,7 @@
 9. **First chunk waits for context snapshot.** Sender `await`s `contextTask.value` before issuing the first Gemini call. Audio capture itself starts immediately on hotkey press.
 10. **`RecordingSession` is a value, not a global.** Created on press, dropped on release. There is no "current session" singleton.
 11. **Lite-path discriminator:** `isFinalBatch && priorTranscriptCount == 0 && totalAudio < 32 000 samples (2.0 s) && batchChunkCount == 1`. Pure function `shouldUseLitePath` (params `isFinalBatch`, `priorTranscriptCount`, `totalBatchSamples`, `batchChunkCount`), pinned by `RecordingSessionShortPathTests`. The call site passes `currentPriors().count` for the prior count and the post-encode chunk count (`encoded.count`) for `batchChunkCount`; only chunks whose Gemini call *succeeded* contribute to the prior count. Recoverable failures (markers) don't disqualify the lite path because the prior section would render `(none yet)` either way. The `batchChunkCount == 1` term is load-bearing: the lite dispatch ships `encoded[0]` only (`transcribeShort` is single-audio by construction), so a ≥2-chunk short final batch must take the batched path or every chunk after the first would be silently dropped.
-12. **Partial recovery.** A recoverable Gemini failure on one chunk (network blip, 5xx, decoding, mid-session empty) appends a `text: nil` response and `failureMarker` ("[…]") appears in its slot at stitch time. The session aborts only on terminal errors (auth, blocked, encode, cancellation — see `RecordingSession.isTerminal(_:)`). A batched call that fails recoverably is split into N independent `transcribe` calls; one bad chunk no longer poisons the others. When every dispatched chunk fails, `stop()` throws `lastRecoverableError` so the AppState error catalog surfaces the real cause (offline / 5xx / …) rather than the generic `noSpeech`.
+12. **Partial recovery.** A recoverable Gemini failure on one chunk (network blip, 5xx, decoding, mid-session empty) appends a `text: nil` response and `failureMarker` ("[…]") appears in its slot at stitch time. The session aborts only on terminal errors (auth, blocked, encode, cancellation — see `RecordingSession.isTerminal(_:)`). A batched call that fails recoverably is split into N independent `transcribe` calls; one bad chunk no longer poisons the others. When every dispatched chunk fails, `stop()` throws `lastRecoverableError` so the AppState error catalog surfaces the real cause (offline / 5xx / …) rather than the generic `noSpeech` — and, since the retry feature, that catch arm also writes a broken history row carrying `summary.retained` rather than discarding the session. Failed chunks' audio is kept in memory for a re-send; see "Retention for retry" below.
 
 ## Hard rules
 
@@ -55,14 +56,45 @@ Error classification lives in `RecordingSession.isTerminal(_:)`:
 | `GeminiError.missingKey` | terminal | abort, surface "add API key" |
 | `GeminiError.blocked(_)` (prompt-level block **or** candidate-level `finishReason` content block) | terminal | abort, surface block reason |
 | Any other `Error` (e.g. encoder, `AVFAudio`) | terminal | abort, surface as-is |
-| `GeminiError.http(_, _)` (any status) | recoverable | marker, continue |
+| `GeminiError.http(401 / 403)` (rejected key / key not authorised for the model) | terminal | abort, surface key error |
+| `GeminiError.http(_, _)` (any **other** status — 0 / 429 / 4xx / 5xx) | recoverable | marker, continue |
 | `GeminiError.empty` | recoverable | marker, continue |
 | `GeminiError.decoding(_)` | recoverable | marker, continue |
 | `GeminiError.truncated` (`finishReason == MAX_TOKENS`) | recoverable | marker, continue |
 
 A batched call (`transcribeBatch`) failing recoverably triggers `splitRetry` — each chunk re-issued as an independent `transcribe`. Each independent call has its own retry budget inside `GeminiClient.sendRequest` (HTTP-class-based, see "Retry policy" in the Gemini module). Markers in the priors list are *not* sent back to Gemini — `currentPriors()` filters them out so the model never sees its own failure placeholders.
 
+**`splitRetry` is bounded on the network class.** When the batched call **and** the first split chunk have both failed with `GeminiError.http(status: 0, …)`, **and that first split chunk's failure actually cost real wall-clock time**, the remaining chunks are accounted for without being dispatched. `shouldAbandonSplitRetry(batchFailureWasNetwork:chunkOffset:chunkFailureWasNetwork:chunkFailureLatency:)` is the predicate; all four terms are required and each removal is a distinct bug (see its doc-comment). The bound is **network-class only**: a 5xx or a 429 is per-request, the next chunk genuinely might succeed, and those keep today's dispatch-everything behaviour. `isNetworkClass(_:)` is the third classifier in the `isTerminal` / `shouldRetain` family and the narrowest — it answers "is the transport down", not "what does this mean for the session".
+
+**The latency term exists because the Gemini module's reachability pre-check took the cost out of the case this bound was measuring.** The bound was designed when a network-class failure meant a 30 s `URLSession` timeout, so two of them was ~60 s of evidence and each remaining chunk was another 30 s. The pre-check now fails an `.unsatisfied`-path request in ~0 ms, so on a genuinely offline machine the batch and the first split chunk both fail *instantly* and "two independent observations" collapses into one cached path status read twice, microseconds apart. Abandoning there is both pointless (the remaining chunks would short-circuit in ~0 ms too) and destructive (a Wi-Fi blip that ends two seconds later becomes `[…]` in the pasted text for every chunk after the first — permanently, because a retry rewrites the history row, never the text already pasted into the user's document). `abandonMinChunkFailureLatency` = 2 s sits far above a short-circuit and far below the 30 s timeout, so the predicate fires on exactly the case that motivated it.
+
+**An abandoned chunk is indistinguishable from a dispatched-and-failed one, and that is the load-bearing part.** Retention is normally driven by classifying a real error; a chunk that is never dispatched has no error, so the naive shape of this bound would drop its audio and convert a bounded wait into permanent data loss — the exact inverse of what retention exists for. `abandonedAccounting(undispatched:error:)` is the pure seam that prevents it: it returns one marker index per undispatched chunk (so each counts toward `failedChunkCount` and renders its own `[…]`) plus the subset to retain, which goes through `shouldRetain(_:)` rather than being assumed. `splitRetry` folds that set into the same return value the dispatched failures use, so the audio reaches `SessionSummary.retained` by the ordinary path. Pinned by `SplitRetryNetworkBoundTests` — including a field-by-field equality against the payload an all-dispatched run would have produced.
+
+**Know what that proof covers.** The equality test composes the seams *by hand*; it does not drive `splitRetry`, which is private on a class that owns an `AudioRecorder`, a `SileroVAD`, a `GeminiClient` and a `HistoryStore` and cannot be stood up in a unit test. That gap was not theoretical: deleting `retainable.formUnion(acct.retainable)` from the abandon arm — the exact permanent-audio-loss bug the arm exists to prevent — left every seam test green, and so did gutting the arm entirely. `test_splitRetryAbandonArm_stillMarksAndRetainsEveryUndispatchedChunk` is the source guard that closes it, in the `RaiseSiteScanner` shape and with the same documented limits: it proves the fold and the per-index `recordRecoverableFailure` are *present* in `splitRetry`'s body, not that they are reached. A rename fails it loudly, which is a review trigger rather than a false negative.
+
+Note what the bound does **not** change: no error moves between the terminal and recoverable classes, and `isTerminal(_:)` / `shouldRetain(_:)` are untouched. Only how many chunks get a real network attempt before becoming markers. `SessionSummary.dispatchedChunkCount` is the one field whose meaning widens — see its doc-comment.
+
+With the Gemini module's reachability pre-check in place (`sendRequest` fails immediately when the system reports no path), this bound is *not* redundant: the pre-check deliberately refuses to short-circuit a path that is `.satisfied`, so a captive portal, a dead router, a DNS blackhole or a dropped VPN still reaches the 30 s timeout per chunk. That is precisely the case this bound covers.
+
 `AppState.finalizeRecording` reads `session.summary` after `stop()` returns; when `hasFailures` is true it surfaces a neutral "Pasted with gaps" HUD telling the user how many chunks ended up as markers.
+
+## Retention for retry
+
+A `[…]` marker used to be the end of the story — the audio behind it was gone and the user had to re-dictate. It no longer is: the failed chunk's encoded blob is **kept in memory** so the user can re-send it from the broken history row. This is the project's one carve-out from the no-audio-retention posture, and it is bounded to memory — nothing is serialized, and process exit ends it. The full contract lives on `RetainedRecording` and `RetainedAudioStore`; `NoType/History/CLAUDE.md` invariant 4 is the authority. This module owns only the *producing* half.
+
+**`RecordingSession.shouldRetain(_:)` is the classifier**, a `nonisolated static` pure function sitting immediately below `isTerminal(_:)`. That adjacency is load-bearing: **a new `GeminiError` case belongs in both.** The rule is "retain exactly the class that today produces a `[…]` marker" — so the recoverable rows of the table above retain, and every terminal row retains nothing. A rejected key, a content block, a cancellation, or an encode failure keeps nothing: a retry couldn't fix any of them, and holding audio the user can never recover is a privacy cost with no payoff. The two are written as separate switches on purpose — retention may narrow later (a class we keep recovering from but never successfully retry) without changing which errors abort a session. `RetainedRecordingTests` pins the direction that must always hold: every terminal error retains nothing, swept over the HTTP status space rather than the enum cases.
+
+Retention keys off the three-state table below, not off "did this chunk produce text":
+
+| `text` value | Retained? | Why |
+|---|---|---|
+| `"<real text>"` | no | The call succeeded; R2 releases the audio on the existing schedule. |
+| `nil` (recoverable failure) | **yes** | This is the marker class — exactly what a retry exists to re-send. |
+| `""` (hallucination gate fired) | no | Gemini answered and *we* filtered the answer. Retaining it would hold audio for a call that succeeded. |
+
+**Accumulation is session-scoped, and terminal failure clears it session-wide.** `retainedPayload(inBatch:failedChunkIndices:context:model:)` derives one batch's payload; `accumulateRetained` folds batches together in ascending chunk order. But a terminal failure *anywhere* in the session sets `retained = nil` — not just for the batch that failed. A session that lost chunk 0 to a 5xx and then hit a rejected key on chunk 3 must surface no retry, because no retry can succeed. `SessionSummary.retained` is therefore a trustworthy "this session lost chunks in the recoverable class" signal, which is exactly what `AppState` branches on to decide whether to write a broken row.
+
+**Never log a payload or any of its fields.** The chunks are the user's speech and the retained `ContextSnapshot` carries masked but real on-screen text from other applications; this repo logs at `.fault` in places. A count or a `UUID` is fine.
 
 ## Post-response hallucination gate
 
@@ -104,6 +136,8 @@ The class is `final` for the deinit safety net only — `IOPMAssertionRelease` r
 - `NoTypeTests/PauseDetectorTests.swift` — state-machine fixtures (synthetic VAD probability sequences, adaptive-threshold ladder mapping, long-monologue cuts, 180 s force-cut).
 - `NoTypeTests/ChunkBuilderTests.swift` — PCM → AAC round-trip (valid `ftyp` container, decodable, no tmp-file leaks).
 - `NoTypeTests/RecordingSessionShortPathTests.swift` — pins the lite-path discriminator.
+- `NoTypeTests/RetainedRecordingTests.swift` — pins `shouldRetain`'s matrix and its no-drift property against `isTerminal` (swept over the HTTP status space), `retainedPayload`'s filtering and ascending order, `mergeRetained`'s accumulation, and the non-serializability guard behind the memory-only contract.
+- `NoTypeTests/SplitRetryNetworkBoundTests.swift` — pins `isNetworkClass` (swept over the status space), `shouldAbandonSplitRetry`'s three-term truth table, `abandonedAccounting`, `chunkCounts`, and the critical composition: an undispatched chunk's audio and original index reach the retained payload identically to a dispatched-and-failed chunk's.
 - `NoTypeTests/RecordingSessionOCRGateTests.swift` — pins the pure `shouldRunOCR` gate (fallback toggle × Screen Recording permission × pid).
 - `NoTypeTests/HallucinationLengthGateTests.swift` — pins the pure `HallucinationLengthGate` decision (word/char ceilings, AND-mode, floor, edges) against representative fixture transcripts.
 - `NoTypeTests/AudioDeviceManagerTests.swift` — pins the pure `pickEffectiveDevice` policy (pin-wins, BT-classic / BLE-Audio fallback, no-built-in graceful degrade, off-switch honoured), the `Device.isBluetooth` / `isBuiltIn` transport-type matrix, and the HAL stream-format helpers (`avAudioFormat(from:)` round-trip for built-in 44.1 kHz mono, USB 48 kHz mono, aggregate 48 kHz stereo shapes).
@@ -115,6 +149,9 @@ The class is `final` for the deinit safety net only — `IOPMAssertionRelease` r
 - Why Silero CoreML (not Apple SpeechDetector) → `solutions/tooling-decisions/silero-vad-coreml-2026-05-15.md`.
 - One Gemini request in flight (the sender contract) → `solutions/architecture-patterns/serial-gemini-actor-2026-05-15.md`.
 - Partial recovery via gap markers (what `processBatch`'s catch-block does, why every classifier branch is what it is) → `solutions/architecture-patterns/partial-recovery-with-markers-2026-05-16.md`.
+- Where a retained payload goes after `stop()` (the holder, its release triggers, the retry) → `NoType/History/CLAUDE.md` invariant 4 + "Broken rows and retry".
+- Why the terminal-clear is session-scoped rather than batch-scoped → `solutions/conventions/guard-scope-must-match-invariant-scope-2026-08-09.md`.
+- Why the `shouldRetain` / `isTerminal` no-drift guard sweeps values rather than cases → `solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`.
 - Post-response hallucination gate (threshold rationale, AND-mode, out-of-scope sub-classes) → `solutions/architecture-patterns/hallucination-length-gate-2026-05-20.md`.
 - Cache-prefix shape (what the sender ships) → `NoType/Gemini/CLAUDE.md`.
 - Context snapshot lifecycle → `NoType/Context/CLAUDE.md`.

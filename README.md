@@ -107,7 +107,7 @@ For the full architecture, see [docs/architecture.md](docs/architecture.md). For
 
 ## Privacy
 
-- **No audio retention.** Audio exists in memory only during a session; it's discarded the moment the transcript is pasted.
+- **No audio on disk, ever.** Audio exists in memory only and is discarded the moment the transcript is pasted. One exception: when a chunk fails to transcribe (network drop, server error), that chunk's audio is kept **in memory** so you can retry the recording from its history row. It's dropped as soon as the retry succeeds, when you delete the row, when the row falls out of the last-10 window, or when you quit NoType. Quitting always loses it — that's why a broken row offers no retry after a restart.
 - **Last 10 transcripts only.** History is capped at 10 entries, plain text, in `~/Library/Application Support/NoType/`.
 - **Secure-field masking.** Anything from the Accessibility tree that looks like a password field, API key, JWT, credit card, etc. is redacted before it leaves your machine. See [`SecureFieldMasker.swift`](NoType/Context/SecureFieldMasker.swift) and [`docs/decisions.md`](docs/decisions.md) ADR-009/014.
 - **No telemetry, no analytics, no crash reporting.** Open source — read the code.

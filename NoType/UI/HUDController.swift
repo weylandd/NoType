@@ -40,6 +40,18 @@ final class HUDController {
 
     var permissionsHUDVisible: Bool { !permissionPanels.isEmpty }
 
+    /// Whether an error HUD is currently up. Read-only mirror of the
+    /// private panel slot, in the same shape as `permissionsHUDVisible`.
+    ///
+    /// Exists so "this failure was surfaced to the user" can be asserted
+    /// rather than assumed — R19 makes it a requirement that a retry which
+    /// recovered nothing produces a visible outcome instead of silently
+    /// restoring the row's pre-tap appearance, and invariant 1 of
+    /// `NoType/UI/CLAUDE.md` makes `showErrorHUD` the only way that can
+    /// happen. Read by `AppStateRetryTests`; U7 renders the row half of the
+    /// same requirement.
+    var errorHUDVisible: Bool { errorPanel != nil }
+
     // MARK: - Permissions HUD
 
     /// User-triggered explicit show. Resets dismissal flags for the requested

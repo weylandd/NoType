@@ -68,6 +68,7 @@ The first-cap mid-sentence tier (rule **(e)**) auto-disables for noun-capitalisi
 - **Unicode look-around boundaries** — the engine wraps `from` in `(?<![\p{L}\p{N}])…(?![\p{L}\p{N}])` (not `\b`; same idiom as `DictionaryHarvester.findInContext`), so Cyrillic / Greek / etc. work AND pairs whose `from` starts/ends with punctuation (`e.g.`, `т.е.`, `.com`, `c#`, `#tag`) now match at real boundaries. Note `_`/underscore is a word char under `\b` but NOT under `[\p{L}\p{N}]` — deliberate, mirrors the harvester.
 - **Auto-capitalised variant** when `from` starts lowercase. All-caps NOT auto-matched.
 - **Regex special chars in `from`** escaped via `NSRegularExpression.escapedPattern`. **In `to`** escaped via `escapedTemplate` (so `$0..$9` and `\$` are NOT interpreted as capture refs).
+- **The engine can reach inside a `[…]` gap marker, and that has consequences outside this module.** `RecordingSession.failureMarker` is `[…]`, and the Unicode look-around above puts a real boundary on either side of the `…` (brackets are neither `\p{L}` nor `\p{N}`) — so a user pair whose `from` is `…` or contains it matches the marker. Replacement runs over the stitched transcript *before* the row is stored, so a broken history row can end up holding audio for a failed chunk with no marker left in its text to substitute a recovery into. **`RetryMerge` is where that is handled**, not here: its `mergeDetailed` reports which recoveries were actually `placed`, and `AppState`'s settle path releases a chunk's audio only when its recovery landed — a recovery with nowhere to go keeps the audio held rather than destroying the only copy. Don't "fix" this by special-casing the marker in `TextReplacementEngine`: the pairs are the user's and the engine is deliberately content-agnostic.
 
 ## Testing
 
@@ -81,3 +82,4 @@ The first-cap mid-sentence tier (rule **(e)**) auto-disables for noun-capitalisi
 - Why dictionary (v1 LLM extractor → v2 algorithmic intersector) → `solutions/architecture-patterns/personal-dictionary-2026-05-15.md`.
 - Cache-prefix shape → `NoType/Gemini/CLAUDE.md`.
 - Harvester reads from AX + OCR context → `NoType/Context/CLAUDE.md`.
+- Why a replacement pair reaching the `[…]` marker is contained at the retry's release gate rather than in the engine → `solutions/conventions/gate-irreversible-actions-on-the-outcome-2026-08-09.md` + `NoType/History/CLAUDE.md` "Broken rows and retry".

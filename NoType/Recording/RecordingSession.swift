@@ -151,8 +151,16 @@ final class RecordingSession {
         /// Count of chunks whose Gemini call failed recoverably and
         /// were replaced with `failureMarker` in the pasted text.
         let failedChunkCount: Int
-        /// Total chunks dispatched to Gemini (excludes sub-150 ms
+        /// Total chunks the session accounted for (excludes sub-150 ms
         /// drops). `failedChunkCount <= dispatchedChunkCount`.
+        ///
+        /// Almost always the count of chunks actually sent to Gemini. The
+        /// one exception is a split-retry abandoned on the network class
+        /// (`shouldAbandonSplitRetry`), whose remaining chunks are counted
+        /// here without ever being dispatched — deliberately, because this
+        /// number's only consumer is the "N of M chunks" copy in the
+        /// pasted-with-gaps HUD, and a chunk that produced a `[…]` belongs
+        /// in that denominator whether or not a request was issued for it.
         let dispatchedChunkCount: Int
         /// Sum of `TokenUsage` across every successful Gemini call
         /// in this session (single-chunk, batched, lite, split-
@@ -168,8 +176,42 @@ final class RecordingSession {
         /// Folded into `StatsStore` so token costs are priced at the
         /// right per-model rate.
         let model: GeminiModel
+        /// Encoded audio of this session's chunks whose Gemini call
+        /// failed in the class `shouldRetain(_:)` admits, plus the
+        /// context and model needed to re-issue them unchanged (R2, R3).
+        ///
+        /// `nil` for the ordinary successful session, for a session whose
+        /// only losses came from the hallucination gate, and for every
+        /// session that aborted on a terminal error — nothing is held
+        /// that a retry could not use.
+        ///
+        /// Memory-only for the lifetime of the process; the contract and
+        /// the reasons it is load-bearing live on `RetainedRecording`.
+        /// **Never log this value or any of its fields** — the chunks are
+        /// the user's speech and the context carries masked but real
+        /// on-screen text from other applications.
+        let retained: RetainedRecording?
 
         var hasFailures: Bool { failedChunkCount > 0 }
+
+        /// Spelled out rather than synthesized so `retained` can default
+        /// to `nil`: the pre-retention call sites (the summary-field
+        /// tests in `RecordingSessionPartialRecoveryTests`) keep
+        /// compiling, and the single production caller —
+        /// `RecordingSession.summary` — always passes it explicitly.
+        init(
+            failedChunkCount: Int,
+            dispatchedChunkCount: Int,
+            tokens: TokenUsage,
+            model: GeminiModel,
+            retained: RetainedRecording? = nil
+        ) {
+            self.failedChunkCount = failedChunkCount
+            self.dispatchedChunkCount = dispatchedChunkCount
+            self.tokens = tokens
+            self.model = model
+            self.retained = retained
+        }
     }
 
     /// Classify a Gemini / system error as terminal (abort the
@@ -183,6 +225,10 @@ final class RecordingSession {
     /// initiated. Everything else (HTTP 4xx/5xx/network/decoding/
     /// empty/truncated) is treated as a transient gap — paste what we
     /// have, mark the gap, let the user decide whether to re-dictate.
+    ///
+    /// Sibling classifier: `shouldRetain(_:)` immediately below decides
+    /// whether the same error keeps the chunk's audio for a retry. A new
+    /// error case belongs in both.
     nonisolated static func isTerminal(_ error: Error) -> Bool {
         if error is CancellationError { return true }
         if let gerr = error as? GeminiClient.GeminiError {
@@ -207,12 +253,226 @@ final class RecordingSession {
         return true
     }
 
+    /// Decide whether a failed chunk's encoded audio is worth keeping in
+    /// memory so the user can re-send it from its history row.
+    ///
+    /// Sibling classifier: `isTerminal(_:)` immediately above decides
+    /// whether the same error aborts the session. **A new error case
+    /// belongs in both** — that adjacency is the entire reason this
+    /// function lives here rather than beside the retry code (plan
+    /// KTD8). The two are complementary today, but deliberately written
+    /// as separate switches: retention may narrow (a failure class we
+    /// keep recovering from but never successfully retry) without
+    /// changing which errors abort a session, and vice versa.
+    /// `RetainedRecordingTests` pins the one direction that must always
+    /// hold — every terminal error retains nothing.
+    ///
+    /// The governing rule (plan R4) is "retain exactly the class that
+    /// today produces a `[…]` gap marker": network failure (status 0),
+    /// 429, 5xx, and any other non-auth HTTP status, plus empty,
+    /// decoding and truncated responses. Retention deliberately does
+    /// **not** extend to terminal failures — a rejected key, a content
+    /// block, a cancellation or an encode failure keeps nothing and
+    /// aborts the session exactly as before. A retry could not fix any
+    /// of them, and holding audio the user can never recover is a
+    /// privacy cost with no payoff.
+    nonisolated static func shouldRetain(_ error: Error) -> Bool {
+        if error is CancellationError { return false }
+        guard let gerr = error as? GeminiClient.GeminiError else {
+            // Encoder / AVFAudio / anything unrecognised: terminal, and
+            // in the encode case the audio never made it to a blob.
+            return false
+        }
+        switch gerr {
+        case .missingKey, .blocked:
+            return false
+        case .http(let status, _):
+            // Same auth carve-out as `isTerminal`: 401 (bad key) and
+            // 403 (key not authorised for this model) abort the
+            // session, so there is nothing to retry against.
+            return status != 401 && status != 403
+        case .empty, .decoding, .truncated:
+            return true
+        }
+    }
+
+    /// `true` for the **network class** — a `GeminiError.http` with status
+    /// 0, which is how `GeminiClient.performOnce` wraps every `URLError`
+    /// and how its pre-flight reachability check reports no path at all.
+    ///
+    /// Third classifier in this family, and the narrowest. `isTerminal` and
+    /// `shouldRetain` answer "what does this failure mean for the
+    /// session"; this one answers a much smaller question used in exactly
+    /// one place — "is the *transport* down, such that dispatching the next
+    /// chunk is certain to fail the same way?" A 5xx or a 429 is
+    /// per-request and deliberately excluded: the next chunk genuinely
+    /// might succeed. Swept over the whole status space by
+    /// `SplitRetryNetworkBoundTests` rather than spot-checked, so a widened
+    /// range cannot slip through.
+    nonisolated static func isNetworkClass(_ error: Error) -> Bool {
+        guard let gerr = error as? GeminiClient.GeminiError,
+              case .http(let status, _) = gerr else { return false }
+        return status == 0
+    }
+
+    /// Whether `splitRetry` should stop dispatching and account for its
+    /// remaining chunks directly.
+    ///
+    /// Fires only when the batched call **and** the first split chunk have
+    /// both failed in the network class. Two independent observations of a
+    /// dead transport, one of them a request issued on its own after the
+    /// batch failed — at that point every remaining chunk is a guaranteed
+    /// `GeminiClient` round-trip that ends in the same error, and with the
+    /// 250 ms `splitRetryBackoff` between them a long session spends
+    /// minutes proving it.
+    ///
+    /// Each term is load-bearing and each removal is a distinct bug:
+    /// dropping the batch term abandons a run on a single blip; dropping
+    /// the offset term abandons chunks after a mid-run failure the run had
+    /// already proved were reachable; dropping the chunk term abandons on
+    /// the batch's evidence alone, when the split call is exactly the
+    /// second opinion worth having; dropping the latency term abandons on
+    /// two instant pre-check short-circuits, which is one observation read
+    /// twice rather than two — see ``abandonMinChunkFailureLatency``.
+    nonisolated static func shouldAbandonSplitRetry(
+        batchFailureWasNetwork: Bool,
+        chunkOffset: Int,
+        chunkFailureWasNetwork: Bool,
+        chunkFailureLatency: Duration
+    ) -> Bool {
+        batchFailureWasNetwork
+            && chunkOffset == 0
+            && chunkFailureWasNetwork
+            && chunkFailureLatency >= abandonMinChunkFailureLatency
+    }
+
+    /// Minimum wall-clock cost of the first split chunk's failure before
+    /// abandoning the rest of the run is worth doing.
+    ///
+    /// **This term exists because the reachability pre-check took the cost
+    /// out of the case the bound was measuring.** The bound was designed
+    /// when a network-class failure meant a 30 s `URLSession` timeout, so
+    /// two of them was ~60 s of evidence that the transport was down and
+    /// every remaining chunk was another 30 s. `GeminiClient`'s pre-flight
+    /// check now fails an `.unsatisfied`-path request in ~0 ms — so on a
+    /// genuinely offline machine the batched call and the first split chunk
+    /// both fail *instantly*, and "two independent observations" collapses
+    /// into one cached path status read twice, microseconds apart.
+    ///
+    /// That is the case where abandoning is simultaneously pointless and
+    /// harmful: dispatching the remaining chunks costs ~0 ms each (they
+    /// short-circuit too), while abandoning turns a Wi-Fi blip that ends
+    /// two seconds later into `[…]` in the pasted text for every chunk
+    /// after the first — permanently, because a retry rewrites the history
+    /// row and never the text already pasted into the user's document.
+    ///
+    /// 2 s sits far above a short-circuit (~0 ms) and far below the 30 s
+    /// timeout the bound is actually for, so the predicate fires on exactly
+    /// the case that motivated it: a `.satisfied` path whose requests still
+    /// time out — captive portal, dead router, DNS blackhole.
+    nonisolated static let abandonMinChunkFailureLatency: Duration = .seconds(2)
+
+    /// What an abandoned split-retry owes the chunks it will never
+    /// dispatch.
+    ///
+    /// **Both fields exist to make an undispatched chunk indistinguishable
+    /// from a dispatched-and-failed one.** That is not a nicety: retention
+    /// is normally driven by classifying a real error, and a chunk that was
+    /// never sent has no error, so the naive version of this bound would
+    /// drop its audio on the floor — converting a bounded wait into
+    /// permanent data loss, the exact inverse of what the retry feature is
+    /// for.
+    struct AbandonedAccounting: Sendable {
+        /// One entry per undispatched chunk, at its original chunk index.
+        /// Each becomes a `text: nil` response, so it counts toward
+        /// `SessionSummary.failedChunkCount` and renders a `failureMarker`
+        /// in its own slot at stitch time.
+        let markerChunkIndices: [Int]
+        /// The subset whose encoded audio must be retained — every one of
+        /// them whenever the abandoning error is retainable.
+        let retainable: Set<Int>
+    }
+
+    /// Derive the accounting above. Pure, for the same reason
+    /// `retainedPayload` is: the session is not drivable end to end, so
+    /// this is where the behaviour is proved. Pinned by
+    /// `SplitRetryNetworkBoundTests`.
+    ///
+    /// Retention goes through `shouldRetain(_:)` rather than being assumed.
+    /// Production cannot reach this arm with a non-retainable error — the
+    /// trigger requires the network class, which is retainable — but
+    /// hard-coding `true` would break silently the day the trigger widens.
+    nonisolated static func abandonedAccounting(
+        undispatched: [RetainedRecording.Chunk],
+        error: Error
+    ) -> AbandonedAccounting {
+        let indices = undispatched.map(\.idx)
+        return AbandonedAccounting(
+            markerChunkIndices: indices,
+            retainable: shouldRetain(error) ? Set(indices) : []
+        )
+    }
+
+    /// Derive one batch's retained payload: the encoded chunks whose
+    /// Gemini call failed in the class `shouldRetain(_:)` admits, in
+    /// ascending chunk order, carrying the context and model the failed
+    /// requests actually used (R2, R3).
+    ///
+    /// Pure and `nonisolated` so the retain set is provable without
+    /// standing up a `RecordingSession` — which owns an `AudioRecorder`,
+    /// a `SileroVAD`, a `GeminiClient` and a `HistoryStore`, none of them
+    /// unit-test-friendly. Same seam shape as `shouldUseLitePath`; pinned
+    /// by `RetainedRecordingTests`.
+    ///
+    /// `failedChunkIndices` carries **only** indices the caller has
+    /// already run through `shouldRetain(_:)`. Three kinds of chunk are
+    /// therefore absent from it by construction, for three different
+    /// reasons:
+    ///
+    /// - a chunk that transcribed — R2 releases its audio on the existing
+    ///   schedule;
+    /// - a chunk the `HallucinationLengthGate` dropped — Gemini answered
+    ///   and we filtered the answer, which is stored as `text: ""` and is
+    ///   deliberately *not* a failure (see `NoType/Recording/CLAUDE.md`
+    ///   "Post-response hallucination gate"). Retaining it would hold
+    ///   audio for a call that succeeded;
+    /// - a chunk whose failure was terminal — R4 holds those to retaining
+    ///   nothing.
+    ///
+    /// Chunks are filtered against the batch rather than trusted from the
+    /// index set, so an index with no matching chunk contributes nothing
+    /// instead of fabricating one. Returns `nil` rather than an empty
+    /// payload when nothing survives, so the ordinary successful session
+    /// carries no payload at all and `AppState` can branch on presence.
+    nonisolated static func retainedPayload(
+        inBatch chunks: [RetainedRecording.Chunk],
+        failedChunkIndices: Set<Int>,
+        context: ContextSnapshot,
+        model: GeminiModel
+    ) -> RetainedRecording? {
+        guard !failedChunkIndices.isEmpty else { return nil }
+        let kept = chunks
+            .filter { failedChunkIndices.contains($0.idx) }
+            .sorted { $0.idx < $1.idx }
+        guard !kept.isEmpty else { return nil }
+        return RetainedRecording(chunks: kept, context: context, model: model)
+    }
+
     private let recorder: AudioRecorder
     private let vad:      SileroVAD
     private let gemini:   GeminiClient
     private let history:  HistoryStore
 
     private var startedAt: Date?
+    /// Wall-clock time `stop()` began — i.e. hotkey release.
+    ///
+    /// Captured so `brokenHistoryEntry()` can compute the same
+    /// press-to-release duration the success path does. `stop()` itself
+    /// returns long after release when the Gemini calls it drains are
+    /// failing and retrying, so `Date()` at throw time would credit the
+    /// row with the whole failed-transcription window instead of the
+    /// time the user actually spoke.
+    private var stoppedAt: Date?
     private var sourceApp: NSRunningApplication?
     /// Find/replace pairs to apply between `finalizeForInsertion` and
     /// `paste`. Captured from `DictionaryContext` at session start and
@@ -290,9 +550,36 @@ final class RecordingSession {
     /// the stitched session output substitutes `failureMarker` for
     /// this entry's slot. See `runSender` / `processBatch` / `stop()`
     /// + `NoType/Recording/CLAUDE.md` "Partial recovery".
-    private struct ChunkResponse: Sendable {
+    /// Internal rather than private so `chunkCounts(in:)` — the arithmetic
+    /// behind `SessionSummary.failedChunkCount` — can be pinned against
+    /// real values. Nothing outside this file constructs one in
+    /// production.
+    struct ChunkResponse: Sendable {
         let chunkIndices: [Int]
         let text: String?
+    }
+
+    /// The counting behind `SessionSummary`: a chunk is *failed* when its
+    /// response carries no text, and *dispatched* counts every chunk the
+    /// session accounted for.
+    ///
+    /// Extracted as a pure function so the accounting an abandoned
+    /// split-retry produces can be proved without driving a session — an
+    /// undispatched chunk must land in `failed` exactly like a
+    /// dispatched-and-failed one. Note the third state stays out of
+    /// `failed`: `text: ""` is the hallucination gate's verdict on a call
+    /// that *answered*, not a failure (see `NoType/Recording/CLAUDE.md`
+    /// "Post-response hallucination gate").
+    nonisolated static func chunkCounts(
+        in responses: [ChunkResponse]
+    ) -> (failed: Int, dispatched: Int) {
+        var failed = 0
+        var dispatched = 0
+        for r in responses {
+            dispatched += r.chunkIndices.count
+            if r.text == nil { failed += r.chunkIndices.count }
+        }
+        return (failed, dispatched)
     }
 
     /// One Silero-cut chunk after PCM read, sub-150 ms drop, and AAC
@@ -303,11 +590,38 @@ final class RecordingSession {
     /// to get audio duration. Named struct (over a 4-tuple) so a future
     /// field addition errors at the compile site rather than silently
     /// mis-positioning at one of three call sites.
+    ///
+    /// Mirrored field-for-field by `RetainedRecording.Chunk` — this type
+    /// is private to the session, that one is its escaping counterpart
+    /// for chunks whose audio is kept for a retry. **A field added here
+    /// belongs there too**, or the retained copy stops reproducing the
+    /// original request; the back-reference is on both sides so neither
+    /// is edited without seeing the other.
     private struct EncodedChunk: Sendable {
         let idx: Int
         let isFinal: Bool
         let audio: Data
         let samples: Int
+
+        /// This chunk in its escaping form, for the retention path. The
+        /// field-for-field mirroring contract is in the doc-comment
+        /// above; this is where it is exercised — but only in ONE
+        /// direction. A field added to `RetainedRecording.Chunk` breaks
+        /// this memberwise-init call and fails the build; a field added
+        /// to `EncodedChunk` alone compiles silently and is dropped on
+        /// the floor here. That second direction is a review
+        /// responsibility, not a compiler-enforced one — don't read the
+        /// mirroring note above as covering it.
+        /// `audio` is a `Data` — copy-on-write, so this is a reference
+        /// bump, not a second copy of the blob.
+        var retainable: RetainedRecording.Chunk {
+            RetainedRecording.Chunk(
+                idx: idx,
+                isFinal: isFinal,
+                audio: audio,
+                samples: samples
+            )
+        }
     }
 
     /// Outputs of completed Gemini calls, in dispatch order (also
@@ -336,6 +650,16 @@ final class RecordingSession {
     /// AppState error catalog the real cause (offline, 5xx, etc) to
     /// surface in the Error HUD.
     private var lastRecoverableError: Error?
+    /// Encoded audio of the chunks whose calls failed in the retainable
+    /// class, accumulated across this session's batches (R2, R3), plus
+    /// the frozen context and model a retry needs to reproduce their
+    /// requests. `nil` until the first such failure — a session that
+    /// never loses a chunk allocates nothing here.
+    ///
+    /// Handed to `AppState` through `summary` and then dropped with the
+    /// session like everything else on this type; the session does not
+    /// outlive its release (invariant 10). **Never log this.**
+    private var retained: RetainedRecording?
     private var apiKey: String = ""
 
     init(recorder: AudioRecorder, vad: SileroVAD, gemini: GeminiClient, history: HistoryStore) {
@@ -542,9 +866,11 @@ final class RecordingSession {
         // the two awaits (the previous ordering) left a window where a
         // resuming `stop()` slipped past its `failure` guard while this
         // task was still suspended on `await senderTask?.value`.
-        if failure == nil {
-            failure = CancellationError()
-        }
+        // Routed through `markFailure` rather than assigning `failure`
+        // inline so the retained-audio reset rides the same latch every
+        // other terminal path uses (R4 / AE2) — synchronously, before
+        // the two awaits below, rather than only after them.
+        markFailure(CancellationError())
         recorder.stop()
         senderTask?.cancel()
         vadTask?.cancel()
@@ -559,6 +885,14 @@ final class RecordingSession {
         // prevents a future refactor from introducing a subtle stale-
         // state bug).
         lastRecoverableError = nil
+        // Cancellation is terminal (R4): a cancelled session keeps no
+        // audio, so anything a mid-session network blip had already
+        // retained is dropped rather than surfacing as a broken history
+        // row for a session the user deliberately abandoned. The
+        // `markFailure` latch above already did this synchronously;
+        // repeating it keeps the companion-field reset in one place and
+        // is idempotent.
+        retained = nil
     }
 
     /// Post-session diagnostics — read by `AppState.finalizeRecording`
@@ -566,17 +900,116 @@ final class RecordingSession {
     /// a "some parts didn't transcribe" HUD. Cheap to compute (loops
     /// over `responses` once); safe to call from the main actor.
     var summary: SessionSummary {
-        var failed = 0
-        var total = 0
-        for r in responses {
-            total += r.chunkIndices.count
-            if r.text == nil { failed += r.chunkIndices.count }
-        }
+        let counts = Self.chunkCounts(in: responses)
         return SessionSummary(
-            failedChunkCount: failed,
-            dispatchedChunkCount: total,
+            failedChunkCount: counts.failed,
+            dispatchedChunkCount: counts.dispatched,
             tokens: sessionTokens,
-            model: modelFrozen
+            model: modelFrozen,
+            retained: retained
+        )
+    }
+
+    /// **The single place that turns this session into a `HistoryEntry`.**
+    ///
+    /// Both rows this session can produce come from here: the pasted row
+    /// on the success path, and the broken row `AppState` writes when
+    /// `stop()` threw after retaining audio (R6). Keeping one factory is
+    /// the point — the app / bundle-id / timestamp / duration fields are
+    /// derived from session state the caller does not have, and a second
+    /// builder would drift on the first field either of them gains.
+    ///
+    /// `failedChunkCount` comes from `summary` rather than being passed
+    /// in, so the persisted row and `SessionSummary.hasFailures` can
+    /// never disagree about how many chunks were lost — one predicate,
+    /// one source.
+    private func makeHistoryEntry(text: String) -> HistoryEntry {
+        // Duration = hotkey press → release. `stoppedAt` is captured at
+        // the very top of `stop()`, which runs once the user has already
+        // released, so it's the best proxy we have for release time.
+        // Drives WPM / Time saved on the Home tab.
+        let endedAt = stoppedAt ?? Date()
+        return HistoryEntry(
+            id: UUID(),
+            text: text,
+            sourceAppName: sourceApp?.localizedName ?? "Unknown",
+            sourceBundleID: sourceApp?.bundleIdentifier ?? "",
+            timestamp: startedAt ?? Date(),
+            durationSeconds: max(0, endedAt.timeIntervalSince(startedAt ?? endedAt)),
+            failedChunkCount: summary.failedChunkCount
+        )
+    }
+
+    /// The history row for a session whose `stop()` threw after every
+    /// dispatched chunk failed recoverably (R6, KTD3).
+    ///
+    /// **The text is empty on purpose, and that emptiness is load-bearing
+    /// twice over.** It is what `HistoryRowView.displayText(for:)` turns
+    /// into one `failureMarker` per failed chunk at render time (R9 as
+    /// superseded — the row shows `[…] […]`, not placeholder bars), and
+    /// it is how "lifetime stats never counted this session" is
+    /// represented (R15 / KTD7).
+    ///
+    /// The exact invariant, because U6's accounting rests on it and the
+    /// looser version of this sentence is false: **no row that is both
+    /// `isBroken` and empty-texted can come from the success arm.** Not
+    /// "no empty row" — `stop()`'s `guard !stitched.isEmpty` tests the
+    /// *stitch*, and `finalizeForInsertion` (trailing-punctuation strip)
+    /// and `TextReplacementEngine.apply` both run after it, so a session
+    /// whose transcript normalises away does reach `makeHistoryEntry`
+    /// with `text: ""` and is counted. That row is not broken: it has no
+    /// recoverable failure, so `failedChunkCount == 0`. Conversely every
+    /// session that *is* broken had a chunk fail recoverably, and a
+    /// recoverable failure always stitches the `failureMarker` (`[…]`)
+    /// into the transcript — which survives both passes. So on the
+    /// success arm `isBroken` implies non-empty, and `isBroken` plus
+    /// empty means, unambiguously, that this factory built the row,
+    /// nothing was pasted, and `StatsStore.record` was never called.
+    /// **U6 must gate on `isBroken && text.isEmpty`, not `text.isEmpty`
+    /// alone.** A future change that seeds this row with the `[…]`
+    /// markers instead would silently make every recovered session
+    /// double-count.
+    ///
+    /// Only meaningful once `stop()` has thrown; calling it on a live
+    /// session dates the row from `Date()` instead of release time.
+    /// `AppState.finalizeRecording`'s catch arm is the only caller.
+    func brokenHistoryEntry() -> HistoryEntry {
+        makeHistoryEntry(text: "")
+    }
+
+    /// Fold one batch's retained payload into the session accumulator.
+    ///
+    /// The first payload's context and model win. Both are frozen at
+    /// session start, so every batch that can produce a payload in the
+    /// same session carries the same pair — except the quick-release
+    /// fallback, where a batch that ran before `contextTask` settled
+    /// would carry `ContextSnapshot.minimal`. Keeping the first payload's
+    /// context therefore keeps the richest snapshot the session ever
+    /// actually sent, which is the one a retry wants (R3, R11).
+    ///
+    /// Chunks are re-sorted on merge rather than trusted to arrive in
+    /// order, so `RetainedRecording`'s ascending-order contract holds
+    /// without depending on the sender's drain order staying serial.
+    private func accumulateRetained(_ payload: RetainedRecording?) {
+        retained = Self.mergeRetained(existing: retained, incoming: payload)
+    }
+
+    /// The merge rule itself, as a pure function so the two properties
+    /// U6 depends on can be pinned without driving a session: the result
+    /// is in ascending chunk order whatever order the batches arrived
+    /// in, and the first payload's context/model survive. Same seam
+    /// shape as `retainedPayload` / `shouldUseLitePath`; pinned by
+    /// `RetainedRecordingTests`.
+    nonisolated static func mergeRetained(
+        existing: RetainedRecording?,
+        incoming: RetainedRecording?
+    ) -> RetainedRecording? {
+        guard let incoming else { return existing }
+        guard let existing else { return incoming }
+        return RetainedRecording(
+            chunks: (existing.chunks + incoming.chunks).sorted { $0.idx < $1.idx },
+            context: existing.context,
+            model: existing.model
         )
     }
 
@@ -597,6 +1030,10 @@ final class RecordingSession {
     /// pastes the concatenated transcript, and writes a history entry.
     func stop() async throws -> HistoryEntry {
         let t0 = Date()
+        // Every `throw` below leaves `AppState` holding this session, and
+        // the broken-row path (R6) needs release time to date the row.
+        // Record it before the first await rather than at each throw site.
+        stoppedAt = t0
         recorder.stop()                 // finishes the AsyncStream
         await vadTask?.value            // VAD consumer drains and exits
         let tStream = Date()
@@ -708,19 +1145,7 @@ final class RecordingSession {
         await TextInjector.paste(final)
         let tPaste = Date()
 
-        // Duration = hotkey press → release. `t0` is captured at the
-        // very top of `stop()`, which runs once the user has already
-        // released, so it's the best proxy we have for release time.
-        // Drives WPM / Time saved on the Home tab.
-        let durationSeconds = max(0, t0.timeIntervalSince(startedAt ?? t0))
-        let entry = HistoryEntry(
-            id: UUID(),
-            text: final,
-            sourceAppName: sourceApp?.localizedName ?? "Unknown",
-            sourceBundleID: sourceApp?.bundleIdentifier ?? "",
-            timestamp: startedAt ?? Date(),
-            durationSeconds: durationSeconds
-        )
+        let entry = makeHistoryEntry(text: final)
         await history.append(entry)
 
         Self.log.info(
@@ -983,6 +1408,14 @@ final class RecordingSession {
             forceLite: isShortFinalOnly
         ) else { return }
 
+        // Chunk indices whose Gemini call failed in the class
+        // `shouldRetain(_:)` admits — collected across this batch's
+        // failure arms and turned into a retained payload below (R2).
+        // Stays empty for a batch that fully succeeded and for one the
+        // hallucination gate dropped: the gate fires on a call that
+        // *answered*, which is not a failure and must retain nothing.
+        var retainableFailures: Set<Int> = []
+
         do {
             let result: (text: String, tokens: TokenUsage)
             if snap.isLite {
@@ -1064,12 +1497,46 @@ final class RecordingSession {
             // Error HUD.
             if encoded.count > 1 {
                 Self.log.warning("\(label) failed (\(error.localizedDescription, privacy: .public)) — splitting into \(encoded.count) single calls")
-                await splitRetry(encoded: encoded, snap: snap)
+                retainableFailures = await splitRetry(
+                    encoded: encoded,
+                    snap: snap,
+                    batchFailureWasNetwork: Self.isNetworkClass(error)
+                )
             } else {
                 let c = encoded[0]
                 Self.log.error("\(label) failed: \(error.localizedDescription, privacy: .public) — inserting marker")
                 recordRecoverableFailure(error: error, indices: [c.idx])
+                if Self.shouldRetain(error) { retainableFailures.insert(c.idx) }
             }
+        }
+
+        // Keep the failed chunks' encoded audio instead of letting it go
+        // out of scope with `encoded` (R2, R3) — the one thing this
+        // function stops releasing. PCM is untouched either way: the
+        // retained form is the AAC blob, so `discardProcessedPCM` below
+        // runs on its existing schedule.
+        //
+        // Skipped once a terminal error has latched — which `splitRetry`
+        // can do after it has already collected recoverable indices. That
+        // session aborts, and R4 holds terminal failures to retaining
+        // nothing. This guard covers only THIS batch; the session-wide
+        // half (dropping what an earlier batch retained) lives in
+        // `markFailure`, which is the latch every terminal path shares.
+        //
+        // The emptiness term is not just an optimisation: without it
+        // `encoded.map(\.retainable)` materialises a chunk struct for
+        // every chunk of every batch — including the ordinary successful
+        // one — only for `retainedPayload` to discard it. Keeping the
+        // success path allocation-free is what makes the `retained`
+        // field's "a session that never loses a chunk allocates nothing
+        // here" literally true.
+        if !didFail && !retainableFailures.isEmpty {
+            accumulateRetained(Self.retainedPayload(
+                inBatch: encoded.map(\.retainable),
+                failedChunkIndices: retainableFailures,
+                context: snap.context,
+                model: snap.model
+            ))
         }
 
         discardProcessedPCM(batch: batch, containsFinal: containsFinal)
@@ -1093,15 +1560,34 @@ final class RecordingSession {
     /// → chunk 3 sees chunk 2's text). A terminal error in any
     /// sub-call aborts the rest of the split — the session-level
     /// `markFailure` is already set; `stop()` will rethrow.
+    ///
+    /// Returns the chunk indices whose failure falls in the retainable
+    /// class (R2) — this is the common landing site for a long offline
+    /// session, since a multi-chunk batch always splits before any
+    /// marker is recorded. The caller turns the set into a payload;
+    /// collecting rather than retaining in place keeps the derivation a
+    /// pure function. An early return on a terminal error still yields
+    /// whatever was collected first, and the caller drops it — see the
+    /// `didFail` guard at the `processBatch` call site.
+    ///
+    /// `batchFailureWasNetwork` carries whether the batched call that sent
+    /// us here failed in the network class; combined with the first split
+    /// chunk's own verdict it bounds the run — see the abandon arm below.
     private func splitRetry(
         encoded: [EncodedChunk],
-        snap: ChunkSnapshot
-    ) async {
+        snap: ChunkSnapshot,
+        batchFailureWasNetwork: Bool
+    ) async -> Set<Int> {
+        var retainable: Set<Int> = []
         for (offset, chunk) in encoded.enumerated() {
-            if didFail { return }
+            if didFail { return retainable }
             // Re-query priors each iteration so a chunk that just
             // succeeded becomes context for the next one.
             let priors = currentPriors()
+            // Timed so the abandon arm can tell a 30 s timeout from a
+            // ~0 ms reachability short-circuit — see
+            // `abandonMinChunkFailureLatency`.
+            let dispatchedAt = ContinuousClock.now
             do {
                 let result = try await gemini.transcribeWithUsage(
                     audio: chunk.audio,
@@ -1132,10 +1618,47 @@ final class RecordingSession {
                 if Self.isTerminal(error) {
                     Self.log.error("chunk_\(chunk.idx) split-retry failed terminally: \(error.localizedDescription, privacy: .public)")
                     markFailure(error)
-                    return
+                    return retainable
                 }
                 Self.log.error("chunk_\(chunk.idx) split-retry failed: \(error.localizedDescription, privacy: .public) — inserting marker")
                 recordRecoverableFailure(error: error, indices: [chunk.idx])
+                if Self.shouldRetain(error) { retainable.insert(chunk.idx) }
+
+                // Transport is down, we have two independent observations
+                // of it — the batched call and this standalone one — and
+                // this one cost real time rather than being answered from
+                // the reachability cache. Every remaining chunk is a
+                // guaranteed 30 s round-trip ending in the same error,
+                // 250 ms apart, so account for them here instead of
+                // spending minutes proving it. Each still gets its marker
+                // AND its audio retained, which is what keeps an
+                // undispatched chunk indistinguishable from this one — see
+                // `abandonedAccounting`.
+                if Self.shouldAbandonSplitRetry(
+                    batchFailureWasNetwork: batchFailureWasNetwork,
+                    chunkOffset: offset,
+                    chunkFailureWasNetwork: Self.isNetworkClass(error),
+                    chunkFailureLatency: ContinuousClock.now - dispatchedAt
+                ) {
+                    let acct = Self.abandonedAccounting(
+                        undispatched: encoded.dropFirst(offset + 1).map(\.retainable),
+                        error: error
+                    )
+                    // Unreachable by construction — `processBatch` only
+                    // splits an `encoded.count > 1` batch and this arm only
+                    // fires at offset 0, so `dropFirst(1)` always leaves at
+                    // least one chunk. Kept as insurance against a second
+                    // call site: without it an empty set would still log
+                    // "0 chunk(s) marked", which reads like a bug report.
+                    guard !acct.markerChunkIndices.isEmpty else { return retainable }
+                    Self.log.warning("split-retry abandoned after chunk_\(chunk.idx): no network — \(acct.markerChunkIndices.count) chunk(s) marked without dispatch, audio retained")
+                    for idx in acct.markerChunkIndices {
+                        recordRecoverableFailure(error: error, indices: [idx])
+                    }
+                    retainable.formUnion(acct.retainable)
+                    return retainable
+                }
+
                 // Brief pause before the next sub-call so we don't
                 // burst-fire against a rate-limited API. Skip the
                 // sleep when we're already on the last chunk —
@@ -1145,6 +1668,7 @@ final class RecordingSession {
                 }
             }
         }
+        return retainable
     }
 
     /// Append a `text: nil` response for a chunk (or batched group)
@@ -1313,6 +1837,20 @@ final class RecordingSession {
 
     private func markFailure(_ error: Error) {
         if failure == nil { failure = error }
+        // Terminal abort is a SESSION-wide fact, not a per-batch one
+        // (R4). Once any error has latched, this session is going to
+        // throw out of `stop()`, and nothing it captured is retryable —
+        // including audio an *earlier* batch already accumulated. The
+        // `!didFail` guard at the `processBatch` retain site only
+        // suppresses the batch it runs in; a session that lost chunk 0
+        // to a 5xx and then hit a rejected key on chunk 3 would keep
+        // chunk 0's audio without this line, and `AppState`'s catch arm
+        // (KTD3) reads `retained != nil` as "this session lost chunks in
+        // the recoverable class". Writing a broken row with a live retry
+        // button for a session killed by a bad key is the shape AE1
+        // forbids. Unconditional (not inside the `failure == nil` guard)
+        // because it is idempotent and must hold on every latch.
+        retained = nil
     }
 
     // MARK: - Context-task helpers

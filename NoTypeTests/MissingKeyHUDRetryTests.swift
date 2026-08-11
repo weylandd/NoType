@@ -75,7 +75,13 @@ final class MissingKeyHUDRetryTests: XCTestCase {
         // retryHandler with no retryLabel is harmless but dead code.
         XCTAssertNil(NoTypeErrorKind.vadLoadFailed.retryHandler)
         XCTAssertNil(NoTypeErrorKind.sessionStartFailed(StubError()).retryHandler)
-        XCTAssertNil(NoTypeErrorKind.sessionFailure(StubError()).retryHandler)
+        // Both retention outcomes: the HUD deliberately ships no retry
+        // button even when the recording *is* retryable — the history
+        // row owns that affordance (plan R7 / R10), and a second retry
+        // entry point on a HUD that auto-dismisses after 8 s would be
+        // the dead-button regression this file exists for.
+        XCTAssertNil(NoTypeErrorKind.sessionFailure(StubError(), retainedForRetry: false).retryHandler)
+        XCTAssertNil(NoTypeErrorKind.sessionFailure(StubError(), retainedForRetry: true).retryHandler)
     }
 
     // MARK: - retryLabel-without-retryHandler smoke check
@@ -92,7 +98,11 @@ final class MissingKeyHUDRetryTests: XCTestCase {
         //   1. `.missingAPIKey`          — in `kinds` below.
         //   2. `.vadLoadFailed`          — in `kinds` below.
         //   3. `.sessionStartFailed(_)`  — in `kinds` below (stub error).
-        //   4. `.sessionFailure(_)`      — in `kinds` below (stub error).
+        //   4. `.sessionFailure(_, retainedForRetry:)` — in `kinds`
+        //      below, **both** retention outcomes (stub error). The flag
+        //      only changes the description's consequence clause, but
+        //      listing both is what keeps this guard honest if a future
+        //      change ever gives the retained variant its own button.
         //   5. `.partialTranscription(_)` — SKIPPED. Constructing it
         //      requires a real `RecordingSession.SessionSummary`
         //      fixture; its payload deliberately has no `retryLabel`,
@@ -107,7 +117,8 @@ final class MissingKeyHUDRetryTests: XCTestCase {
             .missingAPIKey,
             .vadLoadFailed,
             .sessionStartFailed(StubError()),
-            .sessionFailure(StubError()),
+            .sessionFailure(StubError(), retainedForRetry: false),
+            .sessionFailure(StubError(), retainedForRetry: true),
         ]
         for kind in kinds {
             if kind.payload.retryLabel != nil {

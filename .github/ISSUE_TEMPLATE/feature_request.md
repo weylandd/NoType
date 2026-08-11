@@ -25,7 +25,7 @@ and PRs adding them will be closed:
 - Offline mode
 - Live transcript window during recording
 - Editing past transcripts in-app
-- Audio retention
+- Audio retention on disk (in-memory retention of failed chunks, for the retry action, already ships)
 - History longer than 10 entries
 - Mac App Store distribution
 - Telemetry / analytics

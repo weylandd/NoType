@@ -10,6 +10,51 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
 
 ## [Unreleased]
 
+### Added
+- **A dictation that fails on a bad connection is no longer lost — you can
+  retry it.** Previously, if the network dropped mid-dictation, the parts
+  that didn't make it came back as `[…]` gaps and the audio behind them was
+  gone; a dictation where nothing made it through disappeared entirely.
+  Now that recording appears in your history marked as incomplete, and one
+  tap re-sends just the parts that failed — filling the gaps in place. If
+  only some of them come back, the rest stay retryable. The failure notice
+  says so too: it still tells you what went wrong — no internet, timed out,
+  Gemini busy — but now ends by telling you the recording is in your
+  history rather than that your audio wasn't saved. When nothing could be
+  kept, it still says so plainly.
+- The audio for those failed parts is held **in memory only**, and never
+  written to disk. It's released as soon as the retry succeeds, when you
+  delete the row, when the row falls out of the last-10 history window, or
+  when you quit NoType. Quitting always loses it, so after a restart an
+  incomplete recording still shows in your history but no longer offers a
+  retry. The text you already had pasted is never touched.
+
+### Fixed
+- **Dictating with no internet no longer leaves you waiting a minute for
+  the error.** NoType used to sit on each attempt for the full 30-second
+  network timeout, then try once more — so a single failed dictation could
+  take a minute or more before it told you anything, and a longer one
+  several minutes. It now checks whether the machine has any network
+  connection at all before sending, and fails immediately when it doesn't.
+  The check is deliberately cautious: anything short of "the system says
+  there is no connection" — including a VPN that still needs to dial up —
+  sends the request as usual, so being online is never mistaken for being
+  offline.
+- **A dictation that fails because the connection is dead no longer works
+  through every part one at a time.** When both the first attempt and the
+  retry of the first part fail for connection reasons, NoType stops sending
+  the rest rather than waiting out a 30-second timeout on each — which on a
+  long dictation could run to several minutes. This matters most for a
+  connection that looks alive but isn't (a hotel Wi-Fi sign-in page, a
+  dropped VPN), where the check above deliberately doesn't step in. The
+  parts it skips are still kept and still retryable: they show as gaps in
+  the row and their audio is held exactly as if it had been sent and
+  failed, so one tap re-sends all of them once you're back online. It only
+  stops early when those failures actually cost time — a brief Wi-Fi drop
+  that the connection check answers instantly no longer causes the rest of
+  a dictation to be skipped, because skipping it would save nothing and the
+  gaps it leaves in text already pasted can't be repaired by a retry.
+
 ### Internal
 - **Found the actual cause of the macOS 26 crash** ([#82](https://github.com/weylandd/NoType/issues/82)), and corrected the documentation that named the wrong one. NoType raises an internal Objective-C error inside a background job; macOS absorbs it and keeps running, but the concurrency runtime is left corrupted and the app falls over shortly afterwards at an unrelated click. The three previous incidents — a timeline view, a hover handler, a button — were all innocent bystanders, which is why fixing each of them only moved the crash. The mechanism was reproduced locally rather than inferred.
 - Two things this retires: the start-up rework shipped in 0.1.13-rc1 was tested and **did not** fix the crash (it remains correct for its own reasons), and the README no longer suggests updating macOS as a workaround — the trigger is in NoType, not in the OS.

@@ -3,7 +3,14 @@ import OSLog
 
 actor HistoryStore {
     private static let log = Logger(subsystem: "app.notype", category: "history")
-    private static let cap = 10
+    /// The rolling window (invariant 1). **Internal, not private, because
+    /// it is the single source of truth for a second trim:**
+    /// `AppState.historyMirrorCap` is derived from it, so the optimistic
+    /// main-actor mirror and this actor's FIFO cannot drift apart. A
+    /// private copy here would leave the mirror hand-synced to a literal,
+    /// which is the drift `AppState.liveHistoryIDs` cannot survive — see
+    /// `AppState.historyMirrorCap`.
+    static let cap = 10
 
     private let url: URL
     private let encoder = JSONFileStorage.makeEncoder()
@@ -29,6 +36,32 @@ actor HistoryStore {
         if entries.count > Self.cap {
             entries.removeFirst(entries.count - Self.cap)
         }
+        write(entries)
+        return entries
+    }
+
+    /// Replace the stored entry that shares `entry.id`, in place. No-op if
+    /// the id isn't present, mirroring `remove(id:)`'s contract.
+    ///
+    /// **In place, not remove-then-append.** A retry rewrites a broken row's
+    /// text and failure count (R12, R16) without changing what the row *is*:
+    /// re-appending would move it to the newest slot, reorder the last-10
+    /// list under the user, and put the trim in a position to evict a
+    /// different row than the one the cap would have taken.
+    ///
+    /// The no-op case is reachable and benign: `AppState`'s mirror is
+    /// optimistic and its disk writes are fire-and-forget, so a retry can
+    /// settle against a row whose original `append` has not landed yet. The
+    /// row's own append then persists it — carrying the pre-retry text until
+    /// the next mutation, which is the same eventual-consistency the mirror
+    /// has always had. The mirror is what the UI renders.
+    @discardableResult
+    func update(_ entry: HistoryEntry) -> [HistoryEntry] {
+        var entries = allEntries()
+        guard let idx = entries.firstIndex(where: { $0.id == entry.id }) else {
+            return entries
+        }
+        entries[idx] = entry
         write(entries)
         return entries
     }

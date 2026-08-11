@@ -78,7 +78,7 @@ Per-module guides (Claude Code auto-loads the relevant one when working in that 
 - ❌ No offline mode. Internet is required; show "no internet" toast if unavailable.
 - ❌ No live transcript window during recording.
 - ❌ No editing of past transcripts inside the app.
-- ❌ No audio retention — only the resulting text in history.
+- ❌ No audio retention **on disk** — only the resulting text is persisted. In-memory carve-out: audio of chunks that failed to transcribe is held for the lifetime of the process so a broken history row can be retried. It is never serialized, and process exit is what ends it — see `NoType/History/CLAUDE.md` invariant 4.
 - ❌ No screen recording **by default** — opt-in fallback only (ADR-014). When the Screen Recording permission is granted, NoType OCR's a screenshot of the active window to fill the on-screen-context section when AX surfaces nothing useful; otherwise that limb is silent. No raw screenshots are ever stored or sent — only `SecureFieldMasker.scrubContent`-filtered text.
 - ❌ No account system, no telemetry (in the OSS version).
 - ❌ No history > 10 entries (FIFO).

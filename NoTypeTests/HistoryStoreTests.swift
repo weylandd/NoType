@@ -25,15 +25,147 @@ final class HistoryStoreTests: XCTestCase {
         super.tearDown()
     }
 
-    private func entry(text: String, when: Date = Date()) -> HistoryEntry {
+    private func entry(
+        text: String,
+        when: Date = Date(),
+        failedChunkCount: Int = 0
+    ) -> HistoryEntry {
         HistoryEntry(
             id: UUID(),
             text: text,
             sourceAppName: "Slack",
             sourceBundleID: "com.tinyspeck.slackmacgap",
             timestamp: when,
-            durationSeconds: 1.0
+            durationSeconds: 1.0,
+            failedChunkCount: failedChunkCount
         )
+    }
+
+    /// A `history.json` exactly as a build *before* `failedChunkCount`
+    /// shipped would have written it: `JSONFileStorage.makeEncoder()`
+    /// output — iso8601 dates, sorted keys, pretty-printed — with no
+    /// `failedChunkCount` key anywhere.
+    ///
+    /// Kept as a literal rather than a file under `Fixtures/` so the
+    /// bytes and the assertion that reads them sit together, and so a
+    /// future `xcodegen generate` can't quietly change what the
+    /// backward-compatibility proof runs against.
+    private static let legacyHistoryJSON = """
+    [
+      {
+        "durationSeconds" : 4.25,
+        "id" : "1B9A1F3E-6C4D-4F0A-9B2E-7A5C81D3E0F1",
+        "sourceAppName" : "Slack",
+        "sourceBundleID" : "com.tinyspeck.slackmacgap",
+        "text" : "ship it by friday",
+        "timestamp" : "2026-05-18T09:41:12Z"
+      },
+      {
+        "durationSeconds" : 0,
+        "id" : "2C0B2A4F-7D5E-4A1B-8C3F-6B4D92E4F1A2",
+        "sourceAppName" : "Mail",
+        "sourceBundleID" : "com.apple.mail",
+        "text" : "thanks, sending the draft over now",
+        "timestamp" : "2026-05-18T10:02:44Z"
+      }
+    ]
+    """
+
+    // MARK: - failedChunkCount / isBroken (U4)
+
+    /// The unit's Definition of Done: a pre-change `history.json`
+    /// decodes unchanged. Every legacy row reads back with the field
+    /// defaulted to 0 and `isBroken` false — a row written before the
+    /// feature existed can never claim to be broken.
+    func test_decode_legacyRowsWithoutFailedChunkCount_defaultToZeroAndNotBroken() async throws {
+        try Self.legacyHistoryJSON.write(to: tempURL, atomically: true, encoding: .utf8)
+
+        let store = HistoryStore(url: tempURL)
+        let entries = await store.allEntries()
+
+        XCTAssertEqual(entries.count, 2, "legacy file must still decode — no rows lost")
+        XCTAssertEqual(entries.map(\.text),
+            ["ship it by friday", "thanks, sending the draft over now"],
+            "text must survive the schema widening byte-for-byte")
+        XCTAssertEqual(entries.map(\.failedChunkCount), [0, 0],
+            "absent key decodes as 0, same tolerant shape as durationSeconds")
+        XCTAssertEqual(entries.map(\.isBroken), [false, false],
+            "a pre-feature row is never broken")
+        XCTAssertEqual(entries.map(\.durationSeconds), [4.25, 0],
+            "the existing tolerant field is unaffected")
+    }
+
+    func test_append_brokenRowRoundTripsAcrossInstances() async {
+        let broken = HistoryEntry(
+            id: UUID(),
+            text: "ship it by […] and review after",
+            sourceAppName: "Slack",
+            sourceBundleID: "com.tinyspeck.slackmacgap",
+            timestamp: Date(),
+            durationSeconds: 12.0,
+            failedChunkCount: 3
+        )
+        let a = HistoryStore(url: tempURL)
+        await a.append(broken)
+
+        let b = HistoryStore(url: tempURL)
+        let reloaded = await b.allEntries()
+        XCTAssertEqual(reloaded.count, 1)
+        XCTAssertEqual(reloaded.first?.failedChunkCount, 3,
+            "the count is persisted, not derived at read time")
+        XCTAssertEqual(reloaded.first?.isBroken, true)
+    }
+
+    /// R8's other half: brokenness is the count, not the text. A row
+    /// carrying text is broken or not purely on the count, and a count
+    /// of zero is not broken no matter what the text holds.
+    func test_isBroken_readsOnlyTheCount() {
+        let clean = entry(text: "a perfectly ordinary transcript")
+        XCTAssertEqual(clean.failedChunkCount, 0,
+            "the memberwise default keeps every existing call site honest")
+        XCTAssertFalse(clean.isBroken)
+
+        let emptyButBroken = HistoryEntry(
+            id: UUID(),
+            text: "",
+            sourceAppName: "Slack",
+            sourceBundleID: "com.tinyspeck.slackmacgap",
+            timestamp: Date(),
+            durationSeconds: 30.0,
+            failedChunkCount: 1
+        )
+        XCTAssertTrue(emptyButBroken.isBroken,
+            "a session that recovered no text at all is still a broken row")
+    }
+
+    // MARK: - Corruption recovery
+
+    /// Garbage JSON is renamed aside and the store starts fresh —
+    /// the behaviour `NoType/History/CLAUDE.md` documents, pinned here
+    /// against the widened schema so a future field can't turn a
+    /// decode failure into a crash or a silent data loss without a
+    /// backup.
+    func test_allEntries_corruptFileIsBackedUpAndReadsEmpty() async throws {
+        try "{ not even an array".write(to: tempURL, atomically: true, encoding: .utf8)
+
+        let store = HistoryStore(url: tempURL)
+        let entries = await store.allEntries()
+        XCTAssertTrue(entries.isEmpty, "corrupt file reads as an empty history")
+
+        let dir = tempURL.deletingLastPathComponent()
+        let siblings = try FileManager.default
+            .contentsOfDirectory(atPath: dir.path)
+            .filter { $0.hasPrefix("history.json.corrupt-") }
+        XCTAssertEqual(siblings.count, 1,
+            "the unreadable file is preserved as history.json.corrupt-<ts>, not deleted")
+        // The backup must be a *move*, not a copy. A copy would leave the
+        // undecodable bytes at `history.json`, so every subsequent read
+        // would re-fail and mint another `.corrupt-<ts>` sibling forever.
+        // Asserting only "reads empty" + "a backup exists" is green under
+        // that regression — see
+        // `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`.
+        XCTAssertFalse(FileManager.default.fileExists(atPath: tempURL.path),
+            "the corrupt file is renamed aside, not copied — nothing is left at history.json")
     }
 
     // MARK: - Round-trip
@@ -80,6 +212,74 @@ final class HistoryStoreTests: XCTestCase {
         await store.remove(id: UUID())
         let entries = await store.allEntries()
         XCTAssertEqual(entries.map { $0.text }, ["kept"])
+    }
+
+    // MARK: - update(_:) (U6 — the retry's disk write)
+
+    func test_update_replacesTheRowInPlace_withoutMovingIt() async {
+        // A retry rewrites a broken row's text and failure count without
+        // changing what the row *is*. Re-appending would move it to the
+        // newest slot, reorder the last-10 list under the user, and put
+        // the trim in a position to evict a different row than the cap
+        // would have taken.
+        let store = HistoryStore(url: tempURL)
+        let first = entry(text: "first")
+        let broken = entry(text: "second \(RecordingSession.failureMarker)", failedChunkCount: 1)
+        let last = entry(text: "third")
+        await store.append(first)
+        await store.append(broken)
+        await store.append(last)
+
+        let recovered = HistoryEntry(
+            id: broken.id,
+            text: "second recovered",
+            sourceAppName: broken.sourceAppName,
+            sourceBundleID: broken.sourceBundleID,
+            timestamp: broken.timestamp,
+            durationSeconds: broken.durationSeconds,
+            failedChunkCount: 0
+        )
+        await store.update(recovered)
+
+        let entries = await store.allEntries()
+        XCTAssertEqual(entries.map(\.id), [first.id, broken.id, last.id], "order is preserved")
+        XCTAssertEqual(entries.map(\.text), ["first", "second recovered", "third"])
+        XCTAssertEqual(entries[1].isBroken, false, "and the row is no longer broken")
+    }
+
+    func test_update_persistsAcrossAFreshReader() async {
+        // The mirror is not the assertion — the file is.
+        let broken = entry(text: "gap \(RecordingSession.failureMarker)", failedChunkCount: 1)
+        await HistoryStore(url: tempURL).append(broken)
+
+        await HistoryStore(url: tempURL).update(
+            HistoryEntry(
+                id: broken.id,
+                text: "gap filled",
+                sourceAppName: broken.sourceAppName,
+                sourceBundleID: broken.sourceBundleID,
+                timestamp: broken.timestamp,
+                durationSeconds: broken.durationSeconds,
+                failedChunkCount: 0
+            )
+        )
+
+        let entries = await HistoryStore(url: tempURL).allEntries()
+        XCTAssertEqual(entries.map(\.text), ["gap filled"])
+    }
+
+    func test_update_missingIdIsNoop_andAddsNoRow() async {
+        // Mirrors `remove(id:)`'s contract. Reachable when a retry settles
+        // before the row's own fire-and-forget append has landed — the row
+        // must not be conjured into existence out of order.
+        let store = HistoryStore(url: tempURL)
+        let kept = entry(text: "kept")
+        await store.append(kept)
+
+        await store.update(entry(text: "never appended"))
+
+        let entries = await store.allEntries()
+        XCTAssertEqual(entries.map(\.text), ["kept"], "no row added, none changed")
     }
 
     // MARK: - deleteAll (U7)
