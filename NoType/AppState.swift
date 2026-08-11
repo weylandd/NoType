@@ -1080,6 +1080,14 @@ final class AppState {
         let remaining = zip(payload.chunks, merged.placed)
             .filter { !$0.1 }
             .map(\.0)
+        // The reconstruction initializer: this merge still describes its
+        // result the pre-sequence way — a flat string plus a count — so the
+        // row's response sequence is rebuilt from that pair by the same
+        // rule a legacy row on disk goes through. It reproduces exactly
+        // what the row renders. Replacing the marker scan with a write
+        // keyed on the chunk's own index is the next unit's job; until
+        // then, deriving here keeps the sequence and the text from
+        // disagreeing about where the remaining gaps are.
         let updated = HistoryEntry(
             id: row.id,
             text: mergedText,

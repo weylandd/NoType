@@ -1167,10 +1167,13 @@ final class RecordingSession {
     /// derived from session state the caller does not have, and a second
     /// builder would drift on the first field either of them gains.
     ///
-    /// `failedChunkCount` comes from `summary` rather than being passed
-    /// in, so the persisted row and `SessionSummary.hasFailures` can
-    /// never disagree about how many chunks were lost — one predicate,
-    /// one source.
+    /// The row's response sequence comes from `responses` rather than
+    /// being passed in, so the persisted row and `SessionSummary` can
+    /// never disagree about which chunks were lost — one source, and now
+    /// a structural one: `HistoryEntry.failedChunkCount` and
+    /// `SessionSummary.failedChunkCount` are two readings of the same
+    /// per-response data (`chunkCounts(in:)` and the segment reduce count
+    /// the identical thing).
     private func makeHistoryEntry(text: String) -> HistoryEntry {
         // Duration = hotkey press → release. `stoppedAt` is captured at
         // the very top of `stop()`, which runs once the user has already
@@ -1184,8 +1187,38 @@ final class RecordingSession {
             sourceBundleID: sourceApp?.bundleIdentifier ?? "",
             timestamp: startedAt ?? Date(),
             durationSeconds: max(0, endedAt.timeIntervalSince(startedAt ?? endedAt)),
-            failedChunkCount: summary.failedChunkCount
+            segments: Self.historySegments(from: responses)
         )
+    }
+
+    /// This session's responses in the shape a history row stores them
+    /// (R1) — a straight one-to-one map, because `ChunkResponse` already
+    /// *is* the segment: the positions one Gemini call covered plus the
+    /// text it answered with, or `nil` where it failed recoverably.
+    ///
+    /// Two properties fall out of that map rather than being enforced
+    /// here, and both are contracts elsewhere:
+    ///
+    /// - The **text is raw** (R2). `responses` holds what the model
+    ///   returned; `TextInjector.finalizeForInsertion` and
+    ///   `TextReplacementEngine.apply` run on the stitched whole, on the
+    ///   paste path, and never touch these. The row's `text` mirror is
+    ///   post-replacement, the segments are not, and that is the point —
+    ///   the user's *current* pairs are applied when a row is displayed.
+    /// - A chunk the hallucination gate filtered stays a **text segment
+    ///   holding `""`**, not a gap (R19, R27). The gate stores `""` (not
+    ///   `nil`) precisely so a call that answered can be told apart from
+    ///   one that failed; carrying that distinction onto disk unchanged
+    ///   is what keeps such a row out of the broken state.
+    ///
+    /// Pure and `nonisolated` so both properties can be proved without
+    /// standing up a session.
+    nonisolated static func historySegments(
+        from responses: [ChunkResponse]
+    ) -> [HistoryEntry.Segment] {
+        responses.map {
+            HistoryEntry.Segment(chunkIndices: $0.chunkIndices, text: $0.text)
+        }
     }
 
     /// The history row for a session whose `stop()` threw after every
@@ -1217,6 +1250,15 @@ final class RecordingSession {
     /// alone.** A future change that seeds this row with the `[…]`
     /// markers instead would silently make every recovered session
     /// double-count.
+    ///
+    /// The row also carries the session's response sequence, which for
+    /// this factory is **all gaps** — every dispatched chunk failed, so
+    /// every `ChunkResponse` has `text == nil`. That makes the row's
+    /// brokenness structural (R3) rather than a count, and it is the form
+    /// the never-counted signal above is migrating to: "every segment is
+    /// a gap" says the same thing as `isBroken && text.isEmpty` without
+    /// depending on the emptiness of a string that boundary normalisation
+    /// and replacement pairs both run over.
     ///
     /// Only meaningful once `stop()` has thrown; calling it on a live
     /// session dates the row from `Date()` instead of release time.

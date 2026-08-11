@@ -176,4 +176,68 @@ final class RecordingSessionPartialRecoveryTests: XCTestCase {
         )
         XCTAssertEqual(s.model, .flash)
     }
+
+    // MARK: - historySegments (the three-state table, carried onto disk)
+
+    /// R1. The map is one-to-one because `ChunkResponse` already *is* the
+    /// stored segment: the positions one Gemini call covered plus the text
+    /// it answered with. A batched call answering for several chunks with
+    /// one joined transcript stays one segment — per-chunk text does not
+    /// exist for it and must not be invented.
+    func test_historySegments_mapsResponsesOneToOne_preservingOrderAndPositions() {
+        let segments = RecordingSession.historySegments(from: [
+            .init(chunkIndices: [0], text: "alpha"),
+            .init(chunkIndices: [1, 2], text: "bravo charlie"),
+            .init(chunkIndices: [3], text: nil),
+        ])
+        XCTAssertEqual(segments, [
+            .carrying("alpha", at: [0]),
+            .carrying("bravo charlie", at: [1, 2]),
+            .gap(at: [3]),
+        ])
+    }
+
+    /// R19 / R27, and the reason the gate stores `""` rather than `nil`:
+    /// Gemini answered and *we* dropped the answer, so the position is
+    /// text — an empty one — not a lost chunk. Carried onto disk unchanged,
+    /// its row is not broken and renders no marker.
+    func test_historySegments_gateFilteredChunk_isATextSegment_notAGap() {
+        let segments = RecordingSession.historySegments(from: [
+            .init(chunkIndices: [0], text: "first"),
+            .init(chunkIndices: [1], text: ""),      // hallucination gate fired
+            .init(chunkIndices: [2], text: "third"),
+        ])
+        XCTAssertEqual(segments[1], .carrying("", at: [1]))
+        XCTAssertFalse(segments[1].isGap)
+        XCTAssertFalse(segments.contains(where: \.isGap),
+            "a gate-filtered chunk must not make its row broken")
+    }
+
+    /// The two readings of "how many chunks carry no text" must never
+    /// drift: `SessionSummary.failedChunkCount` counts them over
+    /// `responses`, `HistoryEntry.failedChunkCount` counts them over the
+    /// segments those responses became. Swept over the three states,
+    /// including a gap spanning two positions.
+    func test_historySegments_gapCount_agreesWithChunkCounts() {
+        let responses: [RecordingSession.ChunkResponse] = [
+            .init(chunkIndices: [0], text: "kept"),
+            .init(chunkIndices: [1], text: ""),
+            .init(chunkIndices: [2, 3], text: nil),
+            .init(chunkIndices: [4], text: nil),
+        ]
+        let counts = RecordingSession.chunkCounts(in: responses)
+        let entry = HistoryEntry(
+            id: UUID(),
+            text: "kept […] […]",
+            sourceAppName: "Slack",
+            sourceBundleID: "com.tinyspeck.slackmacgap",
+            timestamp: Date(),
+            durationSeconds: 1,
+            segments: RecordingSession.historySegments(from: responses)
+        )
+        XCTAssertEqual(counts.failed, 3)
+        XCTAssertEqual(entry.failedChunkCount, counts.failed,
+            "the row and the summary count the same thing over the same data")
+        XCTAssertTrue(entry.isBroken)
+    }
 }
