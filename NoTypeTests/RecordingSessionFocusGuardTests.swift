@@ -1,27 +1,38 @@
 import XCTest
 @testable import NoType
 
-/// Pins `RecordingSession.shouldWithholdPaste(sourcePID:currentPID:)` —
-/// the pure gate `stop()` consults at the last synchronous instruction
+/// Pins `RecordingSession.shouldWithholdPaste(destinationPID:currentPID:)`
+/// — the pure gate `stop()` consults at the last synchronous instruction
 /// before `TextInjector.paste`, so a transcript that arrived after the
 /// user moved on is never typed into a document they did not mean to
 /// edit (R23, R24, R26; KD8, KD9).
+///
+/// **The destination is frozen at the stop, not at session start.**
+/// Product ruling of 2026-08-11: the transcript belongs wherever the
+/// cursor was when the user pressed stop. Freezing at session start
+/// broke hands-free dictation outright — with the recording locked, a
+/// user who starts talking in one application, walks to another and taps
+/// to stop there is deliberately aiming at the second one, and the paste
+/// was withheld every single time. So the freeze lives in
+/// `AppState.finalizeRecording`, and the guard for it below reads
+/// `AppState.swift` rather than `start()`. What KD8 protects against is
+/// untouched: moving away *during transcription* still withholds.
 ///
 /// **Two halves, proved two different ways.** The truth table below is
 /// the predicate's whole contract. But `RecordingSession` owns an
 /// `AudioRecorder`, a `SileroVAD`, a `GeminiClient` and a `HistoryStore`
 /// and cannot be stood up in a unit test, so the surrounding wiring —
-/// that the gate is called after the cancellation re-check, that only
-/// the paste is skipped, and that the entry build and `history.append`
-/// still run — is pinned by the source guards under "The wiring the
-/// table above does not prove" rather than left to the manual smoke.
-/// Read that section's doc-comment for what those guards do and do not
-/// establish.
+/// that the destination is frozen before the stop path suspends, that
+/// the gate is called after the cancellation re-check, that only the
+/// paste is skipped, and that the entry build and `history.append` still
+/// run — is pinned by the source guards under "The wiring the table
+/// above does not prove" rather than left to the manual smoke. Read that
+/// section's doc-comment for what those guards do and do not establish.
 ///
 /// The two axes the table sweeps:
 ///
 ///   * **Mismatch withholds.** A positively-known difference between the
-///     process the user dictated into and the process that would receive
+///     process the user stopped in and the process that would receive
 ///     the keystroke is the only thing that stops a paste.
 ///   * **Conservatism.** An unknown identifier on *either* side pastes.
 ///     A missing fact is never evidence of a mismatch — withholding on
@@ -31,7 +42,7 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
 
     /// Stand-ins for real `pid_t` values. Nothing in the predicate reads
     /// a live process; these only need to be distinct and positive.
-    private let dictatedInto: pid_t = 501
+    private let stoppedIn: pid_t = 501
     private let somewhereElse: pid_t = 812
 
     // MARK: - The mismatch axis
@@ -39,31 +50,58 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
     func test_sameProcess_pastes() {
         // AE13. The user left the application mid-transcription and came
         // back before the transcript was ready — or never left at all.
-        // Same process, so this is the place they dictated into.
+        // Same process, so this is the place they stopped in.
         XCTAssertFalse(RecordingSession.shouldWithholdPaste(
-            sourcePID: dictatedInto,
-            currentPID: dictatedInto
+            destinationPID: stoppedIn,
+            currentPID: stoppedIn
         ))
     }
 
     func test_differentProcess_withholds() {
-        // AE12. The wait was long enough for the user to switch away.
-        // Pasting here would edit a document they did not intend to
-        // touch — the one outcome KD8 rules out.
+        // AE12. The wait was long enough for the user to switch away
+        // after stopping. Pasting here would edit a document they did not
+        // intend to touch — the one outcome KD8 rules out.
         XCTAssertTrue(RecordingSession.shouldWithholdPaste(
-            sourcePID: dictatedInto,
+            destinationPID: stoppedIn,
             currentPID: somewhereElse
         ))
     }
 
+    func test_handsFreeWalkDuringRecording_isNotAMismatch() {
+        // The case the 2026-08-11 ruling exists for. With the recording
+        // locked, the user starts talking in one application and walks to
+        // another before tapping stop. The destination is where they
+        // stopped, so the identity the gate compares is *that*
+        // application — and the paste goes through.
+        let startedIn: pid_t = 333
+        XCTAssertNotEqual(startedIn, stoppedIn)
+
+        // What the old start-frozen identity fed the gate, and why the
+        // whole hands-free dictation delivered nothing:
+        XCTAssertTrue(
+            RecordingSession.shouldWithholdPaste(
+                destinationPID: startedIn,
+                currentPID: stoppedIn
+            ),
+            "Sanity: the predicate is unchanged — it is the identity handed to it that moved."
+        )
+
+        // What it is fed now: the user stopped where the cursor is, so
+        // there is no mismatch to withhold on.
+        XCTAssertFalse(RecordingSession.shouldWithholdPaste(
+            destinationPID: stoppedIn,
+            currentPID: stoppedIn
+        ))
+    }
+
     func test_noTypeItselfFrontmost_withholds() {
-        // The user opened the popover mid-transcription. NoType is not
-        // the process they dictated into, so this withholds like any
-        // other mismatch — there is deliberately no self-carve-out.
+        // The user opened the popover after stopping. NoType is not the
+        // process they stopped in, so this withholds like any other
+        // mismatch — there is deliberately no self-carve-out.
         let noTypesOwnPID = ProcessInfo.processInfo.processIdentifier
-        XCTAssertNotEqual(noTypesOwnPID, dictatedInto, "fixture pid collided with the test host's real pid")
+        XCTAssertNotEqual(noTypesOwnPID, stoppedIn, "fixture pid collided with the test host's real pid")
         XCTAssertTrue(RecordingSession.shouldWithholdPaste(
-            sourcePID: dictatedInto,
+            destinationPID: stoppedIn,
             currentPID: noTypesOwnPID
         ))
     }
@@ -76,22 +114,24 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
         // change the identifier the gate compares. The predicate has no
         // window term to test — this pins that switching windows is
         // indistinguishable from never switching, which is the point.
-        let beforeWindowSwitch = dictatedInto
-        let afterWindowSwitch = dictatedInto
+        let beforeWindowSwitch = stoppedIn
+        let afterWindowSwitch = stoppedIn
         XCTAssertFalse(RecordingSession.shouldWithholdPaste(
-            sourcePID: beforeWindowSwitch,
+            destinationPID: beforeWindowSwitch,
             currentPID: afterWindowSwitch
         ))
     }
 
     // MARK: - The conservatism axis: a missing fact is not a mismatch
 
-    func test_unknownSource_pastes() {
-        // `start()` stores 0 when `NSWorkspace` had no frontmost
-        // application. We do not know where the user dictated, so we
-        // cannot know they left — paste, as the pre-guard build did.
+    func test_unknownDestination_pastes() {
+        // `freezePasteDestination` stores 0 when `NSWorkspace` had no
+        // frontmost application at the stop — and 0 is also what a
+        // session that never reached the freeze carries. We do not know
+        // where the transcript was headed, so we cannot know the user
+        // left — paste, as the pre-guard build did.
         XCTAssertFalse(RecordingSession.shouldWithholdPaste(
-            sourcePID: 0,
+            destinationPID: 0,
             currentPID: somewhereElse
         ))
     }
@@ -100,19 +140,19 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
         // Nothing is frontmost at paste time (or the read failed). Same
         // reasoning in the other direction.
         XCTAssertFalse(RecordingSession.shouldWithholdPaste(
-            sourcePID: dictatedInto,
+            destinationPID: stoppedIn,
             currentPID: 0
         ))
     }
 
     func test_bothUnknown_pastes() {
         XCTAssertFalse(RecordingSession.shouldWithholdPaste(
-            sourcePID: 0,
+            destinationPID: 0,
             currentPID: 0
         ))
     }
 
-    func test_terminatedSourceProcess_pastes() {
+    func test_terminatedDestinationProcess_pastes() {
         // `NSRunningApplication.processIdentifier` answers -1 once the
         // process is gone. That is the same "unknown", and it must be
         // read through the same `<= 0` rule rather than compared as a
@@ -120,14 +160,14 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
         // the conservatism above is undone for exactly the negative
         // sentinel the API produces.
         XCTAssertFalse(RecordingSession.shouldWithholdPaste(
-            sourcePID: -1,
+            destinationPID: -1,
             currentPID: somewhereElse
         ))
     }
 
     func test_terminatedCurrentProcess_pastes() {
         XCTAssertFalse(RecordingSession.shouldWithholdPaste(
-            sourcePID: dictatedInto,
+            destinationPID: stoppedIn,
             currentPID: -1
         ))
     }
@@ -135,35 +175,37 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
     // MARK: - Sweep
 
     func test_onlyAPositivelyKnownMismatchWithholds_overThePIDSpace() {
-        // Property form of the table: across a spread of source/current
-        // combinations the gate withholds iff both identifiers are known
-        // and they differ. Written as a sweep rather than more cases so
-        // a future term added to the predicate (a bundle check, a window
-        // check, a "NoType is special" carve-out) fails here loudly
-        // instead of only in whichever single case it happened to break.
+        // Property form of the table: across a spread of
+        // destination/current combinations the gate withholds iff both
+        // identifiers are known and they differ. Written as a sweep
+        // rather than more cases so a future term added to the predicate
+        // (a bundle check, a window check, a "NoType is special"
+        // carve-out) fails here loudly instead of only in whichever
+        // single case it happened to break.
         let values: [pid_t] = [-2, -1, 0, 1, 42, 501, 812, 99_999]
-        for source in values {
+        for destination in values {
             for current in values {
-                let expected = source > 0 && current > 0 && source != current
+                let expected = destination > 0 && current > 0 && destination != current
                 XCTAssertEqual(
                     RecordingSession.shouldWithholdPaste(
-                        sourcePID: source,
+                        destinationPID: destination,
                         currentPID: current
                     ),
                     expected,
-                    "source=\(source) current=\(current)"
+                    "destination=\(destination) current=\(current)"
                 )
             }
         }
     }
 
-    // MARK: - The fact the summary carries (KTD7)
+    // MARK: - The facts the summary carries (KTD7)
 
-    func test_summaryDefaultsToNotWithheld() {
-        // U4 reads this field to decide whether to surface the notice
-        // instead of pasting. Every pre-existing construction of a
-        // summary — and every session that pasted normally — must read
-        // as "not withheld", which is what the defaulted parameter buys.
+    func test_summaryDefaultsToNotWithheld_andNamesNoDestination() {
+        // U4 reads these fields to decide whether to surface the notice
+        // instead of pasting, and what to call the place the transcript
+        // went. Every pre-existing construction of a summary — and every
+        // session that pasted normally — must read as "not withheld",
+        // which is what the defaulted parameters buy.
         let summary = RecordingSession.SessionSummary(
             failedChunkCount: 0,
             dispatchedChunkCount: 1,
@@ -171,17 +213,24 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
             model: .flashLite
         )
         XCTAssertFalse(summary.pasteWithheldForDestinationChange)
+        XCTAssertNil(summary.pasteDestinationAppName)
     }
 
-    func test_summaryReportsAWithheldPaste() {
+    func test_summaryReportsAWithheldPaste_andWhereItWasHeaded() {
         let summary = RecordingSession.SessionSummary(
             failedChunkCount: 0,
             dispatchedChunkCount: 1,
             tokens: .zero,
             model: .flashLite,
-            pasteWithheldForDestinationChange: true
+            pasteWithheldForDestinationChange: true,
+            pasteDestinationAppName: "Mail"
         )
         XCTAssertTrue(summary.pasteWithheldForDestinationChange)
+        // R25's notice names the application the transcript was destined
+        // for. Since the 2026-08-11 ruling that is the stop-moment
+        // application, carried here rather than re-read at notice time —
+        // by then the user has moved again.
+        XCTAssertEqual(summary.pasteDestinationAppName, "Mail")
     }
 
     func test_withheldPasteIsIndependentOfGapsAndRetention() {
@@ -212,8 +261,8 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
 
     // MARK: - The wiring the table above does not prove
 
-    /// Everything above pins the *predicate*. That leaves the four claims
-    /// the feature actually rests on unproven, and the gap is not
+    /// Everything above pins the *predicate*. That leaves the claims the
+    /// feature actually rests on unproven, and the gap is not
     /// theoretical — this repo already ran the experiment one function
     /// over. Deleting `retainable.formUnion(acct.retainable)` from
     /// `splitRetry`'s abandon arm, the exact permanent-loss bug that arm
@@ -222,19 +271,21 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
     /// the adopted answer was a source guard, not manual smoke.
     ///
     /// The same six mutations are green against the table above:
-    /// delete the `sourcePID = pid` freeze in `start()`; delete the gate
-    /// call; invert the two arms; move `history.append` into the paste
-    /// arm; make the withheld arm `throw` (which routes to
+    /// delete the `freezePasteDestination` call in
+    /// `AppState.finalizeRecording` (pinned separately below); delete the
+    /// gate call; invert the two arms; move `history.append` into the
+    /// paste arm; make the withheld arm `throw` (which routes to
     /// `finalizeRecording`'s catch arm and writes no row — the exact
     /// mistake KTD6 names); or compare `sourceApp?.processIdentifier`
-    /// instead of the frozen `sourcePID`.
+    /// instead of the frozen `destinationPID`.
     ///
     /// So this is a source guard in the shape `RaiseSiteScanner`
     /// (`HUDPanelGeometryTests.swift`) established, and it inherits that
     /// shape's documented limits: it matches literal spellings in one
     /// file and proves the statements are *present*, not that they are
     /// reached; a comment containing one of the needles would satisfy an
-    /// absence assertion; and a rename fails it loudly, which is a review
+    /// absence assertion, which is why every scanned file is stripped of
+    /// comments first; and a rename fails it loudly, which is a review
     /// trigger rather than a false negative.
     func test_stopWiring_withholdsOnlyThePaste_andStillWritesTheHistoryRow() throws {
         let stopBody = try XCTUnwrap(
@@ -253,8 +304,8 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
             "stop() no longer consults the destination gate — every transcript pastes into whatever is frontmost (R23)."
         )
         XCTAssertTrue(
-            stopBody.contains("sourcePID: sourcePID"),
-            "The gate must compare the pid frozen at session start. Re-deriving it from sourceApp reads -1 once that process exits, which the predicate treats as unknown — so the guard would silently stop firing for the quit-and-relaunch case it exists to catch."
+            stopBody.contains("destinationPID: destinationPID"),
+            "The gate must compare the pid frozen at the stop. Re-deriving it from an NSRunningApplication reads -1 once that process exits, which the predicate treats as unknown — so the guard would silently stop firing for the quit-and-relaunch case it exists to catch."
         )
 
         // KTD5: the destination gate runs after the cancellation re-check.
@@ -315,18 +366,71 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
         )
     }
 
-    /// The freeze itself. Deleting this one assignment leaves `sourcePID`
-    /// at its `0` default, which the predicate reads as "unknown" and
-    /// pastes through — the feature is silently off and every case in the
-    /// table above still passes.
-    func test_startFreezesTheSourcePID() throws {
+    /// The freeze itself, and *where* it sits. Deleting the call leaves
+    /// `destinationPID` at its `0` default, which the predicate reads as
+    /// "unknown" and pastes through — the feature is silently off and
+    /// every case in the table above still passes.
+    ///
+    /// The ordering assertions are the other half, and they are the
+    /// product ruling's mechanical form. The freeze must run before the
+    /// stop path suspends: every `await` between the user's stop action
+    /// and the read is a window in which the frontmost application can
+    /// change, and a destination captured after one of them names
+    /// somewhere the user was not when they stopped. Moving the read
+    /// inside the `Task` — or into `stop()`, which that `Task` calls —
+    /// reopens exactly that window while leaving every other assertion in
+    /// this file green.
+    func test_finalizeRecording_freezesTheDestination_beforeThePathSuspends() throws {
+        let body = try XCTUnwrap(
+            Self.body(ofFuncNamed: "finalizeRecording", in: Self.appStateSource()),
+            "Could not parse finalizeRecording() — the guard lost its anchor."
+        )
+
+        let freeze = try XCTUnwrap(
+            body.range(of: "session.freezePasteDestination("),
+            "finalizeRecording no longer freezes the paste destination, so the gate compares against 0 and never fires — the feature is off."
+        )
+        XCTAssertTrue(
+            body.contains("freezePasteDestination(NSWorkspace.shared.frontmostApplication)"),
+            "The destination must be the application frontmost at the stop. Passing anything derived from the session's own start-time state restores the behaviour the 2026-08-11 ruling reversed: a hands-free locked dictation that walks to another application delivers nothing."
+        )
+
+        let firstAwait = try XCTUnwrap(
+            body.range(of: "await "),
+            "finalizeRecording no longer awaits anything — this guard's ordering assertion has lost its meaning and needs rewriting, not deleting."
+        )
+        XCTAssertLessThan(
+            freeze.lowerBound, firstAwait.lowerBound,
+            "The destination is frozen after the path suspends. Between the user's stop and that suspension the frontmost application can change, so the transcript would be aimed somewhere the user never was."
+        )
+
+        let firstTask = try XCTUnwrap(
+            body.range(of: "Task {"),
+            "finalizeRecording no longer spawns the stop task — re-derive this guard against whatever replaced it."
+        )
+        XCTAssertLessThan(
+            freeze.lowerBound, firstTask.lowerBound,
+            "The freeze moved inside the stop task. That task is scheduled, not immediate: the main actor can service an app-switch before its body runs."
+        )
+    }
+
+    /// The complement: the freeze must *not* come back at session start.
+    /// That is the exact behaviour the product owner reversed, and it is
+    /// a plausible "restoration" for someone reading the guard's
+    /// conservatism and concluding the identity should be the one the
+    /// session dictated into.
+    func test_startDoesNotFreezeTheDestination() throws {
         let startBody = try XCTUnwrap(
             Self.body(ofFuncNamed: "start", in: Self.recordingSessionSource()),
             "Could not parse start() — the guard lost its anchor."
         )
-        XCTAssertTrue(
-            startBody.contains("sourcePID = pid"),
-            "start() must freeze the frontmost pid, or the gate compares against 0 and never fires."
+        XCTAssertFalse(
+            startBody.contains("destinationPID"),
+            "start() froze the paste destination again. The destination is where the user pressed stop, not where they began: a hands-free locked dictation that starts in one application and ends in another must land in the one it ended in."
+        )
+        XCTAssertFalse(
+            startBody.contains("freezePasteDestination"),
+            "start() froze the paste destination again — see above."
         )
     }
 
@@ -366,7 +470,7 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
     func test_bodyExtractor_isScopedToTheNamedFunction() throws {
         let source = """
         private func other() {
-            Self.shouldWithholdPaste(sourcePID: sourcePID, currentPID: 1)
+            Self.shouldWithholdPaste(destinationPID: destinationPID, currentPID: 1)
         }
 
         func stop() async throws -> HistoryEntry {
@@ -403,12 +507,12 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
     /// an absence one.
     func test_commentStripping_hidesDisabledCodeAndProse() {
         let stripped = Self.strippingComments("""
-        // sourcePID = pid
+        // session.freezePasteDestination(NSWorkspace.shared.frontmostApplication)
         let kept = 1  // TextInjector.paste(final)
         """)
         XCTAssertFalse(
-            stripped.contains("sourcePID = pid"),
-            "A commented-out assignment still matched — the guard would pass on a file where the feature was disabled."
+            stripped.contains("session.freezePasteDestination("),
+            "A commented-out call still matched — the guard would pass on a file where the feature was disabled."
         )
         XCTAssertFalse(stripped.contains("TextInjector.paste("))
         XCTAssertTrue(stripped.contains("let kept = 1"))
@@ -430,8 +534,8 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
 
     /// Brace-balanced slice of a named function's body. Same shape and
     /// same caveats as the extractor in `SplitRetryNetworkBoundTests`
-    /// (naive about braces inside string literals; adequate for the one
-    /// Swift file it reads).
+    /// (naive about braces inside string literals; adequate for the two
+    /// Swift files it reads).
     private static func body(ofFuncNamed name: String, in source: String) -> String? {
         guard let decl = source.range(of: "func \(name)(") else { return nil }
         guard let open = source.range(of: "{", range: decl.upperBound..<source.endIndex) else { return nil }
@@ -463,13 +567,13 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
 
     /// Comments are stripped before any assertion runs, and that is
     /// load-bearing rather than tidiness. Calibrating this guard by
-    /// mutation caught it: commenting out `sourcePID = pid` left the line
-    /// `// sourcePID = pid` in the file, and a raw `contains` check
-    /// happily matched the disabled code and stayed green. The same trap
-    /// runs the other way — this file's own prose names
-    /// `TextInjector.paste(` and `throw` while explaining why the
-    /// withheld arm must not contain them, so an absence assertion over
-    /// un-stripped text would fail on the comments alone.
+    /// mutation caught it: commenting out the freeze left the line
+    /// `// session.freezePasteDestination(…)` in the file, and a raw
+    /// `contains` check happily matched the disabled code and stayed
+    /// green. The same trap runs the other way — this file's own prose
+    /// names `TextInjector.paste(`, `throw` and `destinationPID` while
+    /// explaining where each must and must not appear, so an absence
+    /// assertion over un-stripped text would fail on the comments alone.
     ///
     /// Naive about `//` inside string literals, which can only delete
     /// text and so can only cause a loud failure, never a silent pass.
@@ -493,5 +597,11 @@ final class RecordingSessionFocusGuardTests: XCTestCase {
 
     private static func recordingSessionSource() -> String {
         strippingComments(source(of: "NoType/Recording/RecordingSession.swift"))
+    }
+
+    /// The freeze moved out of `RecordingSession` and into its caller, so
+    /// the guard follows it across the file boundary.
+    private static func appStateSource() -> String {
+        strippingComments(source(of: "NoType/AppState.swift"))
     }
 }

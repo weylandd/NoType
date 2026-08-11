@@ -57,7 +57,7 @@ The stalls are not the app's doing and not the user's connection. Connection set
 - KD6. **Lifetime word counts continue to be taken from the assembled, post-replacement string.** (session-settled: user-approved — chosen over counting raw chunk text: a replacement pair that expands or collapses words would otherwise shift lifetime totals against their current meaning.) Governs R14.
 - KD7. **Give up on a stalled transport quickly and hand recovery to the user, rather than waiting longer or trying more times.** (session-settled: user-directed — chosen over a patient final attempt and over a longer ladder of shorter attempts: the observed stall windows lasted minutes, so no ladder that fits inside an acceptable wait outlives one. The accepted cost is that some dictations end with nothing pasted and need a manual re-send.) Governs R20, R21, R22.
 - KD8. **A transcript is never pasted into an application the user has since left; it goes to history with a notice instead.** (session-settled: user-directed — chosen over pasting wherever the cursor now is, over dropping it silently, and over pulling focus back to the original window: a wrong-window paste is the only outcome that edits a document the user did not intend to touch.) Governs R23, R24, R25.
-- KD9. **Process identity decides whether the destination is "the same place", not the application bundle.** (session-settled: user-approved — chosen over bundle-identifier matching, following the recommendation already recorded in `docs/plans/2026-07-10-001-fix-code-review-remediation-plan.md:86`. The cost is that an application which quits and relaunches mid-transcription counts as changed.) Governs R23, R26.
+- KD9. **Process identity decides whether the destination is "the same place", not the application bundle.** (session-settled: user-approved — chosen over bundle-identifier matching, following the recommendation already recorded in `docs/plans/2026-07-10-001-fix-code-review-remediation-plan.md:86`. The cost is that an application which quits and relaunches mid-transcription counts as changed.) **Amended 2026-08-11 (user-directed, after U3 shipped): the destination is the process that was frontmost when the user *stopped* recording, not the one frontmost when they started.** "Там, где курсор стоял в момент нажатия стоп, туда и нужно записывать." Read "the process the user dictated into" throughout this plan as *the process the user was in when they finished dictating*. The start-frozen reading broke hands-free lock mode outright: dictate in application A, walk to B, tap to stop there, and the transcript was withheld — a whole hands-free dictation delivering nothing. KD8's protection is fully preserved, because what withholds is the user moving away **during transcription**, which is the long wait this plan is about; moving around **during recording** simply stopped costing the delivery. (Chosen over pulling the destination back to the starting application and over exempting locked sessions only: the stop-moment reading is one rule for both interaction modes.) Governs R23, R25, R26.
 - KD10. **Starting a new recording while one is transcribing stays out of scope.** (session-settled: user-directed — chosen over redesigning the interaction now: shortening the wait is the cheaper half of the same pain, and concurrent sessions raise their own ordering questions.)
 
 ### What changes shape
@@ -141,9 +141,9 @@ flowchart TB
 
 **Pasting into the right place**
 
-- R23. A transcript is pasted only when the application receiving it is the same process the user dictated into.
+- R23. A transcript is pasted only when the application receiving it is the same process the user was in **when they stopped recording** (KD9 as amended). Where the session *started* does not enter the comparison — walking to another application mid-recording is how hands-free lock mode is used.
 - R24. When the process differs, nothing is pasted and the transcript is written to history as usual.
-- R25. A notice tells the user the transcript is ready, names the application they dictated into, and offers to copy it. When the session also lost chunks, the same notice says how many — the two conditions share a cause, so this is the ordinary bad session rather than a rare intersection.
+- R25. A notice tells the user the transcript is ready, names the application it was destined for — **the one they stopped in**, frozen at the stop and never re-read at notice time — and offers to copy it. When the session also lost chunks, the same notice says how many — the two conditions share a cause, so this is the ordinary bad session rather than a rare intersection.
 - R29. Neither the notice's title nor its description contains transcript content. The notice renders above whatever application the user moved to, which may be a screen share or a call.
 - R30. The notice's Copy action places exactly the string the row shows (R4 then R5), so the notice and the history row cannot disagree about what was transcribed.
 - R26. Window identity is not considered: two windows of the same process count as the same place.
@@ -288,7 +288,7 @@ flowchart TB
 - Replacements move from once per session to once per render of a row. The pair list is user-authored and short and the strings are a few hundred characters.
 - The fast-fail decision in KD7 leans on the retry action shipped in PR #90 as its recovery path. That action is what makes an abandoned dictation recoverable rather than lost, which is why the gap-storage work that makes retry reliable is sequenced first.
 - Gap storage and the focus guard both touch the paste region of `RecordingSession.stop()`. They land in sequence, not in parallel.
-- `RecordingSession` already retains the frontmost application at session start (`NoType/Recording/RecordingSession.swift:476`, assigned at `:709-710`) and that value is still live at the paste. Two pure `nonisolated static` guards already sit immediately before the paste, so a focus guard follows an established shape.
+- `RecordingSession` already retains the frontmost application at session start (`NoType/Recording/RecordingSession.swift:476`, assigned at `:709-710`), and it stays the source of `HistoryEntry.sourceAppName`. **It is not what the destination guard compares** — KD9 as amended freezes the destination at the stop instead, which `AppState.finalizeRecording` captures before the stop path suspends. Two pure `nonisolated static` guards already sit immediately before the paste, so a focus guard follows an established shape.
 - The notice R25 asks for needs no new design: the HUD family already supports a neutral severity and an action-button label, and the "pasted with gaps" notice is the worked precedent.
 - Measurements behind KD7 come from one machine on 2026-08-11: ~35 healthy requests answering in 0.88–6.05 s, against stalls of 20–30 s per attempt clustered into windows minutes long. They are a sample, not a distribution.
 - **Healthy latency tracks payload size, and the tail is what R20's threshold must clear.** The fast responses are small chunks; the two slowest observed — 5.19 s and 6.05 s — carried 137 KB and 119 KB. The sample contains no 180 s force-cut chunk and no slow uplink, which are the shapes the retired 30 s ceiling was sized for. A threshold chosen against the median converts those from "slow but succeeds" into a `[…]` the retry cannot remove from the pasted document.
@@ -322,7 +322,7 @@ flowchart TB
 
 ## Planning Contract
 
-**Product Contract preservation:** changed, in two passes. First, the latency sample was refreshed from 0.88–3.49 s to 0.88–6.05 s with a note that the tail tracks payload size. Then a document review found defects in the contract itself, and the maintainer directed the corrections: R1–R4, R7, R11, R12, R15, R18, R19, R21, R22, R25 were rewritten, and R27–R31 added. R12 grew from three migration cases to four (a broken row whose markers a replacement pair erased was silently losing its broken state, and a normal row containing a dictated `[…]` was gaining one). R1 became a sequence of response segments because one Gemini call can cover several chunks and answer with one joined transcript, so per-chunk text does not exist for most sessions. No settled Key Decision was reopened.
+**Product Contract preservation:** changed, in three passes. First, the latency sample was refreshed from 0.88–3.49 s to 0.88–6.05 s with a note that the tail tracks payload size. Then a document review found defects in the contract itself, and the maintainer directed the corrections: R1–R4, R7, R11, R12, R15, R18, R19, R21, R22, R25 were rewritten, and R27–R31 added. R12 grew from three migration cases to four (a broken row whose markers a replacement pair erased was silently losing its broken state, and a normal row containing a dictated `[…]` was gaining one). R1 became a sequence of response segments because one Gemini call can cover several chunks and answer with one joined transcript, so per-chunk text does not exist for most sessions. Third — after U3 had already shipped — a reviewer surfaced that the destination frozen at session start withheld every hands-free locked dictation that walked to another application, and the maintainer amended **KD9**: the destination is the process the user was in when they *stopped*, so "the process the user dictated into" now reads as *the process the user was in when they finished dictating*. R23 and R25 were rewritten to match, U3's and U4's approach steps and the design diagram moved the freeze point, and the manual-smoke row gained the hands-free flow. KD8 was not reopened and neither was any other Key Decision: the withhold still fires on exactly the case KD8 names, a user moving away during transcription.
 
 ### Key Technical Decisions
 
@@ -331,7 +331,7 @@ flowchart TB
 - KTD3. **Hoist the budget to a `nonisolated static let` and make `retryDecision` `nonisolated static`, widening both past `private`.** Neither is reachable from a test today, so the change that alters them is also the change that makes them provable; the access widening is deliberate, not incidental. Governs R20, R21.
 - KTD4. **Re-derive `abandonMinChunkFailureLatency` against the new budget rather than restating it structurally.** What the floor protects is the *strength* of the evidence that the transport is down: two full-budget timeouts justify skipping every remaining chunk, two short-budget timeouts do not, and each abandoned chunk becomes a `[…]` no retry can remove from the pasted document. Express it as a multiple of the request budget so it shrinks in step, and move the prose that names 30 s with it. Governs R20.
 - KTD13. **Issue the single retry over a fresh connection, not the pooled one that just failed.** The measured failure is a dead pooled connection — a request stalled 30 s and the same payload answered in 1.7 s on a new connection moments later — so this is the axis that can make the retry succeed rather than merely halve the wait. It is distinct from the longer-wait and longer-ladder alternatives KD7 rejected. Governs R28.
-- KTD5. **Compare process identifiers at the last synchronous instruction before the paste, and skip only the paste.** The history write already sits after the paste and does not depend on it, so falling through reaches it unchanged. (Inherits KD8, KD9.) Governs R23, R24, R26.
+- KTD5. **Compare process identifiers at the last synchronous instruction before the paste, and skip only the paste.** The history write already sits after the paste and does not depend on it, so falling through reaches it unchanged. **The identifier compared against is frozen at the stop** (KD9 as amended), at the first statement of `AppState.finalizeRecording` — the single funnel all three stop paths reach without an intervening `await`. A later capture reopens the window the freeze exists to close, since `stop()` itself runs from a `Task` that method schedules. (Inherits KD8, KD9.) Governs R23, R24, R26.
 - KTD6. **Do not reuse `shouldAbortBeforePaste`.** It aborts by throwing, which routes to the catch arm and writes no row — the opposite of what R24 requires. The new gate is a separate predicate with its own exit.
 - KTD7. **The withheld fact travels on `SessionSummary` as a defaulted field.** `summary` is computed from session state, so the fact is stored during `stop()` and read by `AppState` through the same channel `retained` already uses; the initializer is hand-written to accept defaulted additions without breaking existing call sites. Governs R24, R25.
 - KTD8. **The notice is a new `NoTypeErrorKind` case carrying its transcript, at neutral severity, with the standard 8 s dismiss.** (session-settled: user-directed — chosen over holding the notice until dismissed: the case is rare and the history row carries its own copy button, so a sticky panel buys little.) Governs R25.
@@ -348,7 +348,7 @@ The paste decision, after the fix:
 flowchart TB
   A["stop(): transcript assembled"] --> B{"cancel latch set?"}
   B -->|yes| C["throw — no paste, no row"]
-  B -->|no| D{"frontmost pid == dictated pid?"}
+  B -->|no| D{"frontmost pid == stop-moment pid?"}
   D -->|yes| E["paste"]
   D -->|no| F["skip paste,<br/>record withheld destination"]
   E --> G["build entry, append to history"]
@@ -436,23 +436,26 @@ Phase A and Phase B are independent of each other and may land in either order. 
 - **Goal.** Never paste into an application the user has left; still write the row.
 - **Requirements.** R23, R24, R26. KTD5, KTD6.
 - **Dependencies.** None (may land beside Phase A).
-- **Files.** `NoType/Recording/RecordingSession.swift`; `NoTypeTests/RecordingSessionFocusGuardTests.swift` (new).
+- **Files.** `NoType/Recording/RecordingSession.swift`; `NoType/AppState.swift`; `NoTypeTests/RecordingSessionFocusGuardTests.swift` (new).
 - **Approach.**
-  1. Store the session's source process identifier at start — it is already read there and discarded into the OCR gate.
+  1. Freeze the destination process identifier — **and its application name** — at the stop, not at session start (KD9 as amended): the first statement of `AppState.finalizeRecording`, which every stop path reaches without an intervening `await`, handing them to the session through a small setter.
   2. Add a pure `nonisolated static` predicate over two identifiers, conservative: only a positively-known mismatch withholds.
   3. Call it immediately after the cancellation re-check, before the paste. Skip only the paste; fall through to the entry build and history append unchanged.
-  4. Record the outcome on a stored property and surface it through a defaulted `SessionSummary` field (KTD7).
-- **Execution note.** Write the predicate's truth table first; it is the whole contract and the surrounding class cannot be stood up in a test.
+  4. Record the outcome on a stored property and surface it, with the destination's name, through defaulted `SessionSummary` fields (KTD7).
+  5. Leave `HistoryEntry.sourceAppName` / `sourceBundleID` frozen at session start. That is where the dictation *happened* and it feeds lifetime per-app statistics; only the destination guard and its notice read the stop-moment identity.
+- **Execution note.** Write the predicate's truth table first; it is the whole contract and the surrounding class cannot be stood up in a test. The freeze *point* is not reachable from that table at all — pin it with a source guard, since deleting the freeze leaves the identifier at its unknown default and every case in the table stays green.
 - **Patterns to follow.** `shouldAbortBeforePaste` and `shouldRunOCR` for the pure-gate shape — the latter already takes a raw process identifier. `RecordingSessionCancellationTests` for the truth-table test shape.
 - **Test scenarios.**
   - Covers AE13. Matching identifiers paste.
   - Covers AE12. Differing identifiers withhold.
-  - An unknown source identifier pastes — a missing fact is never evidence of a mismatch.
+  - An unknown destination identifier pastes — a missing fact is never evidence of a mismatch.
   - An unknown current identifier pastes, same reason.
   - Covers R26. Two windows of one process compare equal, since the identifier is per process.
-  - NoType itself frontmost — the user opened the popover mid-transcription — withholds, since it is not the process they dictated into.
-  - The summary reports the withheld destination when the gate fired and reports nothing when it did not.
-- **Verification.** The predicate's table passes; a session whose destination changed still produces a history entry.
+  - NoType itself frontmost — the user opened the popover mid-transcription — withholds, since it is not the process they stopped in.
+  - A hands-free walk during recording is not a mismatch: the identity compared is where the user stopped, and the same predicate fed the start-moment identity would have withheld.
+  - The freeze is present in `finalizeRecording`, ahead of both the first `await` and the stop `Task`, and absent from `start()`.
+  - The summary reports the withheld destination and its application name when the gate fired, and reports neither when it did not.
+- **Verification.** The predicate's table passes; a session whose destination changed still produces a history entry; a locked session that walks to another application and stops there pastes.
 
 ### U4. The withheld-paste notice
 
@@ -461,7 +464,7 @@ Phase A and Phase B are independent of each other and may land in either order. 
 - **Dependencies.** U3.
 - **Files.** `NoType/AppState.swift`; `NoType/UI/HistoryRowView.swift`; `NoTypeTests/MissingKeyHUDRetryTests.swift`; `NoTypeTests/AppStateFocusNoticeTests.swift` (new).
 - **Approach.**
-  1. Add a sixth `NoTypeErrorKind` case carrying the transcript, the name of the application the user **dictated into** (frozen at session start — never re-read the frontmost app at notice time), and the session's failed-chunk count.
+  1. Add a sixth `NoTypeErrorKind` case carrying the transcript, the name of the application the transcript was **destined for** — the one the user **stopped in**, frozen at the stop by U3 and carried on `SessionSummary`; never re-read the frontmost app at notice time, since by then the user has moved again — and the session's failed-chunk count.
   2. Build a neutral payload in the "pasted with gaps" shape: neutral severity, an `INFO_` code, a non-alarming icon, a cause sentence plus a consequence sentence. Neither string carries transcript content (R29).
   3. When the session also lost chunks, fold the existing count sentence in ahead of the copy consequence (KTD9), reusing the wording `.partialTranscription` already ships.
   4. Fire it from the success arm after the transcribing HUD hides, **in place of** the gap notice — when the destination changed, the gap notice is skipped entirely, because `showErrorHUD` replaces rather than stacks and firing both would leave whichever ran last.
@@ -470,7 +473,7 @@ Phase A and Phase B are independent of each other and may land in either order. 
 - **Patterns to follow.** The `.partialTranscription` payload for shape and tone; `HistoryRowView.copyToClipboard` for the clipboard write. Reuse it as it stands — extracting a shared helper across a module boundary is a separate change.
 - **Test scenarios.**
   - The payload is neutral severity with an `INFO_` code.
-  - The description names the application dictated into, and does not blame the user.
+  - The description names the application the transcript was destined for — the one the user stopped in — and does not blame the user.
   - Neither title nor description contains any part of the transcript.
   - When the session also lost chunks, the description names the count.
   - When a session both lost chunks and changed destination, exactly one notice is surfaced and it is this one.
@@ -585,7 +588,7 @@ Phase A and Phase B are independent of each other and may land in either order. 
 | Wait smoke | Dictate against a stalled transport and confirm the hotkey accepts a fresh press once the new budget plus its single retry is exhausted | U1 |
 | Mutation check | Break each new predicate and each moved constant; confirm the owning test goes red before shipping it | U1, U3, U5, U7, U8 |
 | Migration smoke | Load a copy of a real pre-change `history.json` and confirm every row renders as before | U5 |
-| Manual smoke | Dictate into one app, switch away mid-transcription, confirm nothing pastes and the notice copies; dictate and stay, confirm it pastes | U3, U4 |
+| Manual smoke | Dictate into one app, switch away mid-transcription, confirm nothing pastes and the notice copies; dictate and stay, confirm it pastes; **hands-free — engage the lock, dictate, move to another application, stop there, and confirm the transcript pastes into the application you stopped in** | U3, U4 |
 
 There is one scheme and one test target; `-only-testing:NoTypeTests/<Class>` is the only way to narrow a run. Live-API tests self-skip without a key.
 
@@ -601,7 +604,7 @@ There is one scheme and one test target; `-only-testing:NoTypeTests/<Class>` is 
 |---|---|
 | U1 | The budget and the retry ladder are named, testable, and each fails a mutation of its value |
 | U2 | No user-facing string contains a raw diagnostic; the timed-out copy no longer blames a healthy link; fixtures updated |
-| U3 | A destination change withholds the paste and still writes the row; the predicate's table is pinned |
+| U3 | A destination change withholds the paste and still writes the row; the predicate's table is pinned; the destination is frozen at the stop, ahead of the path's first suspension, and a hands-free walk mid-recording still delivers |
 | U4 | The notice renders neutral with a working Copy action and the catalog guard covers the new case |
 | U5 | Every legacy row shape migrates on read with unchanged appearance; the marker parser is unreachable for new rows |
 | U6 | Display equals copy; replacements apply at render; word counts keep their meaning |

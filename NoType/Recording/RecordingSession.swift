@@ -122,12 +122,27 @@ final class RecordingSession {
     }
 
     /// Pure gate: has the user moved to a different application since
-    /// they dictated, so that pasting would edit a document they never
-    /// meant to touch? Extracted so `RecordingSessionFocusGuardTests`
-    /// can pin the table without standing up a full session.
+    /// they stopped dictating, so that pasting would edit a document
+    /// they never meant to touch? Extracted so
+    /// `RecordingSessionFocusGuardTests` can pin the table without
+    /// standing up a full session.
     ///
     /// Returns `true` — withhold the paste — iff **both** identifiers are
     /// known and they differ.
+    ///
+    /// **The destination is frozen at the *stop*, not at session start.**
+    /// Product ruling (2026-08-11): the transcript belongs wherever the
+    /// cursor was when the user pressed stop. Freezing at start broke
+    /// hands-free dictation outright — with the recording locked, a user
+    /// who starts talking in one application, walks to another and taps
+    /// to stop there is *deliberately* aiming at the second one, and a
+    /// start-frozen identity withheld that paste every single time, so a
+    /// whole hands-free dictation delivered nothing. What KD8 protects
+    /// against is untouched: a transcript is still withheld when the user
+    /// moves away **during transcription**, which is the long wait this
+    /// guard exists for. Only moving around *during recording* stopped
+    /// costing the delivery. `AppState.finalizeRecording` performs the
+    /// freeze via `freezePasteDestination(_:)`.
     ///
     /// **Conservative by construction.** An unknown identifier on either
     /// side pastes. A missing fact is never evidence of a mismatch, and
@@ -150,7 +165,7 @@ final class RecordingSession {
     ///
     /// NoType itself being frontmost — the user opened the popover while
     /// waiting — withholds like any other mismatch. There is deliberately
-    /// no self-carve-out: it is not the process they dictated into.
+    /// no self-carve-out: it is not the process they stopped in.
     ///
     /// **That absence is only safe because NoType's own windows never
     /// take frontmost by themselves.** `HUDPanel` is a
@@ -168,11 +183,11 @@ final class RecordingSession {
     /// keep it (R24): the caller skips only the paste and falls through
     /// to the entry build and `history.append` unchanged.
     nonisolated static func shouldWithholdPaste(
-        sourcePID: pid_t,
+        destinationPID: pid_t,
         currentPID: pid_t
     ) -> Bool {
-        guard sourcePID > 0, currentPID > 0 else { return false }
-        return sourcePID != currentPID
+        guard destinationPID > 0, currentPID > 0 else { return false }
+        return destinationPID != currentPID
     }
 
     enum SessionError: Error, LocalizedError {
@@ -256,6 +271,25 @@ final class RecordingSession {
         /// session can change destination without losing a chunk, and
         /// lose chunks without changing destination.
         let pasteWithheldForDestinationChange: Bool
+        /// Localized name of the application this session's transcript was
+        /// aimed at — the one frontmost when the user *stopped* recording,
+        /// frozen there by `freezePasteDestination(_:)`.
+        ///
+        /// This is what the withheld-paste notice names (R25): the place
+        /// the transcript was destined for, which since the 2026-08-11
+        /// product ruling is the stop-moment application rather than the
+        /// one the session started in. Frozen rather than re-read at
+        /// notice time — by then the user has moved again and the
+        /// frontmost app answers a different question entirely.
+        ///
+        /// Deliberately **not** the same fact as `HistoryEntry.sourceAppName`,
+        /// which stays frozen at session start because it records where the
+        /// dictation *happened* and feeds lifetime per-app statistics. The
+        /// two coincide for every session that stops where it started.
+        ///
+        /// `nil` when nothing was frontmost at the stop, or when the freeze
+        /// never ran.
+        let pasteDestinationAppName: String?
 
         var hasFailures: Bool { failedChunkCount > 0 }
 
@@ -271,7 +305,8 @@ final class RecordingSession {
             tokens: TokenUsage,
             model: GeminiModel,
             retained: RetainedRecording? = nil,
-            pasteWithheldForDestinationChange: Bool = false
+            pasteWithheldForDestinationChange: Bool = false,
+            pasteDestinationAppName: String? = nil
         ) {
             self.failedChunkCount = failedChunkCount
             self.dispatchedChunkCount = dispatchedChunkCount
@@ -279,6 +314,7 @@ final class RecordingSession {
             self.model = model
             self.retained = retained
             self.pasteWithheldForDestinationChange = pasteWithheldForDestinationChange
+            self.pasteDestinationAppName = pasteDestinationAppName
         }
     }
 
@@ -550,18 +586,27 @@ final class RecordingSession {
     /// time the user actually spoke.
     private var stoppedAt: Date?
     private var sourceApp: NSRunningApplication?
-    /// Process identifier of `sourceApp`, frozen at session start.
+    /// Process identifier of the application this session's transcript is
+    /// aimed at — the one frontmost at the moment the user *stopped*
+    /// recording. Written once by `freezePasteDestination(_:)`; read once
+    /// by the destination gate in `stop()`.
     ///
-    /// Stored rather than derived from `sourceApp` on demand.
-    /// `NSRunningApplication.processIdentifier` is documented to answer
-    /// `-1` when it has no pid for the application, and an exited
+    /// Stored rather than derived from an `NSRunningApplication` on
+    /// demand. `NSRunningApplication.processIdentifier` is documented to
+    /// answer `-1` when it has no pid for the application, and an exited
     /// process is observed to reach that state; either way, reading it
-    /// later risks reporting the application the user dictated into as
-    /// unknown precisely when it has been replaced — which is the case
-    /// the gate exists to catch. Freezing it removes the question.
-    /// `0` means there was no frontmost application at start — the
-    /// "unknown" `shouldWithholdPaste` pastes through.
-    private var sourcePID: pid_t = 0
+    /// later risks reporting the destination as unknown precisely when it
+    /// has been replaced — which is the case the gate exists to catch.
+    /// Freezing it removes the question.
+    ///
+    /// `0` until the freeze runs, and after it when nothing was
+    /// frontmost — the "unknown" `shouldWithholdPaste` pastes through.
+    private var destinationPID: pid_t = 0
+    /// Localized name of that same application, frozen alongside the pid
+    /// so the withheld-paste notice can say where the transcript was
+    /// headed without re-reading the frontmost app at notice time (R25).
+    /// `nil` when unknown. Surfaced on `SessionSummary` (KTD7).
+    private var destinationAppName: String?
     /// Set by `stop()` when `shouldWithholdPaste` fired, and surfaced on
     /// `SessionSummary` for `AppState` (KTD7). Stays `false` for every
     /// session that pasted, including one that never reached the gate.
@@ -806,11 +851,12 @@ final class RecordingSession {
             name: frontmost?.localizedName ?? "Unknown",
             bundleID: frontmost?.bundleIdentifier ?? "unknown.bundle"
         )
+        // Consumed by the OCR gate below, and by nothing else. The paste
+        // destination is deliberately *not* frozen here: it is the
+        // application the user is in when they stop, which
+        // `AppState.finalizeRecording` freezes via
+        // `freezePasteDestination(_:)`. See `shouldWithholdPaste`.
         let pid: pid_t = frontmost?.processIdentifier ?? 0
-        // Freeze it: this is the identity `stop()` compares against the
-        // frontmost process at paste time (R23). Same value the OCR gate
-        // below consults, kept rather than discarded with the local.
-        sourcePID = pid
 
         // OCR fallback is opt-in via Screen Recording permission AND the
         // user's in-app "Use screen capture for context" toggle (frozen
@@ -1003,7 +1049,8 @@ final class RecordingSession {
             tokens: sessionTokens,
             model: modelFrozen,
             retained: retained,
-            pasteWithheldForDestinationChange: pasteWithheldForDestinationChange
+            pasteWithheldForDestinationChange: pasteWithheldForDestinationChange,
+            pasteDestinationAppName: destinationAppName
         )
     }
 
@@ -1108,6 +1155,31 @@ final class RecordingSession {
             context: existing.context,
             model: existing.model
         )
+    }
+
+    /// Freeze the application this session's transcript is aimed at.
+    ///
+    /// **Called from `AppState.finalizeRecording`, synchronously with the
+    /// user's stop action and before any `await` on that path.** That
+    /// ordering is the contract, not an implementation detail: every
+    /// suspension between the stop and this read is a window in which the
+    /// frontmost application can change, and a destination captured after
+    /// one of them is no longer the place the user was looking at when
+    /// they stopped — which is exactly the identity the guard is supposed
+    /// to defend. Reading it inside `stop()` would already be too late:
+    /// `stop()` runs from a `Task` the release handler schedules, so the
+    /// main actor can service an app-switch in between.
+    ///
+    /// Freezing here rather than at session start is the 2026-08-11
+    /// product ruling — see `shouldWithholdPaste` for what it fixes (a
+    /// hands-free locked dictation that starts in one application and
+    /// ends in another) and for what it deliberately leaves in force.
+    ///
+    /// Never called → `0` / `nil`, which the gate reads as unknown and
+    /// pastes through, matching the pre-guard behaviour.
+    func freezePasteDestination(_ app: NSRunningApplication?) {
+        destinationPID = app?.processIdentifier ?? 0
+        destinationAppName = app?.localizedName
     }
 
     /// Stop audio capture immediately, without draining or sending.
@@ -1243,12 +1315,16 @@ final class RecordingSession {
         // from the cancellation guard above to here runs without suspending
         // on the main actor, and `TextInjector.paste` posts ⌘V before its
         // own first suspension point, so this is the freshest reading of
-        // the frontmost process that can still be acted on. Why a mismatch
-        // skips only the paste — and must not be folded into the throwing
-        // gate above — is on `shouldWithholdPaste`'s doc-comment (R24, KTD6).
+        // the frontmost process that can still be acted on. Compared
+        // against the destination frozen at the *stop* by
+        // `freezePasteDestination(_:)`, so what withholds is the user
+        // moving away during transcription — not moving around while
+        // still recording. Why a mismatch skips only the paste — and must
+        // not be folded into the throwing gate above — is on
+        // `shouldWithholdPaste`'s doc-comment (R24, KTD6).
         let currentPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
         pasteWithheldForDestinationChange = Self.shouldWithholdPaste(
-            sourcePID: sourcePID,
+            destinationPID: destinationPID,
             currentPID: currentPID
         )
         if pasteWithheldForDestinationChange {
@@ -1261,7 +1337,7 @@ final class RecordingSession {
             // store after the fact, and `.info` is not persisted there.
             // Not `.warning` — the guard doing its job is correct
             // behaviour, not a degradation the app caused.
-            Self.log.notice("paste withheld: destination process changed since session start")
+            Self.log.notice("paste withheld: destination process changed after the user stopped recording")
         } else {
             await TextInjector.paste(final)
         }

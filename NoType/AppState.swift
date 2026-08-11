@@ -1572,6 +1572,33 @@ final class AppState {
     private func finalizeRecording() {
         guard case .recording = recordingState, let session = currentSession else { return }
 
+        // Freeze the paste destination FIRST — before any other statement
+        // in this method, and long before the `Task` below suspends.
+        //
+        // *Where* it is frozen is the product ruling of 2026-08-11: the
+        // transcript belongs wherever the cursor was when the user pressed
+        // stop, not where the session began. That is what makes a
+        // hands-free locked dictation work — start talking in one
+        // application, walk to another, tap to stop there, and the text
+        // lands in the application you finished in. Freezing at session
+        // start withheld that paste every single time, so a whole
+        // hands-free dictation delivered nothing. R23 / KD8 keeps its
+        // teeth: what withholds is the user moving away *during
+        // transcription*, which is entirely after this line.
+        //
+        // *When* it is frozen is the correctness constraint. All three
+        // stop paths funnel through here — hold-release, the double-tap
+        // timeout, and the locked-session tap — and each reaches this
+        // statement without an intervening `await` once the session is
+        // known to be ending, so nothing can switch the frontmost
+        // application between the user's stop action and this read. (The
+        // tap path waits out the double-tap window *before* calling in;
+        // that wait decides whether a stop happened at all, so it precedes
+        // the stop rather than delaying this capture.) Reading it later —
+        // inside `stop()`, say — reopens the window this ordering closes,
+        // because `stop()` runs from the `Task` below.
+        session.freezePasteDestination(NSWorkspace.shared.frontmostApplication)
+
         recordingState = .sending
         // Hotkey released → stop capturing *now* so the mic is truly
         // quiet before we lift the mute. Otherwise a few ms of
