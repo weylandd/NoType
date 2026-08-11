@@ -28,7 +28,9 @@ Two scheduling shapes were considered:
 
 **`GeminiClient` is a serial actor.** At most one request is outstanding within a session at any moment. New chunk boundaries that fire during a request **queue behind it**; when the sender wakes with multiple chunks queued, it issues a single batched `transcribeBatch` call instead of N round-trips.
 
-The unit of work is a **batch** — but the global rule is still "one in-flight HTTP request per session at a time".
+The unit of work is a **batch** — but the rule is still "one in-flight transcription request per recording session at a time".
+
+**Scope boundary — the rule is not global to the `URLSession`.** It bounds one *recording* session's transcription traffic and nothing else. `GeminiClient` owns a single `URLSession` (`NoType/Gemini/GeminiClient.swift:196`) that `classifyApp` (`:362`) and `validateKey` (`:502`) also use, each issuing its own `session.data(for:)` and bypassing `sendRequest` entirely — and `classifyApp` is fire-and-forget, launched by the recording-start path itself (`NoType/AppState.swift:1487`), so concurrent HTTP on that session is the *normal* shape of a first dictation in an unfamiliar app. This entry previously called the rule "global", which is where a later miscitation came from: read the boundary before citing I1 to justify touching anything session-wide. See [`conventions/cited-invariant-must-cover-the-population-2026-08-11.md`](../conventions/cited-invariant-must-cover-the-population-2026-08-11.md).
 
 ## Why This Matters
 
@@ -65,3 +67,4 @@ actor GeminiClient {
 - `solutions/design-patterns/no-streaming-gemini-2026-05-15.md` — the related decision against streaming.
 - `solutions/design-patterns/local-chunk-concatenation-2026-05-15.md` — the local-concat invariant that depends on serial dispatch.
 - `architecture.md` invariant I1 — the "one Gemini request in flight" rule formalized.
+- `solutions/conventions/cited-invariant-must-cover-the-population-2026-08-11.md` — what happens when I1 is cited to justify a call whose population it does not cover; the source of the scope boundary above.

@@ -155,7 +155,8 @@ Each attempt logs `attempt=N`. These retries are the HTTP-level safety net insid
 ## Pointers
 
 - Why Gemini 3.1 Flash-Lite → `solutions/tooling-decisions/gemini-3-1-flash-lite-2026-05-15.md`.
-- Why one request in flight (serial actor) → `solutions/architecture-patterns/serial-gemini-actor-2026-05-15.md`.
+- Why one request in flight (serial actor), and the scope boundary that invariant does **not** reach → `solutions/architecture-patterns/serial-gemini-actor-2026-05-15.md`.
+- Why the connection flush's safety claim cites `flush`'s own semantics rather than invariant I1 → `solutions/conventions/cited-invariant-must-cover-the-population-2026-08-11.md`.
 - Why no streaming → `solutions/design-patterns/no-streaming-gemini-2026-05-15.md`.
 - Why local concat → `solutions/design-patterns/local-chunk-concatenation-2026-05-15.md`.
 - Per-app classifier → `solutions/architecture-patterns/per-app-categorization-instructions-2026-05-15.md` + `NoType/Instructions/CLAUDE.md`.
