@@ -2611,7 +2611,13 @@ enum NoTypeErrorKind {
                 severity: .neutral,
                 iconSymbol: "ellipsis.bubble"
             )
-        case .pasteWithheld(_, let summary):
+        case .pasteWithheld(let entry, let summary):
+            // Exactly one bit is read off the entry, by the helper below,
+            // and the entry is never touched again in this arm — R29 is
+            // preserved by that discipline rather than by the old
+            // `(_, let summary)` binding. A `Bool` cannot carry a word of
+            // the transcript.
+            let offersCopy = Self.withheldNoticeOffersCopy(for: entry)
             // The destination was frozen at the stop and travels on the
             // summary. Never re-read here: `NSWorkspace.frontmostApplication`
             // at notice time names wherever the user has drifted to since,
@@ -2647,16 +2653,25 @@ enum NoTypeErrorKind {
             } else {
                 gaps = ""
             }
+            // The final clause is the only thing the copy gate moves, and
+            // it moves by subtraction: the sentence keeps naming where the
+            // transcript is and stops before promising a button that isn't
+            // rendered. Same discipline as `describe`'s `cause` / `ifKept` /
+            // `ifLost` split — `cause` and `gaps` above stay pure diagnosis,
+            // so nothing here can stutter onto the other arm.
+            let delivery = offersCopy
+                ? "Nothing was pasted — the transcript is in your history, and Copy puts it on your clipboard."
+                : "Nothing was pasted — the transcript is in your history."
             // R29: no part of the transcript appears in either string.
             // This panel renders over whatever the user moved to, which
             // may be a screen share or a call.
             return ErrorPayload(
                 title: "Transcript ready, not pasted",
-                description: "\(cause)\(gaps) Nothing was pasted — the transcript is in your history, and Copy puts it on your clipboard.",
+                description: "\(cause)\(gaps) \(delivery)",
                 code: "INFO_NOT_PASTED",
                 severity: .neutral,
                 iconSymbol: "doc.on.clipboard",
-                retryLabel: "Copy",
+                retryLabel: offersCopy ? "Copy" : nil,
                 retryKind: .accent
             )
         }
@@ -2671,6 +2686,32 @@ enum NoTypeErrorKind {
     /// left the app.
     private static func chunkLossPhrase(_ summary: RecordingSession.SessionSummary) -> String {
         "\(summary.failedChunkCount) of \(summary.dispatchedChunkCount) chunks didn't transcribe"
+    }
+
+    /// Whether the withheld notice offers its Copy action for this row.
+    ///
+    /// **The notice matches the row** (the 2026-08-11 ruling). A transcript
+    /// that is nothing but gap markers — reachable when one chunk fails
+    /// recoverably and another is dropped by the hallucination gate, so the
+    /// row stores `[…]` — is one the history row deliberately offers no copy
+    /// button for, on the grounds that it is not worth putting on the
+    /// clipboard. The notice offering Copy there would put the two surfaces
+    /// in disagreement about the same entry, which is the exact thing R30
+    /// routes the copied string through `HistoryRowView.displayText(for:)`
+    /// to prevent.
+    ///
+    /// So the answer comes from `HistoryRowView.hasCopyableText` — the row's
+    /// own predicate, not a second spelling of it here. Re-deriving it at
+    /// this call site is the regression `NoType/UI/CLAUDE.md`'s threading
+    /// rule names.
+    ///
+    /// One helper rather than the same call in both members, because
+    /// `payload` and `retryHandler` disagreeing *with each other* is the
+    /// dead-button regression `MissingKeyHUDRetryTests` exists for — a
+    /// conditional label and a conditional handler are two chances to get
+    /// that wrong, and this is one.
+    private static func withheldNoticeOffersCopy(for entry: HistoryEntry) -> Bool {
+        HistoryRowView.hasCopyableText(entry.text)
     }
 
     var retryHandler: (@MainActor (AppState?) -> Void)? {
@@ -2743,6 +2784,15 @@ enum NoTypeErrorKind {
             // (stored `""`, rendered as synthesised markers). Going through
             // the row's own accessor is what makes them the same string by
             // construction instead of by coincidence.
+            //
+            // The gate below is what keeps that promise honest in the other
+            // direction: a row the history list offers no copy button for
+            // gets a notice with no Copy button either, so the label and the
+            // handler vanish together and the panel degrades to pure
+            // information. Both members ask the same helper — a conditional
+            // label paired with an unconditional handler is dead code, and
+            // the reverse is the dead button.
+            guard Self.withheldNoticeOffersCopy(for: entry) else { return nil }
             return { _ in
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(

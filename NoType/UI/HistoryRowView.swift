@@ -222,23 +222,50 @@ struct HistoryRowView: View {
     ///   `[…]`). Every retry on such a row is billed and settles straight
     ///   onto R19's nothing-recovered exit.
     /// - `copy` asks whether anything but gaps survived, via
-    ///   `RetryMerge.priors` — which already splits on the marker, trims,
-    ///   and drops empties. So a row storing bare `[…] […]` reads the
-    ///   same as one storing `""`: both render markers, and neither is
-    ///   worth putting on the clipboard (AE4).
+    ///   `hasCopyableText` below — hoisted out of this body because the
+    ///   withheld-paste notice asks the same question about the same row
+    ///   and must not spell it a second time. So a row storing bare
+    ///   `[…] […]` reads the same as one storing `""`: both render
+    ///   markers, and neither is worth putting on the clipboard (AE4).
     nonisolated static func actions(
         isBroken: Bool,
         canRetry: Bool,
         text: String,
         isRetrying: Bool
     ) -> [RowAction] {
-        let hasCopyableText = !RetryMerge.priors(from: text).isEmpty
-        if isRetrying { return hasCopyableText ? [.copy, .delete] : [.delete] }
+        let copyable = hasCopyableText(text)
+        if isRetrying { return copyable ? [.copy, .delete] : [.delete] }
         var out: [RowAction] = []
         if isBroken && canRetry && RetryMerge.canAcceptRecovery(text) { out.append(.retry) }
-        if hasCopyableText { out.append(.copy) }
+        if copyable { out.append(.copy) }
         out.append(.delete)
         return out
+    }
+
+    /// Whether a row storing this text has anything worth putting on the
+    /// clipboard — the `.copy` term of `actions(...)` above, and the whole
+    /// of it.
+    ///
+    /// Named and hoisted out of `actions`' body because it has a **second
+    /// caller outside this view**: `NoTypeErrorKind.pasteWithheld`'s notice
+    /// offers Copy iff the row it points at does (the 2026-08-11 ruling —
+    /// the notice and the row must not disagree about the same entry, which
+    /// is the same reason R30 routes the copied string through
+    /// `displayText(for:)`). That caller must not re-spell this test;
+    /// `NoType/UI/CLAUDE.md`'s threading rule puts predicates over the row's
+    /// own fields *here*, where one edit reaches every surface and a test
+    /// reaches the predicate.
+    ///
+    /// `RetryMerge.priors` already splits on `failureMarker`, trims, and
+    /// drops empties, so a row storing bare `[…] […]` reads the same as one
+    /// storing `""`: both render markers and neither is worth copying (AE4).
+    ///
+    /// **A consequence worth knowing before relying on `displayText`
+    /// diverging from `entry.text` anywhere:** `displayText` synthesises
+    /// markers only when the stored text is empty, and empty text is not
+    /// copyable — so wherever copy *is* offered, the two strings are equal.
+    nonisolated static func hasCopyableText(_ text: String) -> Bool {
+        !RetryMerge.priors(from: text).isEmpty
     }
 
     /// What the row shows for its transcript.

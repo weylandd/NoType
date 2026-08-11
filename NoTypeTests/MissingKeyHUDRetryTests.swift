@@ -91,6 +91,19 @@ final class MissingKeyHUDRetryTests: XCTestCase {
                 summary: Self.summary(failed: 1, dispatched: 3)
             ).retryHandler
         )
+        // `.pasteWithheld` is the one *conditional* entry in the catalog:
+        // its Copy button exists iff the history row it points at offers
+        // one (the 2026-08-11 ruling). On the arm where it doesn't, the
+        // kind belongs in this list beside the permanently button-less
+        // ones — and the pairing with its vanished label is what the sweep
+        // below owns.
+        XCTAssertNil(
+            NoTypeErrorKind.pasteWithheld(
+                entry: Self.entry(text: RecordingSession.failureMarker),
+                summary: Self.summary(failed: 1, dispatched: 2, withheld: true)
+            ).retryHandler,
+            "A transcript of nothing but gap markers still ships a Copy handler — the row itself offers no copy button for it."
+        )
     }
 
     // MARK: - Fixtures
@@ -110,13 +123,16 @@ final class MissingKeyHUDRetryTests: XCTestCase {
         )
     }
 
-    /// The notice's `entry` supplies only the Copy string, which this
-    /// file never reads — it sweeps for label-without-handler. What the
-    /// copy actually places is pinned in `AppStateFocusNoticeTests`.
-    private static func entry() -> HistoryEntry {
+    /// The notice's `entry` supplies the Copy string, which this file never
+    /// reads — but since the 2026-08-11 ruling it also decides *whether*
+    /// the Copy button exists at all, so `text` is a parameter: a
+    /// transcript of nothing but gap markers is one the history row won't
+    /// copy, and the notice matches it. What the copy actually places, and
+    /// the agreement with the row, are pinned in `AppStateFocusNoticeTests`.
+    private static func entry(text: String = "the transcript") -> HistoryEntry {
         HistoryEntry(
             id: UUID(),
-            text: "the transcript",
+            text: text,
             sourceAppName: "Slack",
             sourceBundleID: "com.tinyspeck.slackmacgap",
             timestamp: Date()
@@ -160,6 +176,16 @@ final class MissingKeyHUDRetryTests: XCTestCase {
         //      affordance a withheld paste offers, its handler needs no
         //      `AppState` and no window, and the row's own copy button
         //      stays the durable path once the 8 s panel is gone.
+        //      **It is also the catalog's only *conditional* entry, and
+        //      that is new to this sweep** (the 2026-08-11 ruling): its
+        //      label and its handler both exist iff the history row the
+        //      notice points at offers a copy button, which a transcript
+        //      of nothing but gap markers does not. One case therefore
+        //      needs two rows below — a copyable entry and a gaps-only one
+        //      — because a sweep that only ever saw the copyable arm would
+        //      be green on a gate that fired for the label and not for the
+        //      handler. The `else` limb of the loop is what makes the
+        //      second row assert anything at all.
         //
         // If you add a seventh case, add it here and update the
         // inventory comment. `NoTypeErrorKind` does not (and cannot
@@ -192,12 +218,32 @@ final class MissingKeyHUDRetryTests: XCTestCase {
             // different action would otherwise sweep past unnoticed.
             .pasteWithheld(entry: Self.entry(), summary: Self.summary(failed: 0, dispatched: 3, withheld: true)),
             .pasteWithheld(entry: Self.entry(), summary: Self.summary(failed: 2, dispatched: 4, withheld: true)),
+            // ...and both sides of the conditional gate. This entry's
+            // transcript is nothing but a gap marker, so the row offers no
+            // copy button and neither does the notice — the `else` limb
+            // below is what holds it to that.
+            .pasteWithheld(
+                entry: Self.entry(text: RecordingSession.failureMarker),
+                summary: Self.summary(failed: 1, dispatched: 2, withheld: true)
+            ),
         ]
         for kind in kinds {
             if kind.payload.retryLabel != nil {
                 XCTAssertNotNil(
                     kind.retryHandler,
                     "Catalog entry advertises retryLabel '\(kind.payload.retryLabel ?? "?")' but has no retryHandler — button would be dead."
+                )
+            } else {
+                // The symmetric half, and it stopped being hypothetical
+                // once a case started deciding its label at runtime: a gate
+                // applied to the label but not to the handler leaves a
+                // closure nothing can invoke, and the loop above is silent
+                // about it. Harmless in isolation, but it is the same
+                // drift that produces the dead button when the two are
+                // wired the other way round.
+                XCTAssertNil(
+                    kind.retryHandler,
+                    "Catalog entry ships a retryHandler with no retryLabel — nothing renders the button, so the handler is unreachable."
                 )
             }
         }

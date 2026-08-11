@@ -24,7 +24,12 @@ import AppKit
 /// 3. **Copy places exactly what the row shows (R30)**, via the row's own
 ///    accessor, so the notice and the history row cannot hand the user two
 ///    different transcripts.
-/// 4. **Exactly one notice per session, and this is the one (KTD9).**
+/// 4. **Copy is offered exactly when the row offers it** (the 2026-08-11
+///    ruling). A transcript that is nothing but gap markers is one the row
+///    deliberately won't copy; the notice matches, losing its label and its
+///    handler together and degrading to a pure informational panel. Same
+///    reason as 3 — the two surfaces answer for the same entry.
+/// 5. **Exactly one notice per session, and this is the one (KTD9).**
 ///    `HUDController.showErrorHUD` replaces rather than stacks.
 @MainActor
 final class AppStateFocusNoticeTests: XCTestCase {
@@ -61,6 +66,71 @@ final class AppStateFocusNoticeTests: XCTestCase {
         XCTAssertEqual(
             payload.retryKind, .accent,
             "Copy is the only thing this notice offers — it renders as the primary button, like Open Settings."
+        )
+    }
+
+    // MARK: - The notice matches the row (2026-08-11 ruling)
+    //
+    // A transcript that is nothing but gap markers is one the history row
+    // deliberately offers no copy button for — it is not worth putting on
+    // the clipboard. The notice must not disagree with the row about the
+    // same entry, which is the whole reason R30 routes the copied string
+    // through the row's own accessor. So on that entry the notice ships no
+    // action at all and degrades to a pure informational panel.
+
+    func test_copyIsOfferedExactlyWhenTheRowWouldOfferIt() {
+        // The gate is the row's predicate, and this asks the row rather
+        // than restating the answer: for each text, whichever way
+        // `HistoryRowView.actions(...)` votes on `.copy`, the notice's
+        // label and handler must vote the same way. A second spelling of
+        // the predicate on the notice's side fails here the moment the two
+        // drift.
+        let texts = [
+            "the transcript",                 // ordinary
+            "kept some \(Self.marker) lost some",  // partially recovered
+            Self.marker,                      // AE4: the ruling's case
+            "\(Self.marker) \(Self.marker)",  // ditto, plural
+            "",                               // recovered nothing
+            "   ",                            // whitespace-only
+        ]
+        for text in texts {
+            let rowOffersCopy = HistoryRowView.actions(
+                isBroken: true, canRetry: false, text: text, isRetrying: false
+            ).contains(.copy)
+
+            let kind = NoTypeErrorKind.pasteWithheld(
+                entry: Self.entry(text: text, failedChunkCount: 2),
+                summary: Self.summary(failed: 2, dispatched: 4)
+            )
+
+            XCTAssertEqual(
+                kind.payload.retryLabel != nil, rowOffersCopy,
+                "The notice and the history row disagree about whether \(text.debugDescription) is worth copying. Both surfaces answer for the same entry, and the user sees them minutes apart."
+            )
+            XCTAssertEqual(
+                kind.retryHandler != nil, rowOffersCopy,
+                "The notice's Copy handler and its Copy label disagree for \(text.debugDescription) — either a dead button or dead code."
+            )
+        }
+    }
+
+    func test_aGapsOnlyTranscript_shipsNoActionAtAll() {
+        let kind = NoTypeErrorKind.pasteWithheld(
+            entry: Self.entry(text: Self.marker, failedChunkCount: 1),
+            summary: Self.summary(failed: 1, dispatched: 2)
+        )
+
+        XCTAssertNil(
+            kind.payload.retryLabel,
+            "The notice offers Copy for a transcript the row itself won't copy."
+        )
+        XCTAssertNil(
+            kind.retryHandler,
+            "The label is gone but the handler is still wired — dead code, and the pair is what MissingKeyHUDRetryTests sweeps."
+        )
+        XCTAssertEqual(
+            kind.payload.severity, .neutral,
+            "Losing the action does not make this a failure — the panel degrades to pure information, not to an alarm."
         )
     }
 
@@ -218,26 +288,43 @@ final class AppStateFocusNoticeTests: XCTestCase {
         }
     }
 
-    func test_payloadIsIndependentOfTheEntryEntirely() {
+    func test_payloadReadsExactlyOneBitOffTheEntry_andItIsNotContent() {
         // The needle test above samples: it proves *those* words are
         // absent from *that* fixture. This proves the property R29
-        // actually needs — the rendered strings are a function of the
-        // summary alone, so there is no transcript to leak in the first
-        // place. A first-N-character preview, a word count, an "it starts
-        // with…" hint: all of them fail here and none of them need a
+        // actually needs — a first-N-character preview, a word count, an
+        // "it starts with…" hint all fail here, and none of them need a
         // needle to be guessed in advance.
         //
-        // Cheap because `ErrorPayload` is `Equatable`. Two entries sharing
-        // no field, against both gap shapes.
-        let a = Self.entry(text: "the wire clears friday", sourceApp: "Slack")
-        let b = Self.entry(text: "", sourceApp: "Mail", failedChunkCount: 2)
+        // The property used to be "the payload is a function of the summary
+        // alone". The 2026-08-11 ruling widened it by exactly one bit —
+        // whether the row would offer Copy — so the pin is now: two entries
+        // agreeing on that bit and sharing no other field render the same
+        // payload. That bit is a `Bool` and cannot carry a word of what was
+        // said; the leak this test exists to catch is unchanged.
+        //
+        // Cheap because `ErrorPayload` is `Equatable`. Both gap shapes, and
+        // both sides of the bit — a pair that is copyable and a pair that
+        // is not, since a gate that leaked content only on the no-copy arm
+        // would otherwise sweep past.
+        let pairs: [(HistoryEntry, HistoryEntry)] = [
+            (
+                Self.entry(text: "the wire clears friday", sourceApp: "Slack"),
+                Self.entry(text: "ship it monday", sourceApp: "Mail", failedChunkCount: 2)
+            ),
+            (
+                Self.entry(text: Self.marker, sourceApp: "Slack", failedChunkCount: 1),
+                Self.entry(text: "", sourceApp: "Mail", failedChunkCount: 2)
+            ),
+        ]
 
-        for summary in [Self.summary(), Self.summary(failed: 1, dispatched: 3)] {
-            XCTAssertEqual(
-                NoTypeErrorKind.pasteWithheld(entry: a, summary: summary).payload,
-                NoTypeErrorKind.pasteWithheld(entry: b, summary: summary).payload,
-                "The notice's payload varies with the entry, so something about the transcript reaches the panel. R29 is a privacy property — this panel draws over whatever the user moved to."
-            )
+        for (a, b) in pairs {
+            for summary in [Self.summary(), Self.summary(failed: 1, dispatched: 3)] {
+                XCTAssertEqual(
+                    NoTypeErrorKind.pasteWithheld(entry: a, summary: summary).payload,
+                    NoTypeErrorKind.pasteWithheld(entry: b, summary: summary).payload,
+                    "The notice's payload varies with the entry beyond the copy bit, so something about the transcript reaches the panel. R29 is a privacy property — this panel draws over whatever the user moved to."
+                )
+            }
         }
     }
 
@@ -288,6 +375,30 @@ final class AppStateFocusNoticeTests: XCTestCase {
         )
     }
 
+    func test_withheldCopy_onTheNoCopyArm_rendersVerbatim() {
+        // The 2026-08-11 ruling's arm, pinned whole. Only the final clause
+        // moves, and it moves by subtraction — the sentence still says
+        // where the transcript is and stops before promising a button that
+        // is not rendered. Exact equality, not `contains`: the failure this
+        // shape catches is a clause left half-standing ("…is in your
+        // history, and puts it on your clipboard."), which every `contains`
+        // check on the surviving words stays green for.
+        XCTAssertEqual(
+            NoTypeErrorKind.pasteWithheld(
+                entry: Self.entry(text: Self.marker, failedChunkCount: 1),
+                summary: Self.summary(failed: 1, dispatched: 2)
+            ).payload.description,
+            "This dictation was headed for Mail, which is no longer the active app. 1 of 2 chunks didn't transcribe, so \(RecordingSession.failureMarker) marks the gap. Nothing was pasted — the transcript is in your history."
+        )
+        XCTAssertFalse(
+            NoTypeErrorKind.pasteWithheld(
+                entry: Self.entry(text: Self.marker, failedChunkCount: 1),
+                summary: Self.summary(failed: 1, dispatched: 2)
+            ).payload.description.contains("Copy"),
+            "The description still names a Copy the panel does not render."
+        )
+    }
+
     func test_gapNoticeCopy_survivedTheSharedCountPhraseExtraction_byteForByte() {
         // U4 pulled the count phrase into `chunkLossPhrase` and, in the
         // singular arm, replaced a hardcoded "1" with an interpolation.
@@ -311,18 +422,22 @@ final class AppStateFocusNoticeTests: XCTestCase {
     // MARK: - Copy places what the row shows (R30)
 
     func test_copyAction_placesExactlyWhatTheRowShows() throws {
-        // A session that recovered nothing stores `""` and renders
-        // synthesised markers, so `entry.text` and what the row displays
-        // are different strings. That divergence is the whole point of
-        // this fixture: a handler written against `entry.text` would put
-        // an empty string on the clipboard and pass any test using a row
-        // whose stored and shown text happen to agree.
-        let entry = Self.entry(text: "", failedChunkCount: 2)
+        // **This test can no longer prove the accessor, and saying so is
+        // better than the green.** It used to run on a session that
+        // recovered nothing — stored `""`, rendered as synthesised markers
+        // — precisely because `entry.text` and the shown string diverge
+        // there, so a handler written against `entry.text` failed. Under
+        // the 2026-08-11 ruling that fixture is exactly the row that offers
+        // no Copy at all, and the two facts are one fact:
+        // `displayText(for:)` synthesises only when the stored text is
+        // empty, and empty text is not copyable. So wherever Copy *is*
+        // offered the two strings are equal by construction, which is what
+        // `test_everyEntryWhoseShownTextDiverges_offersNoCopy` below pins
+        // in place of the divergence. The accessor stays as the single
+        // source of truth if `displayText` ever starts trimming or eliding;
+        // it is now belt-and-braces rather than load-bearing.
+        let entry = Self.entry(text: "recovered \(Self.marker) partially", failedChunkCount: 1)
         let shown = HistoryRowView.displayText(for: entry)
-        XCTAssertNotEqual(
-            shown, entry.text,
-            "Fixture no longer exercises the divergence it exists for — this test would pass against `entry.text`."
-        )
 
         let handler = try XCTUnwrap(
             NoTypeErrorKind.pasteWithheld(entry: entry, summary: Self.summary()).retryHandler,
@@ -340,6 +455,31 @@ final class AppStateFocusNoticeTests: XCTestCase {
             NSPasteboard.general.string(forType: .string), shown,
             "Copy and the history row disagree about what was transcribed."
         )
+    }
+
+    func test_everyEntryWhoseShownTextDiverges_offersNoCopy() {
+        // What the test above lost, stated directly: the only rows where
+        // `displayText(for:)` returns something other than `entry.text` are
+        // rows the notice now refuses to offer Copy for. That is what makes
+        // "a handler written against `entry.text` would pass" harmless
+        // rather than a hole — there is no reachable case where the two
+        // strings differ *and* a clipboard write happens. If a future change
+        // gives `displayText` a second synthesising branch, this fails and
+        // R30 needs its divergent fixture back.
+        let divergent = [
+            Self.entry(text: "", failedChunkCount: 2),
+            Self.entry(text: "   ", failedChunkCount: 1),
+        ]
+        for entry in divergent {
+            XCTAssertNotEqual(
+                HistoryRowView.displayText(for: entry), entry.text,
+                "Fixture no longer diverges — it proves nothing about the divergent case."
+            )
+            XCTAssertNil(
+                NoTypeErrorKind.pasteWithheld(entry: entry, summary: Self.summary()).retryHandler,
+                "A row whose shown text differs from its stored text still offers Copy, so which of the two strings is placed is once again load-bearing — and untested."
+            )
+        }
     }
 
     func test_copyAction_worksWithoutAnAppState() throws {
@@ -523,6 +663,11 @@ final class AppStateFocusNoticeTests: XCTestCase {
     }
 
     // MARK: - Fixtures
+
+    /// The gap marker a failed chunk leaves behind. Spelled once so a
+    /// fixture built out of markers cannot drift from the thing the
+    /// production code substitutes.
+    private static let marker = RecordingSession.failureMarker
 
     private static func summary(
         failed: Int = 0,
