@@ -165,6 +165,21 @@ final class MissingKeyHUDRetryTests: XCTestCase {
         // inventory comment. `NoTypeErrorKind` does not (and cannot
         // easily) conform to `CaseIterable` because four cases carry
         // associated values, so this manual list is the contract.
+        //
+        // **But it is no longer the only thing standing between a seventh
+        // case and a dead button, and it must not be read as if it were.**
+        // A hand-maintained population cannot fail for a case that was
+        // never added to it: the omission is invisible to the sweep, which
+        // is the discovery-set failure in
+        // `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`.
+        // `NoTypeErrorKind.retryHandler` is therefore an exhaustive switch
+        // rather than one ending in `default: return nil` — a seventh case
+        // fails to compile there, at the moment its author is deciding
+        // whether it has a handler. What this sweep still owns is the
+        // *pairing* for each case it lists: that a kind advertising a
+        // label also ships a handler, which no switch can express.
+        // Deleting a case from `kinds` therefore weakens this file without
+        // any compiler complaint — keep the list complete.
         let kinds: [NoTypeErrorKind] = [
             .missingAPIKey,
             .vadLoadFailed,

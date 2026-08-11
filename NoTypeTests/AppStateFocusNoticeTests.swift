@@ -218,6 +218,96 @@ final class AppStateFocusNoticeTests: XCTestCase {
         }
     }
 
+    func test_payloadIsIndependentOfTheEntryEntirely() {
+        // The needle test above samples: it proves *those* words are
+        // absent from *that* fixture. This proves the property R29
+        // actually needs — the rendered strings are a function of the
+        // summary alone, so there is no transcript to leak in the first
+        // place. A first-N-character preview, a word count, an "it starts
+        // with…" hint: all of them fail here and none of them need a
+        // needle to be guessed in advance.
+        //
+        // Cheap because `ErrorPayload` is `Equatable`. Two entries sharing
+        // no field, against both gap shapes.
+        let a = Self.entry(text: "the wire clears friday", sourceApp: "Slack")
+        let b = Self.entry(text: "", sourceApp: "Mail", failedChunkCount: 2)
+
+        for summary in [Self.summary(), Self.summary(failed: 1, dispatched: 3)] {
+            XCTAssertEqual(
+                NoTypeErrorKind.pasteWithheld(entry: a, summary: summary).payload,
+                NoTypeErrorKind.pasteWithheld(entry: b, summary: summary).payload,
+                "The notice's payload varies with the entry, so something about the transcript reaches the panel. R29 is a privacy property — this panel draws over whatever the user moved to."
+            )
+        }
+    }
+
+    // MARK: - The destination fallback
+
+    func test_aNamelessDestination_fallsBackWithoutRenderingAnEmptyGap() {
+        // Reachable: the withhold gate needs a non-zero pid, but the name
+        // is `NSRunningApplication.localizedName` — optional, and the
+        // process's own answer rather than one we validate. Both shapes
+        // must reach the fallback; `?? ` alone catches only the first and
+        // renders "headed for , which is no longer the active app."
+        let namelessCases: [String?] = [nil, "", "   "]
+        for nameless in namelessCases {
+            let payload = NoTypeErrorKind.pasteWithheld(
+                entry: Self.entry(),
+                summary: Self.summary(destination: nameless)
+            ).payload
+
+            XCTAssertTrue(
+                payload.description.contains("the app you were in"),
+                "A destination with no usable name (\(String(describing: nameless))) skipped the fallback: \(payload.description)"
+            )
+            XCTAssertFalse(
+                payload.description.contains("headed for ,"),
+                "The empty name rendered as a gap in the sentence: \(payload.description)"
+            )
+        }
+    }
+
+    // MARK: - The rendered copy, verbatim
+    //
+    // `contains` assertions are green on a sentence that has lost half its
+    // meaning — the precedent is `ErrorCopyRetentionTests`, where a
+    // `contains` check stayed green on copy that stuttered its imperative
+    // twice and only exact equality caught it. These two pin the whole
+    // string, so any wording change is a deliberate, visible edit.
+
+    func test_withheldCopy_rendersVerbatim_withAndWithoutGaps() {
+        XCTAssertEqual(
+            NoTypeErrorKind.pasteWithheld(entry: Self.entry(), summary: Self.summary()).payload.description,
+            "This dictation was headed for Mail, which is no longer the active app. Nothing was pasted — the transcript is in your history, and Copy puts it on your clipboard."
+        )
+        XCTAssertEqual(
+            NoTypeErrorKind.pasteWithheld(
+                entry: Self.entry(), summary: Self.summary(failed: 2, dispatched: 4)
+            ).payload.description,
+            "This dictation was headed for Mail, which is no longer the active app. 2 of 4 chunks didn't transcribe, so \(RecordingSession.failureMarker) marks the gaps. Nothing was pasted — the transcript is in your history, and Copy puts it on your clipboard."
+        )
+    }
+
+    func test_gapNoticeCopy_survivedTheSharedCountPhraseExtraction_byteForByte() {
+        // U4 pulled the count phrase into `chunkLossPhrase` and, in the
+        // singular arm, replaced a hardcoded "1" with an interpolation.
+        // That is only byte-identical because the arm is unreachable for
+        // any other count — an invariant no other test states. If someone
+        // later widens the singular arm, this is what notices.
+        XCTAssertEqual(
+            NoTypeErrorKind.partialTranscription(
+                summary: Self.summary(failed: 1, dispatched: 3, withheld: false)
+            ).payload.description,
+            "1 of 3 chunks didn't transcribe — \(RecordingSession.failureMarker) was inserted in its place. Re-dictate just that part if you need it."
+        )
+        XCTAssertEqual(
+            NoTypeErrorKind.partialTranscription(
+                summary: Self.summary(failed: 2, dispatched: 5, withheld: false)
+            ).payload.description,
+            "2 of 5 chunks didn't transcribe — \(RecordingSession.failureMarker) was inserted in their place. Re-dictate the missing parts if you need them."
+        )
+    }
+
     // MARK: - Copy places what the row shows (R30)
 
     func test_copyAction_placesExactlyWhatTheRowShows() throws {
@@ -351,6 +441,25 @@ final class AppStateFocusNoticeTests: XCTestCase {
         XCTAssertTrue(
             body.contains("NoTypeErrorKind.noticeForFinishedSession("),
             "finalizeRecording no longer asks the seam which notice to show. Every assertion in this file would still pass while the user saw nothing — or saw the wrong notice."
+        )
+        // Asking the seam is not showing the answer. Without this, deleting
+        // the `surfaceError(notice)` line — or replacing it with a log —
+        // leaves the needle above satisfied, every payload assertion in
+        // this file green, and the user back to the silent non-delivery
+        // U4 exists to end. The guard's own failure message above claims
+        // to cover that case; this is the assertion that makes it true.
+        XCTAssertTrue(
+            body.contains("surfaceError(notice)"),
+            "finalizeRecording computes the notice and never shows it. The seam is consulted and its answer discarded — silent non-delivery, which is the exact bug U4 was written to fix."
+        )
+        // Exactly one consultation. A second `if let notice = …` block —
+        // the plausible shape of a later edit that wants to special-case
+        // something — satisfies every needle here while `showErrorHUD`'s
+        // replace-not-stack semantics decide the survivor by source order.
+        // That is KTD9 being resolved by accident rather than by the seam.
+        XCTAssertEqual(
+            body.components(separatedBy: "NoTypeErrorKind.noticeForFinishedSession(").count - 1, 1,
+            "finalizeRecording consults the seam more than once. `showErrorHUD` replaces rather than stacks, so whichever call runs last wins — and that is an ordering nobody decided."
         )
         XCTAssertFalse(
             body.contains("surfaceError(.partialTranscription"),

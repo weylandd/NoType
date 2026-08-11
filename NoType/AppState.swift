@@ -2618,11 +2618,18 @@ enum NoTypeErrorKind {
             // which is the one place the transcript is guaranteed *not* to
             // have been headed.
             //
-            // The fallback is unreachable on today's gate — a withhold
-            // needs `destinationPID > 0`, so something was frontmost — but
-            // `NSRunningApplication.localizedName` is optional and a
-            // nameless process would otherwise render "headed for ,".
-            let destination = summary.pasteDestinationAppName ?? "the app you were in"
+            // The fallback is hard to reach — a withhold needs
+            // `destinationPID > 0`, so *something* was frontmost — but it
+            // is not dead code, and the earlier phrasing ("unreachable on
+            // today's gate") invited exactly that misreading.
+            // `NSRunningApplication.localizedName` is optional, and it is
+            // the process's own answer rather than one we validate, so a
+            // nameless *or* blank-named process is what this guards.
+            // Trimmed, not just nil-checked: `?? ` alone lets `""` through
+            // and renders "headed for , which is no longer the active app."
+            let named = summary.pasteDestinationAppName?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let destination = named.isEmpty ? "the app you were in" : named
             let cause = "This dictation was headed for \(destination), which is no longer the active app."
             // Ahead of the copy consequence, so the user knows the
             // transcript they are about to take has holes in it before
@@ -2743,7 +2750,27 @@ enum NoTypeErrorKind {
                     forType: .string
                 )
             }
-        default:
+        case .vadLoadFailed, .sessionStartFailed, .sessionFailure, .partialTranscription:
+            // Deliberately button-less, and listed by name rather than
+            // swept up by `default:` — **the compiler owns the case axis
+            // here, not `MissingKeyHUDRetryTests`.**
+            //
+            // That guard sweeps a hand-maintained array, so the regression
+            // it cannot see is a *seventh* case: one that ships a
+            // `retryLabel`, is never added to the array, and falls through
+            // to a `nil` handler. Nothing goes red — the case is simply
+            // absent from the population being swept, which is the
+            // discovery-set failure in
+            // `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`
+            // ("the scan's own discovery set"). An exhaustive switch moves
+            // that axis to the compiler: a new case fails to build right
+            // here, and its author decides about a handler at the moment
+            // they write the label. `payload` above is already exhaustive
+            // for the same reason; this arm just stops `retryHandler` from
+            // being the looser of the two.
+            //
+            // The sweep stays — it still pins the label/handler *pairing*
+            // per case, which no switch can express.
             return nil
         }
     }
