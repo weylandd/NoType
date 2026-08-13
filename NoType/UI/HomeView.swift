@@ -41,6 +41,10 @@ struct HomeView: View {
                         // in-flight in both.
                         retryingEntryID: appState.retryingEntryID,
                         canRetry: { appState.canRetry(entryID: $0) },
+                        // R5: the observable mirror itself, so an edit in
+                        // the Dictionary tab re-renders rows already on
+                        // disk. `HistoryPopover` passes the same value.
+                        replacements: appState.dictionaryReplacements,
                         onRetry: { id in Task { await appState.retryEntry(id: id) } },
                         onDelete: { id in appState.deleteHistoryEntry(id: id) }
                     )
@@ -893,6 +897,7 @@ private struct HomeRecentList: View {
     /// state instead of each holding its own (R18 / KTD9).
     let retryingEntryID: UUID?
     let canRetry: (UUID) -> Bool
+    let replacements: [DictionaryReplacement]
     let onRetry: (UUID) -> Void
     let onDelete: (UUID) -> Void
 
@@ -914,6 +919,7 @@ private struct HomeRecentList: View {
                             isNewest: i == 0,
                             retryingEntryID: retryingEntryID,
                             canRetry: canRetry(entry.id),
+                            replacements: replacements,
                             onRetry: { onRetry(entry.id) },
                             onDelete: { onDelete(entry.id) }
                         )

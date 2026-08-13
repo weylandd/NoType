@@ -57,19 +57,18 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
         /// ran (R2). `nil` means the call failed recoverably and this
         /// position is a gap.
         ///
-        /// Raw is the point, and storing it raw is what this unit ships;
-        /// the pass that consumes it has **not landed yet**. Once the
-        /// assembler does, a replacement pair will be applied to the
-        /// assembled row at display and copy time, so editing a pair will
-        /// change how already-stored rows read and a pair whose phrase spans
-        /// a chunk seam will still match (KD2). Today every reader still
-        /// goes through the post-replacement `text` mirror below.
+        /// Raw is the point. `HistoryText.rendered` assembles the sequence
+        /// and applies the user's *current* replacement pairs at display
+        /// and copy time, so editing a pair changes how already-stored
+        /// rows read and a pair whose phrase spans a chunk seam still
+        /// matches (KD2) — neither of which is possible once the
+        /// substitution is baked in at write time.
         ///
-        /// What is already true as of this unit: `history.json` holds
-        /// pre-replacement text (R31). That is a present-tense consequence
-        /// of storing raw, not something the assembler brings — the file is
-        /// unencrypted and readable by anything running as the user, so it
-        /// is recorded rather than implied.
+        /// A consequence, recorded rather than implied: `history.json`
+        /// holds pre-replacement text (R31). Display-time substitution is
+        /// presentation-only — it removes nothing from disk, and deleting
+        /// a pair restores the original in the row. The file is
+        /// unencrypted and readable by anything running as the user.
         let text: String?
 
         /// True when this position carries no text because its Gemini call
@@ -110,10 +109,22 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
     /// the user loses all ten transcripts rather than one field. Its
     /// companion mirror is `failedChunkCount`.
     ///
-    /// The structural truth about the session lives in `segments`. Readers
-    /// that need the row as one string still read this field today; the
-    /// unit that assembles it from `segments` and applies the user's
-    /// *current* pairs at render time replaces those reads.
+    /// The structural truth about the session lives in `segments`, and
+    /// **no display, copy or accounting reader consults this field any
+    /// more** — they all go through `HistoryText.rendered`, which
+    /// assembles the sequence and applies the user's *current* pairs
+    /// (R13). Two readers are left, both deliberate and both temporary:
+    ///
+    /// - `init(from:)` below, for a legacy row that carries no sequence.
+    ///   There the text is the only record of where the gaps were, which
+    ///   is exactly what R12's migration reads it for.
+    /// - `AppState.settleRetry`, which still merges a retry's results by
+    ///   scanning this string for markers and still reads
+    ///   `isBroken && text.isEmpty` as its never-counted signal. U7 and
+    ///   U8 replace those with an index write and a segment-derived
+    ///   predicate respectively; until they land, keeping the merge on
+    ///   the mirror is what stops the sequence and the text disagreeing
+    ///   about where the remaining gaps are.
     let text: String
 
     let sourceAppName: String
@@ -426,9 +437,10 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
     /// `text` and `failedChunkCount` are emitted for the benefit of a
     /// pre-sequence build, which decodes the first non-optionally and would
     /// otherwise throw on the whole array. They are write-only from this
-    /// build's point of view: `init(from:)` reads `text` (still the string
-    /// every current reader consumes) and ignores the stored count entirely
-    /// whenever a sequence is present.
+    /// build's point of view: the stored count is ignored entirely whenever
+    /// a sequence is present, and `text` is read only on the migration
+    /// path — see the field's own doc-comment for the two readers that
+    /// remain and why.
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(id,              forKey: .id)

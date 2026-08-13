@@ -218,6 +218,13 @@ struct HistoryPopover: View {
                         // surface reads as in-flight in both.
                         retryingEntryID: appState.retryingEntryID,
                         canRetry: appState.canRetry(entryID: entry.id),
+                        // R5: the observable mirror itself, so an edit in
+                        // the Dictionary tab re-renders rows already on
+                        // disk. Threaded down for the same reason the
+                        // retry slot is — a per-surface copy is how the
+                        // popover and the Home tab start showing one
+                        // transcript two ways.
+                        replacements: appState.dictionaryReplacements,
                         onRetry: { Task { await appState.retryEntry(id: entry.id) } },
                         onDelete: { appState.deleteHistoryEntry(id: entry.id) }
                     )

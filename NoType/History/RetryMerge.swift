@@ -90,19 +90,15 @@ enum RetryMerge {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// Whether a recovery re-sent for this row has somewhere to land.
-    ///
-    /// `mergeDetailed` lands text two ways and only two: the empty-text
-    /// branch emits every slot (so an empty row always accepts), and the
-    /// substitution branch replaces `failureMarker` occurrences left to
-    /// right (so a row with at least one marker accepts). A row that is
-    /// still `isBroken` but carries neither — its markers rewritten out
-    /// from under it — accepts nothing, and every retry on it is billed,
-    /// recovers nothing, and settles onto R19's nothing-recovered exit.
-    /// `RetryMerge`'s own header names that rewrite as reachable today.
-    static func canAcceptRecovery(_ text: String) -> Bool {
-        isEmptyText(text) || text.contains(RecordingSession.failureMarker)
-    }
+    // `canAcceptRecovery(_:)` used to live here — "is there still a
+    // marker in this row's text for a recovery to land in" — and
+    // `HistoryRowView.actions` read it as the retry gate. It was a
+    // mitigation for a storage defect rather than a rule: a replacement
+    // pair on the ellipsis erased every `[…]` from the stored string, and
+    // hiding the retry button was how the shipped build coped. A gap is a
+    // position in `HistoryEntry.segments` now and a pair applied at render
+    // time cannot reach it, so the question has no answer worth asking and
+    // the predicate is gone (R8 / AE1). The gate is `isBroken && canRetry`.
 
     /// What one merge did: the row's new text, and which slots' recovered
     /// text actually reached it.

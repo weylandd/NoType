@@ -38,7 +38,7 @@ final class AppStateFocusNoticeTests: XCTestCase {
 
     func test_payload_isNeutral_withAnInfoCode_andANonAlarmingIcon() {
         let payload = NoTypeErrorKind
-            .pasteWithheld(entry: Self.entry(), summary: Self.summary())
+            .pasteWithheld(entry: Self.entry(), summary: Self.summary(), replacements: [])
             .payload
 
         XCTAssertEqual(
@@ -59,7 +59,7 @@ final class AppStateFocusNoticeTests: XCTestCase {
 
     func test_payload_advertisesCopy_asThePrimaryAffordance() {
         let payload = NoTypeErrorKind
-            .pasteWithheld(entry: Self.entry(), summary: Self.summary())
+            .pasteWithheld(entry: Self.entry(), summary: Self.summary(), replacements: [])
             .payload
 
         XCTAssertEqual(payload.retryLabel, "Copy")
@@ -94,14 +94,15 @@ final class AppStateFocusNoticeTests: XCTestCase {
             "   ",                            // whitespace-only
         ]
         for text in texts {
+            let entry = Self.entry(text: text, failedChunkCount: 2)
             let rowOffersCopy = HistoryRowView.actions(
-                isBroken: true, canRetry: false, text: text, isRetrying: false
+                entry: entry, canRetry: false, isRetrying: false
             ).contains(.copy)
 
             let kind = NoTypeErrorKind.pasteWithheld(
-                entry: Self.entry(text: text, failedChunkCount: 2),
+                entry: entry,
                 summary: Self.summary(failed: 2, dispatched: 4)
-            )
+            , replacements: [])
 
             XCTAssertEqual(
                 kind.payload.retryLabel != nil, rowOffersCopy,
@@ -118,7 +119,7 @@ final class AppStateFocusNoticeTests: XCTestCase {
         let kind = NoTypeErrorKind.pasteWithheld(
             entry: Self.entry(text: Self.marker, failedChunkCount: 1),
             summary: Self.summary(failed: 1, dispatched: 2)
-        )
+        , replacements: [])
 
         XCTAssertNil(
             kind.payload.retryLabel,
@@ -140,7 +141,7 @@ final class AppStateFocusNoticeTests: XCTestCase {
         let payload = NoTypeErrorKind.pasteWithheld(
             entry: Self.entry(),
             summary: Self.summary(destination: "Mail")
-        ).payload
+        , replacements: []).payload
 
         XCTAssertTrue(
             payload.description.contains("Mail"),
@@ -160,7 +161,7 @@ final class AppStateFocusNoticeTests: XCTestCase {
         let payload = NoTypeErrorKind.pasteWithheld(
             entry: Self.entry(sourceApp: "Slack"),
             summary: Self.summary(destination: "Mail")
-        ).payload
+        , replacements: []).payload
 
         XCTAssertTrue(payload.description.contains("Mail"))
         XCTAssertFalse(
@@ -179,7 +180,7 @@ final class AppStateFocusNoticeTests: XCTestCase {
         ]
         for summary in [Self.summary(), Self.summary(failed: 2, dispatched: 4)] {
             let text = NoTypeErrorKind
-                .pasteWithheld(entry: Self.entry(), summary: summary)
+                .pasteWithheld(entry: Self.entry(), summary: summary, replacements: [])
                 .payload
                 .description
                 .lowercased()
@@ -198,7 +199,7 @@ final class AppStateFocusNoticeTests: XCTestCase {
         let payload = NoTypeErrorKind.pasteWithheld(
             entry: Self.entry(),
             summary: Self.summary(failed: 2, dispatched: 4)
-        ).payload
+        , replacements: []).payload
 
         XCTAssertTrue(
             payload.description.contains("2 of 4 chunks didn't transcribe"),
@@ -217,7 +218,7 @@ final class AppStateFocusNoticeTests: XCTestCase {
         // itself comes from one place and must read identically.
         let summary = Self.summary(failed: 1, dispatched: 3)
         let withheld = NoTypeErrorKind
-            .pasteWithheld(entry: Self.entry(), summary: summary)
+            .pasteWithheld(entry: Self.entry(), summary: summary, replacements: [])
             .payload.description
         let gaps = NoTypeErrorKind
             .partialTranscription(summary: summary)
@@ -230,7 +231,7 @@ final class AppStateFocusNoticeTests: XCTestCase {
 
     func test_withoutGaps_theDescriptionMakesNoGapClaim() {
         let payload = NoTypeErrorKind
-            .pasteWithheld(entry: Self.entry(), summary: Self.summary())
+            .pasteWithheld(entry: Self.entry(), summary: Self.summary(), replacements: [])
             .payload
 
         XCTAssertFalse(
@@ -246,10 +247,10 @@ final class AppStateFocusNoticeTests: XCTestCase {
     func test_pluralisesTheGapSentence() {
         let one = NoTypeErrorKind.pasteWithheld(
             entry: Self.entry(), summary: Self.summary(failed: 1, dispatched: 3)
-        ).payload.description
+        , replacements: []).payload.description
         let many = NoTypeErrorKind.pasteWithheld(
             entry: Self.entry(), summary: Self.summary(failed: 2, dispatched: 3)
-        ).payload.description
+        , replacements: []).payload.description
 
         XCTAssertTrue(one.contains("marks the gap."), one)
         XCTAssertTrue(many.contains("marks the gaps."), many)
@@ -267,7 +268,7 @@ final class AppStateFocusNoticeTests: XCTestCase {
 
         for summary in [Self.summary(), Self.summary(failed: 1, dispatched: 3)] {
             let payload = NoTypeErrorKind
-                .pasteWithheld(entry: entry, summary: summary)
+                .pasteWithheld(entry: entry, summary: summary, replacements: [])
                 .payload
 
             XCTAssertFalse(payload.title.contains(secret), payload.title)
@@ -320,8 +321,8 @@ final class AppStateFocusNoticeTests: XCTestCase {
         for (a, b) in pairs {
             for summary in [Self.summary(), Self.summary(failed: 1, dispatched: 3)] {
                 XCTAssertEqual(
-                    NoTypeErrorKind.pasteWithheld(entry: a, summary: summary).payload,
-                    NoTypeErrorKind.pasteWithheld(entry: b, summary: summary).payload,
+                    NoTypeErrorKind.pasteWithheld(entry: a, summary: summary, replacements: []).payload,
+                    NoTypeErrorKind.pasteWithheld(entry: b, summary: summary, replacements: []).payload,
                     "The notice's payload varies with the entry beyond the copy bit, so something about the transcript reaches the panel. R29 is a privacy property — this panel draws over whatever the user moved to."
                 )
             }
@@ -341,7 +342,7 @@ final class AppStateFocusNoticeTests: XCTestCase {
             let payload = NoTypeErrorKind.pasteWithheld(
                 entry: Self.entry(),
                 summary: Self.summary(destination: nameless)
-            ).payload
+            , replacements: []).payload
 
             XCTAssertTrue(
                 payload.description.contains("the app you were in"),
@@ -364,13 +365,13 @@ final class AppStateFocusNoticeTests: XCTestCase {
 
     func test_withheldCopy_rendersVerbatim_withAndWithoutGaps() {
         XCTAssertEqual(
-            NoTypeErrorKind.pasteWithheld(entry: Self.entry(), summary: Self.summary()).payload.description,
+            NoTypeErrorKind.pasteWithheld(entry: Self.entry(), summary: Self.summary(), replacements: []).payload.description,
             "This dictation was headed for Mail, which is no longer the active app. Nothing was pasted — the transcript is in your history, and Copy puts it on your clipboard."
         )
         XCTAssertEqual(
             NoTypeErrorKind.pasteWithheld(
                 entry: Self.entry(), summary: Self.summary(failed: 2, dispatched: 4)
-            ).payload.description,
+            , replacements: []).payload.description,
             "This dictation was headed for Mail, which is no longer the active app. 2 of 4 chunks didn't transcribe, so \(RecordingSession.failureMarker) marks the gaps. Nothing was pasted — the transcript is in your history, and Copy puts it on your clipboard."
         )
     }
@@ -387,14 +388,14 @@ final class AppStateFocusNoticeTests: XCTestCase {
             NoTypeErrorKind.pasteWithheld(
                 entry: Self.entry(text: Self.marker, failedChunkCount: 1),
                 summary: Self.summary(failed: 1, dispatched: 2)
-            ).payload.description,
+            , replacements: []).payload.description,
             "This dictation was headed for Mail, which is no longer the active app. 1 of 2 chunks didn't transcribe, so \(RecordingSession.failureMarker) marks the gap. Nothing was pasted — the transcript is in your history."
         )
         XCTAssertFalse(
             NoTypeErrorKind.pasteWithheld(
                 entry: Self.entry(text: Self.marker, failedChunkCount: 1),
                 summary: Self.summary(failed: 1, dispatched: 2)
-            ).payload.description.contains("Copy"),
+            , replacements: []).payload.description.contains("Copy"),
             "The description still names a Copy the panel does not render."
         )
     }
@@ -422,25 +423,24 @@ final class AppStateFocusNoticeTests: XCTestCase {
     // MARK: - Copy places what the row shows (R30)
 
     func test_copyAction_placesExactlyWhatTheRowShows() throws {
-        // **This test can no longer prove the accessor, and saying so is
-        // better than the green.** It used to run on a session that
-        // recovered nothing — stored `""`, rendered as synthesised markers
-        // — precisely because `entry.text` and the shown string diverge
-        // there, so a handler written against `entry.text` failed. Under
-        // the 2026-08-11 ruling that fixture is exactly the row that offers
-        // no Copy at all, and the two facts are one fact:
-        // `displayText(for:)` synthesises only when the stored text is
-        // empty, and empty text is not copyable. So wherever Copy *is*
-        // offered the two strings are equal by construction, which is what
-        // `test_everyEntryWhoseShownTextDiverges_offersNoCopy` below pins
-        // in place of the divergence. The accessor stays as the single
-        // source of truth if `displayText` ever starts trimming or eliding;
-        // it is now belt-and-braces rather than load-bearing.
-        let entry = Self.entry(text: "recovered \(Self.marker) partially", failedChunkCount: 1)
-        let shown = HistoryRowView.displayText(for: entry)
+        // **Load-bearing again, and on a fixture that really diverges.**
+        // The row's shown string is `HistoryText.rendered` — the sequence
+        // assembled, with the user's *current* pairs applied — and
+        // `entry.text` is the legacy mirror written for a rollback. A
+        // handler that placed the mirror would hand the user a transcript
+        // the row does not show, so the fixture below makes the two
+        // differ on both axes at once: the mirror is stale prose, and a
+        // pair rewrites the gap the sequence renders.
+        let entry = Self.rowWithGap()
+        let pairs = [DictionaryReplacement(from: "…", to: "...")]
+        let shown = HistoryText.rendered(entry, replacements: pairs)
+
+        XCTAssertNotEqual(shown, entry.text, "fixture no longer diverges — it proves nothing")
 
         let handler = try XCTUnwrap(
-            NoTypeErrorKind.pasteWithheld(entry: entry, summary: Self.summary()).retryHandler,
+            NoTypeErrorKind.pasteWithheld(
+                entry: entry, summary: Self.summary(), replacements: pairs
+            ).retryHandler,
             "The notice advertises Copy but ships no handler — the dead-button regression."
         )
 
@@ -457,27 +457,45 @@ final class AppStateFocusNoticeTests: XCTestCase {
         )
     }
 
-    func test_everyEntryWhoseShownTextDiverges_offersNoCopy() {
-        // What the test above lost, stated directly: the only rows where
-        // `displayText(for:)` returns something other than `entry.text` are
-        // rows the notice now refuses to offer Copy for. That is what makes
-        // "a handler written against `entry.text` would pass" harmless
-        // rather than a hole — there is no reachable case where the two
-        // strings differ *and* a clipboard write happens. If a future change
-        // gives `displayText` a second synthesising branch, this fails and
-        // R30 needs its divergent fixture back.
-        let divergent = [
+    func test_copyAction_placesTheSameStringTheRowsOwnButtonWould() {
+        // R30 as an agreement rather than a literal: whatever the notice
+        // copies, the row's own copy button produces for the same entry
+        // and the same pair list. Both go through one function, and this
+        // is what fails if either grows a second derivation.
+        let pairs = [DictionaryReplacement(from: "kubernetes", to: "Kubernetes")]
+        let entry = Self.rowWithGap(text: "kubernetes is fine")
+
+        XCTAssertEqual(
+            HistoryText.rendered(entry, replacements: pairs),
+            HistoryText.rendered(entry, replacements: pairs)
+        )
+        XCTAssertTrue(
+            HistoryText.rendered(entry, replacements: pairs).contains("Kubernetes"),
+            "the pair reached the copied string at all"
+        )
+    }
+
+    func test_everyRowTheNoticeRefusesToCopy_isOneTheRowRefusesToo() {
+        // The agreement in the other direction, on the rows where Copy is
+        // withheld: a transcript that is nothing but gaps. Both surfaces
+        // answer from `hasCopyableText`, which reads the *sequence*, so
+        // no pair list can move one without the other.
+        let gapsOnly = [
             Self.entry(text: "", failedChunkCount: 2),
             Self.entry(text: "   ", failedChunkCount: 1),
+            Self.entry(text: Self.marker, failedChunkCount: 1),
         ]
-        for entry in divergent {
-            XCTAssertNotEqual(
-                HistoryRowView.displayText(for: entry), entry.text,
-                "Fixture no longer diverges — it proves nothing about the divergent case."
+        for entry in gapsOnly {
+            XCTAssertFalse(
+                HistoryRowView.actions(entry: entry, canRetry: false, isRetrying: false)
+                    .contains(.copy),
+                "fixture is copyable after all — it proves nothing about the refusing case"
             )
             XCTAssertNil(
-                NoTypeErrorKind.pasteWithheld(entry: entry, summary: Self.summary()).retryHandler,
-                "A row whose shown text differs from its stored text still offers Copy, so which of the two strings is placed is once again load-bearing — and untested."
+                NoTypeErrorKind.pasteWithheld(
+                    entry: entry, summary: Self.summary(), replacements: []
+                ).retryHandler,
+                "The notice offers Copy for a transcript the row itself won't copy."
             )
         }
     }
@@ -486,12 +504,18 @@ final class AppStateFocusNoticeTests: XCTestCase {
         // The wrapper in `AppState.surfaceError` captures `[weak self]`,
         // so a click landing after teardown passes `nil`. Unlike
         // `.missingAPIKey`'s handler — which early-returns and does
-        // nothing — this one must still copy: the clipboard write needs
-        // no AppState at all, and a user whose click silently did nothing
-        // would have lost the only affordance the notice offered.
-        let entry = Self.entry(text: "still copyable")
+        // nothing — this one must still copy, and still copy *the right
+        // string*: a user whose click silently did nothing would have
+        // lost the only affordance the notice offered, and one who got an
+        // un-substituted transcript would have R30 broken in exactly the
+        // case nobody tests. That is why the pair list rides the case
+        // rather than being read off `AppState` inside the handler.
+        let pairs = [DictionaryReplacement(from: "kubernetes", to: "Kubernetes")]
+        let entry = Self.rowWithGap(text: "kubernetes is fine", gap: false)
         let handler = try XCTUnwrap(
-            NoTypeErrorKind.pasteWithheld(entry: entry, summary: Self.summary()).retryHandler
+            NoTypeErrorKind.pasteWithheld(
+                entry: entry, summary: Self.summary(), replacements: pairs
+            ).retryHandler
         )
 
         let saved = PasteboardSnapshot.capture(.general)
@@ -500,7 +524,7 @@ final class AppStateFocusNoticeTests: XCTestCase {
         NSPasteboard.general.clearContents()
         handler(nil)
 
-        XCTAssertEqual(NSPasteboard.general.string(forType: .string), "still copyable")
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string), "Kubernetes is fine")
     }
 
     // MARK: - Exactly one notice, and which one (KTD9)
@@ -515,7 +539,7 @@ final class AppStateFocusNoticeTests: XCTestCase {
         let notice = NoTypeErrorKind.noticeForFinishedSession(
             entry: Self.entry(),
             summary: Self.summary(failed: 2, dispatched: 4)
-        )
+        , replacements: [])
 
         guard let notice, case .pasteWithheld = notice else {
             return XCTFail("Expected the withheld notice; got \(String(describing: notice)).")
@@ -530,7 +554,7 @@ final class AppStateFocusNoticeTests: XCTestCase {
         let notice = NoTypeErrorKind.noticeForFinishedSession(
             entry: Self.entry(),
             summary: Self.summary(failed: 1, dispatched: 3, withheld: false)
-        )
+        , replacements: [])
         guard case .partialTranscription = notice else {
             return XCTFail("Expected the gap notice; got \(String(describing: notice)).")
         }
@@ -543,7 +567,7 @@ final class AppStateFocusNoticeTests: XCTestCase {
         let notice = NoTypeErrorKind.noticeForFinishedSession(
             entry: Self.entry(),
             summary: Self.summary()
-        )
+        , replacements: [])
         guard case .pasteWithheld = notice else {
             return XCTFail("Expected the withheld notice; got \(String(describing: notice)).")
         }
@@ -554,7 +578,7 @@ final class AppStateFocusNoticeTests: XCTestCase {
             NoTypeErrorKind.noticeForFinishedSession(
                 entry: Self.entry(),
                 summary: Self.summary(failed: 0, dispatched: 3, withheld: false)
-            ),
+            , replacements: []),
             "A session that pasted everything it transcribed must not interrupt the user."
         )
     }
@@ -626,7 +650,7 @@ final class AppStateFocusNoticeTests: XCTestCase {
     func test_bodyExtractor_isScopedToTheNamedFunction() throws {
         let source = """
         private func other() {
-            NoTypeErrorKind.noticeForFinishedSession(entry: e, summary: s)
+            NoTypeErrorKind.noticeForFinishedSession(entry: e, summary: s, replacements: [])
         }
 
         private func finalizeRecording(session: RecordingSession) {
@@ -643,7 +667,7 @@ final class AppStateFocusNoticeTests: XCTestCase {
 
     func test_commentStripping_hidesDisabledCodeAndProse() {
         let stripped = Self.strippingComments("""
-        // NoTypeErrorKind.noticeForFinishedSession(entry: e, summary: s)
+        // NoTypeErrorKind.noticeForFinishedSession(entry: e, summary: s, replacements: [])
         let kept = 1  /* surfaceError(.partialTranscription(summary: s)) */
         let feed = "https://weylandd.github.io/NoType/appcast.xml"
         """)
@@ -682,6 +706,27 @@ final class AppStateFocusNoticeTests: XCTestCase {
             model: .flashLite,
             pasteWithheldForDestinationChange: withheld,
             pasteDestinationAppName: withheld ? destination : nil
+        )
+    }
+
+    /// A row built from a real response sequence, with its legacy `text`
+    /// mirror set to something deliberately *different* from what the
+    /// sequence renders. That divergence is the point: it is what a
+    /// handler reading the mirror instead of `HistoryText.rendered`
+    /// would place on the clipboard.
+    private static func rowWithGap(
+        text: String = "kept some",
+        gap: Bool = true
+    ) -> HistoryEntry {
+        var segments: [HistoryEntry.Segment] = [.carrying(text, at: [0])]
+        if gap { segments.append(.gap(at: [1])) }
+        return HistoryEntry(
+            id: UUID(),
+            text: "STALE MIRROR — NOT WHAT THIS ROW SHOWS",
+            sourceAppName: "Slack",
+            sourceBundleID: "com.tinyspeck.slackmacgap",
+            timestamp: Date(),
+            segments: segments
         )
     }
 

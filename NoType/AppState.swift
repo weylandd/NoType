@@ -1128,7 +1128,14 @@ final class AppState {
         // again, which is what makes the session count once across however
         // many retries it takes (AE9).
         if row.isBroken && row.text.isEmpty {
-            statsSummary = await statsStore.record(updated, tokens: tokens, model: payload.model)
+            // R13 / R14, same as the session's own write point: the words
+            // counted are the ones the row shows, current pairs applied.
+            statsSummary = await statsStore.record(
+                updated,
+                text: HistoryText.rendered(updated, replacements: dictionaryReplacements),
+                tokens: tokens,
+                model: payload.model
+            )
         } else {
             await recordRetryTokens(tokens, model: payload.model, for: row)
         }
@@ -1694,7 +1701,8 @@ final class AppState {
                 // time the user reads it.
                 if let notice = NoTypeErrorKind.noticeForFinishedSession(
                     entry: entry,
-                    summary: sessionSummary
+                    summary: sessionSummary,
+                    replacements: self.dictionaryReplacements
                 ) {
                     self.surfaceError(notice)
                 }
@@ -1707,8 +1715,18 @@ final class AppState {
                 // calls; failed (recoverable) chunks contribute zero.
                 let tokens = sessionSummary.tokens
                 let model = sessionSummary.model
+                // R13 / R14: the counter is fed the string the row shows,
+                // not `entry.text`. Rendered here, on the main actor,
+                // because that is where the pair mirror lives — the store
+                // is an actor with no view of it.
+                let countedText = HistoryText.rendered(
+                    entry,
+                    replacements: self.dictionaryReplacements
+                )
                 Task { [statsStore = self.statsStore] in
-                    let snap = await statsStore.record(entry, tokens: tokens, model: model)
+                    let snap = await statsStore.record(
+                        entry, text: countedText, tokens: tokens, model: model
+                    )
                     await MainActor.run { [weak self] in
                         self?.statsSummary = snap
                     }
@@ -1723,7 +1741,18 @@ final class AppState {
                 // hallucination risk. The only gate left is "no room" —
                 // if the user has filled all 100 slots with sticky
                 // entries, harvesting can't write anything anyway.
-                self.harvestDictionaryIfRoom(session: session, transcript: entry.text)
+                //
+                // R15: the *finalized pasted string*, off the summary —
+                // not `entry.text` (a legacy mirror) and not the
+                // assembled row (which carries the user's current pairs
+                // and no insertion normalisation). Harvesting is an
+                // intersection with what was on screen, so feeding it a
+                // different string silently changes which terms are
+                // learned.
+                self.harvestDictionaryIfRoom(
+                    session: session,
+                    transcript: sessionSummary.finalizedTranscript
+                )
             } catch is CancellationError {
                 // User-initiated abort via Escape during `.sending`.
                 // `cancelRecording` already cleared state, hid the HUD,
@@ -2461,7 +2490,7 @@ enum NoTypeErrorKind {
     /// why this notice exists at all (R25). Neutral severity — the
     /// dictation succeeded, it just has nowhere safe to land.
     ///
-    /// **Two associated values, with a deliberate split of duties.**
+    /// **Three associated values, with a deliberate split of duties.**
     /// `summary` is the only source of the destination's name and of the
     /// gap counts: the name was frozen at the stop by U3's
     /// `freezePasteDestination(_:)` and rides this channel precisely so
@@ -2469,16 +2498,29 @@ enum NoTypeErrorKind {
     /// by notice time the user has moved again and that read answers a
     /// different question. `entry` supplies one thing and one thing only,
     /// the string the Copy action places (R30), and it does so through
-    /// `HistoryRowView.displayText(for:)` — the same accessor the row's
-    /// own copy button uses — so the notice and the row cannot hand the
-    /// user two different transcripts.
+    /// `HistoryText.rendered` — the same function the row's own copy
+    /// button calls — so the notice and the row cannot hand the user two
+    /// different transcripts.
+    ///
+    /// `replacements` rides along for that render, frozen at the moment
+    /// the notice is built. It is **not** read from `AppState` inside the
+    /// handler, and the reason is a shipped property worth keeping: the
+    /// wrapper in `surfaceError` captures `[weak self]`, so a click
+    /// landing after teardown passes `nil`, and a handler that needed
+    /// `AppState` would there copy a string the row does not show —
+    /// breaking R30 in exactly the case nobody would test. Carrying the
+    /// list makes the handler self-contained, as it was before this unit.
     ///
     /// `entry.failedChunkCount` mirrors `summary.failedChunkCount` and is
     /// deliberately *not* what the copy reads: `.partialTranscription`
     /// counts from the summary, and one source keeps the two notices'
     /// count wording from drifting. The summary is also the only side
     /// carrying `dispatchedChunkCount`, the "of M" denominator.
-    case pasteWithheld(entry: HistoryEntry, summary: RecordingSession.SessionSummary)
+    case pasteWithheld(
+        entry: HistoryEntry,
+        summary: RecordingSession.SessionSummary,
+        replacements: [DictionaryReplacement]
+    )
 
     /// The single notice a finished session surfaces, or `nil` for the
     /// ordinary session that pasted everything it transcribed.
@@ -2504,10 +2546,11 @@ enum NoTypeErrorKind {
     /// `RecordingSession.shouldWithholdPaste` and `HistoryRowView.actions`.
     static func noticeForFinishedSession(
         entry: HistoryEntry,
-        summary: RecordingSession.SessionSummary
+        summary: RecordingSession.SessionSummary,
+        replacements: [DictionaryReplacement]
     ) -> NoTypeErrorKind? {
         if summary.pasteWithheldForDestinationChange {
-            return .pasteWithheld(entry: entry, summary: summary)
+            return .pasteWithheld(entry: entry, summary: summary, replacements: replacements)
         }
         if summary.hasFailures {
             return .partialTranscription(summary: summary)
@@ -2619,7 +2662,7 @@ enum NoTypeErrorKind {
                 severity: .neutral,
                 iconSymbol: "ellipsis.bubble"
             )
-        case .pasteWithheld(let entry, let summary):
+        case .pasteWithheld(let entry, let summary, _):
             // Exactly one bit is read off the entry, by the helper below,
             // and the entry is never touched again in this arm — R29 is
             // preserved by that discipline rather than by the old
@@ -2705,13 +2748,16 @@ enum NoTypeErrorKind {
     /// button for, on the grounds that it is not worth putting on the
     /// clipboard. The notice offering Copy there would put the two surfaces
     /// in disagreement about the same entry, which is the exact thing R30
-    /// routes the copied string through `HistoryRowView.displayText(for:)`
-    /// to prevent.
+    /// routes the copied string through `HistoryText.rendered` to prevent.
     ///
     /// So the answer comes from `HistoryRowView.hasCopyableText` — the row's
     /// own predicate, not a second spelling of it here. Re-deriving it at
     /// this call site is the regression `NoType/UI/CLAUDE.md`'s threading
     /// rule names.
+    ///
+    /// That predicate reads the row's **segments**, so it needs no
+    /// replacement pairs and cannot answer differently for the notice than
+    /// for the row even if the two ever rendered with different lists.
     ///
     /// One helper rather than the same call in both members, because
     /// `payload` and `retryHandler` disagreeing *with each other* is the
@@ -2719,7 +2765,7 @@ enum NoTypeErrorKind {
     /// conditional label and a conditional handler are two chances to get
     /// that wrong, and this is one.
     private static func withheldNoticeOffersCopy(for entry: HistoryEntry) -> Bool {
-        HistoryRowView.hasCopyableText(entry.text)
+        HistoryRowView.hasCopyableText(entry)
     }
 
     var retryHandler: (@MainActor (AppState?) -> Void)? {
@@ -2770,7 +2816,7 @@ enum NoTypeErrorKind {
                 // Notes / ...). Same pattern as `HistoryPopover.openSettings`.
                 NSApp.activate(ignoringOtherApps: true)
             }
-        case .pasteWithheld(let entry, _):
+        case .pasteWithheld(let entry, _, let replacements):
             // The second catalog entry to ship an action button, and it is
             // not the dead-button class `MissingKeyHUDRetryTests` guards:
             // that regression is `retryLabel != nil && retryHandler == nil`,
@@ -2786,12 +2832,14 @@ enum NoTypeErrorKind {
             // expecting did not happen — and the row's own copy button
             // remains the durable path once the panel is gone.
             //
-            // `HistoryRowView.displayText(for:)` rather than `entry.text`:
-            // R30 requires the notice to place exactly the string the row
-            // shows, and those differ for a session that recovered nothing
-            // (stored `""`, rendered as synthesised markers). Going through
-            // the row's own accessor is what makes them the same string by
-            // construction instead of by coincidence.
+            // `HistoryText.rendered` rather than `entry.text`: R30
+            // requires the notice to place exactly the string the row
+            // shows, and `entry.text` is no longer that string — it is a
+            // legacy mirror, un-re-substituted and holding whatever pairs
+            // were frozen at session start. The row assembles its
+            // sequence and applies the current pairs; going through the
+            // same function with the same list is what makes the two
+            // strings equal by construction instead of by coincidence.
             //
             // The gate below is what keeps that promise honest in the other
             // direction: a row the history list offers no copy button for
@@ -2804,7 +2852,7 @@ enum NoTypeErrorKind {
             return { _ in
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(
-                    HistoryRowView.displayText(for: entry),
+                    HistoryText.rendered(entry, replacements: replacements),
                     forType: .string
                 )
             }

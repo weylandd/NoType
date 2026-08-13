@@ -143,6 +143,7 @@
 		A8608E980331AC61CFAC31BE /* HistoryEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38B9D623D9D9F7934E636F65 /* HistoryEntry.swift */; };
 		A9F3A76C32704061F568529D /* OnboardingPermissionsStep.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDDC2E31C9C8C874761E6350 /* OnboardingPermissionsStep.swift */; };
 		AA4B4B1F8DC7D0AD3444CCE3 /* RetainedRecording.swift in Sources */ = {isa = PBXBuildFile; fileRef = D596C553803A797FAF059E48 /* RetainedRecording.swift */; };
+		AB49316E00BB440AA88DD7A3 /* HistoryTextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFB4D60BF0371DE3898C8F89 /* HistoryTextTests.swift */; };
 		AC67E88051ECEF666CBDECF7 /* OnboardingWelcomeStep.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BC5E756EC44B414C60E4616 /* OnboardingWelcomeStep.swift */; };
 		ACFD629F99A71EC05A1DBD92 /* SupportedLanguages.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4D3BF35339034FBC8756BEF /* SupportedLanguages.swift */; };
 		AF26471B1391AAF9B45F71C9 /* DictionaryHarvester.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F06DFB43BBA124B5D04E447 /* DictionaryHarvester.swift */; };
@@ -203,6 +204,7 @@
 		E2E98E97A1953262FB1C1F37 /* PermissionStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 467C43FEBD5D7C433CF08838 /* PermissionStatus.swift */; };
 		E4E8A5B9F039D2955C638E69 /* HistoryStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58C83BCA68B9BAFED21C66BB /* HistoryStoreTests.swift */; };
 		E7EC90571E30D47925443A9C /* LaunchOrderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A661190B8BC1C0A991AE541 /* LaunchOrderingTests.swift */; };
+		E835E5EB59B0BE791DA15581 /* HistoryText.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DC828F975791540E034A8C0 /* HistoryText.swift */; };
 		E98A13F750F405A2F7F59AA0 /* MicProbeFormatGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA8AE201CC1EEB3F8E565157 /* MicProbeFormatGateTests.swift */; };
 		E9C7D7E5630E99F39863FECF /* GeminiClientOfflineShortCircuitTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4359FF99315F7A3860417180 /* GeminiClientOfflineShortCircuitTests.swift */; };
 		EE185C97E6EC5BFD56B1049F /* DSIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1774DA573523F7148D0D7D1F /* DSIcon.swift */; };
@@ -351,6 +353,7 @@
 		8A661190B8BC1C0A991AE541 /* LaunchOrderingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchOrderingTests.swift; sourceTree = "<group>"; };
 		8CC9587B87BFA57DB2A156A9 /* AudioRecorderHALTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioRecorderHALTests.swift; sourceTree = "<group>"; };
 		8CE153F5C0A4476F796C6209 /* NetworkErrorTranslatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkErrorTranslatorTests.swift; sourceTree = "<group>"; };
+		8DC828F975791540E034A8C0 /* HistoryText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryText.swift; sourceTree = "<group>"; };
 		92E16477C6F291D3E3B488CF /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
 		990AC32994D4F76C0A833909 /* TextReplacementEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextReplacementEngine.swift; sourceTree = "<group>"; };
 		992D5917302D487E97A2D628 /* RecordingPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingPane.swift; sourceTree = "<group>"; };
@@ -438,6 +441,7 @@
 		F9EC20BD91A3B32A8DD9E999 /* MainWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindow.swift; sourceTree = "<group>"; };
 		FB15109FC5BF9D01B3A0088A /* FixedSizeWindowConfiguratorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixedSizeWindowConfiguratorTests.swift; sourceTree = "<group>"; };
 		FDD0CC556904DF7F95ADF530 /* RetryMergeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RetryMergeTests.swift; sourceTree = "<group>"; };
+		FFB4D60BF0371DE3898C8F89 /* HistoryTextTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryTextTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -586,6 +590,7 @@
 			children = (
 				38B9D623D9D9F7934E636F65 /* HistoryEntry.swift */,
 				AE41B20F58A7DCFDBEFCBD86 /* HistoryStore.swift */,
+				8DC828F975791540E034A8C0 /* HistoryText.swift */,
 				8009A32411B428EBB4791457 /* RetainedAudioStore.swift */,
 				140C7B018C894456B80CB74B /* RetryMerge.swift */,
 				9B25C98EF83C699AF39731E7 /* StatsStore.swift */,
@@ -750,6 +755,7 @@
 				871FA92C185EDA54994AFF82 /* HallucinationLengthGateTests.swift */,
 				44EC7411EC31FD4A2825A4A9 /* HistoryRowActionsTests.swift */,
 				58C83BCA68B9BAFED21C66BB /* HistoryStoreTests.swift */,
+				FFB4D60BF0371DE3898C8F89 /* HistoryTextTests.swift */,
 				9BE9FCB0F481B98CF04B7451 /* HotkeyBindingTests.swift */,
 				9B2B54AC91C613BCBC3EC69E /* HotkeyMonitorTests.swift */,
 				1EC2BE35635896168D7FC3C0 /* HUDPanelGeometryTests.swift */,
@@ -1074,6 +1080,7 @@
 				DA24B84557AADABE2FA46369 /* HistoryPopover.swift in Sources */,
 				4B9D03CEC35015E2D2EDE671 /* HistoryRowView.swift in Sources */,
 				27DA80160EA290A51A2D753D /* HistoryStore.swift in Sources */,
+				E835E5EB59B0BE791DA15581 /* HistoryText.swift in Sources */,
 				B044199618E6574685E8DE96 /* HomeView.swift in Sources */,
 				1E45318BC76B3378CFC174ED /* HotkeyBinding.swift in Sources */,
 				1F9E6C413FB5AE9A3CF7CE5D /* HotkeyMonitor.swift in Sources */,
@@ -1185,6 +1192,7 @@
 				2283C784BEF9CAC4F8D3269F /* HallucinationLengthGateTests.swift in Sources */,
 				4CD733DF35C6C2C011A9526B /* HistoryRowActionsTests.swift in Sources */,
 				E4E8A5B9F039D2955C638E69 /* HistoryStoreTests.swift in Sources */,
+				AB49316E00BB440AA88DD7A3 /* HistoryTextTests.swift in Sources */,
 				54A8991344936DDA0360CFE2 /* HotkeyBindingTests.swift in Sources */,
 				19A54BD2636F93E7F0F16357 /* HotkeyMonitorTests.swift in Sources */,
 				9D488883F836082882A9E4F1 /* InsertionTargetTests.swift in Sources */,

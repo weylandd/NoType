@@ -99,9 +99,9 @@ final class MissingKeyHUDRetryTests: XCTestCase {
         // below owns.
         XCTAssertNil(
             NoTypeErrorKind.pasteWithheld(
-                entry: Self.entry(text: RecordingSession.failureMarker),
+                entry: Self.entry(text: RecordingSession.failureMarker, failedChunkCount: 1),
                 summary: Self.summary(failed: 1, dispatched: 2, withheld: true)
-            ).retryHandler,
+            , replacements: []).retryHandler,
             "A transcript of nothing but gap markers still ships a Copy handler — the row itself offers no copy button for it."
         )
     }
@@ -125,17 +125,27 @@ final class MissingKeyHUDRetryTests: XCTestCase {
 
     /// The notice's `entry` supplies the Copy string, which this file never
     /// reads — but since the 2026-08-11 ruling it also decides *whether*
-    /// the Copy button exists at all, so `text` is a parameter: a
-    /// transcript of nothing but gap markers is one the history row won't
-    /// copy, and the notice matches it. What the copy actually places, and
-    /// the agreement with the row, are pinned in `AppStateFocusNoticeTests`.
-    private static func entry(text: String = "the transcript") -> HistoryEntry {
+    /// the Copy button exists at all, so the shape is parameterised: a row
+    /// whose every position is a gap is one the history row won't copy,
+    /// and the notice matches it. What the copy actually places, and the
+    /// agreement with the row, are pinned in `AppStateFocusNoticeTests`.
+    ///
+    /// **`failedChunkCount` is what makes it a gaps-only row, not the
+    /// text.** Since the sequence became the row's source of truth, a row
+    /// storing the literal `[…]` with a count of zero is a row where the
+    /// user *dictated* those characters (R12's fourth case) — one text
+    /// segment, and genuinely worth copying.
+    private static func entry(
+        text: String = "the transcript",
+        failedChunkCount: Int = 0
+    ) -> HistoryEntry {
         HistoryEntry(
             id: UUID(),
             text: text,
             sourceAppName: "Slack",
             sourceBundleID: "com.tinyspeck.slackmacgap",
-            timestamp: Date()
+            timestamp: Date(),
+            failedChunkCount: failedChunkCount
         )
     }
 
@@ -164,7 +174,7 @@ final class MissingKeyHUDRetryTests: XCTestCase {
         //      hand-written with defaulted trailing parameters, so one
         //      costs four arguments and the skip no longer pays for
         //      itself. Its payload deliberately has no `retryLabel`.
-        //   6. `.pasteWithheld(entry:summary:)` — in `kinds` below, and
+        //   6. `.pasteWithheld(entry:summary:replacements:)` — in `kinds` below, and
         //      the first entry since `.missingAPIKey` that *does* ship a
         //      `retryLabel`. **This is why the guard exists, not an
         //      exception to it**: the regression it catches is a label
@@ -216,16 +226,16 @@ final class MissingKeyHUDRetryTests: XCTestCase {
             // Both gap outcomes: the flag changes the description only,
             // but a future change that gave the gapless variant a
             // different action would otherwise sweep past unnoticed.
-            .pasteWithheld(entry: Self.entry(), summary: Self.summary(failed: 0, dispatched: 3, withheld: true)),
-            .pasteWithheld(entry: Self.entry(), summary: Self.summary(failed: 2, dispatched: 4, withheld: true)),
-            // ...and both sides of the conditional gate. This entry's
-            // transcript is nothing but a gap marker, so the row offers no
-            // copy button and neither does the notice — the `else` limb
-            // below is what holds it to that.
+            .pasteWithheld(entry: Self.entry(), summary: Self.summary(failed: 0, dispatched: 3, withheld: true), replacements: []),
+            .pasteWithheld(entry: Self.entry(), summary: Self.summary(failed: 2, dispatched: 4, withheld: true), replacements: []),
+            // ...and both sides of the conditional gate. Every position in
+            // this entry's sequence is a gap, so the row offers no copy
+            // button and neither does the notice — the `else` limb below
+            // is what holds it to that.
             .pasteWithheld(
-                entry: Self.entry(text: RecordingSession.failureMarker),
+                entry: Self.entry(text: RecordingSession.failureMarker, failedChunkCount: 1),
                 summary: Self.summary(failed: 1, dispatched: 2, withheld: true)
-            ),
+            , replacements: []),
         ]
         for kind in kinds {
             if kind.payload.retryLabel != nil {

@@ -17,6 +17,15 @@ struct HistoryRowView: View {
     /// R14's recording exclusion and R13's one-run-at-a-time gate into a
     /// single answer only `AppState` can give.
     var canRetry: Bool = false
+    /// The user's *current* replacement pairs — `AppState.dictionaryReplacements`,
+    /// the observable mirror, threaded down verbatim by both surfaces
+    /// (R5). They are applied to the assembled row at render time rather
+    /// than baked into what was stored, so editing or deleting a pair
+    /// changes how rows already on disk read (AE7). Reading them from a
+    /// store here instead would make the row impure and stop SwiftUI
+    /// re-rendering on an edit; deriving them per surface is the drift
+    /// `NoType/UI/CLAUDE.md`'s threading rule names.
+    var replacements: [DictionaryReplacement] = []
     var onRetry: (() -> Void)? = nil
     var onDelete: (() -> Void)? = nil
 
@@ -77,12 +86,14 @@ struct HistoryRowView: View {
     private var actionsVisible: Bool { entry.isBroken || isRetrying || isHovered }
 
     private var actions: [RowAction] {
-        Self.actions(
-            isBroken: entry.isBroken,
-            canRetry: canRetry,
-            text: entry.text,
-            isRetrying: isRetrying
-        )
+        Self.actions(entry: entry, canRetry: canRetry, isRetrying: isRetrying)
+    }
+
+    /// The one string this row shows and copies (R4 → R5 → R6). Computed
+    /// per render from the stored sequence and the *current* pairs — see
+    /// `HistoryText.rendered`.
+    private var shownText: String {
+        HistoryText.rendered(entry, replacements: replacements)
     }
 
     // MARK: Sub-views
@@ -145,7 +156,7 @@ struct HistoryRowView: View {
     }
 
     private var transcriptText: some View {
-        Text(Self.displayText(for: entry))
+        Text(shownText)
             .font(.system(size: 12.5))
             .foregroundStyle(isDimmed ? DS.Color.textQuaternary : DS.Color.textSecondary)
             .lineLimit(isExpanded ? nil : 3)
@@ -172,12 +183,10 @@ struct HistoryRowView: View {
 
     private func copyToClipboard() {
         NSPasteboard.general.clearContents()
-        // What the user sees is what they get. Identical to `entry.text`
-        // wherever copy is actually offered — the action set gates copy on
-        // the *stored* text being non-empty, and `displayText` only
-        // synthesises anything when that text is empty — but going through
-        // the same accessor keeps the two from drifting.
-        NSPasteboard.general.setString(Self.displayText(for: entry), forType: .string)
+        // R6: the *same* property the transcript above renders, not a
+        // second derivation that happens to agree. Display and copy are
+        // one string by construction.
+        NSPasteboard.general.setString(shownText, forType: .string)
         copied = true
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(1.5))
@@ -190,6 +199,11 @@ struct HistoryRowView: View {
     // Both of these are `nonisolated static` so `HistoryRowActionsTests`
     // can pin them without a running view — this project ships no UI
     // tests, so a pure seam is the only way these get proved at all.
+    //
+    // What the row *shows* is no longer one of them: it is
+    // `HistoryText.rendered`, which lives beside `HistoryEntry` because
+    // `StatsStore` needs the same string and cannot reach into the UI
+    // module for it (R13).
 
     /// The three things a row can offer. Declaration order is render
     /// order, matching the design's markup (retry, copy, delete).
@@ -199,11 +213,14 @@ struct HistoryRowView: View {
 
     /// What a row offers, per R10 and R13.
     ///
-    /// Takes the row's **stored text**, not a caller-derived `hasText`
-    /// flag. Two of the three actions turn on different readings of that
-    /// string — "is any of it worth copying" and "can a recovery land in
-    /// it" — and a boolean parameter puts both derivations in the caller,
-    /// where no test reaches them.
+    /// Takes the **entry**, not caller-derived flags. Two of the three
+    /// actions turn on readings of the row's own stored sequence — "is
+    /// any of it worth copying" and "is it broken" — and a boolean
+    /// parameter puts those derivations in the caller, where no test
+    /// reaches them and the two surfaces can drift. `canRetry` and
+    /// `isRetrying` stay parameters because they are facts only
+    /// `AppState` can give: that is the line `NoType/UI/CLAUDE.md`'s
+    /// threading rule draws.
     ///
     /// - `isRetrying` wins outright: a run in flight offers no retry (one
     ///   run at a time) and deliberately no cancel (KTD7); delete is the
@@ -214,102 +231,71 @@ struct HistoryRowView: View {
     ///   Withholding copy from visible text for an uncancellable run
     ///   would be a worse trade than diverging from a mock that never
     ///   depicted this state.
-    /// - `retry` needs somewhere for a recovery to *land*, which is what
-    ///   `RetryMerge.canAcceptRecovery` decides. `isBroken` alone does
-    ///   not: it reads a persisted count, and a row can be broken with
-    ///   its markers rewritten out from under it (`RetryMerge`'s header
-    ///   documents that `TextReplacementEngine` reaches the `…` inside
-    ///   `[…]`). Every retry on such a row is billed and settles straight
-    ///   onto R19's nothing-recovered exit.
+    /// - `retry` needs a gap and the audio behind it, and **that is now
+    ///   the whole test** (R8). It used to carry a third term —
+    ///   `RetryMerge.canAcceptRecovery`, "is there still a marker in the
+    ///   text for a recovery to land in" — because a replacement pair on
+    ///   the ellipsis could erase every `[…]` from the stored string and
+    ///   leave a broken row no retry could write into. That was a
+    ///   mitigation for the storage defect, not a rule: it hid the
+    ///   user's recovery instead of fixing the model. A gap is a position
+    ///   in `segments` now, and a pair applied at render time cannot
+    ///   reach it, so the term has nothing left to protect against and is
+    ///   gone (AE1).
     /// - `copy` asks whether anything but gaps survived, via
     ///   `hasCopyableText` below — hoisted out of this body because the
     ///   withheld-paste notice asks the same question about the same row
-    ///   and must not spell it a second time. So a row storing bare
-    ///   `[…] […]` reads the same as one storing `""`: both render
-    ///   markers, and neither is worth putting on the clipboard (AE4).
+    ///   and must not spell it a second time. So a row whose every
+    ///   segment is a gap reads the same as one that recovered nothing:
+    ///   both render markers, and neither is worth putting on the
+    ///   clipboard (AE4).
     nonisolated static func actions(
-        isBroken: Bool,
+        entry: HistoryEntry,
         canRetry: Bool,
-        text: String,
         isRetrying: Bool
     ) -> [RowAction] {
-        let copyable = hasCopyableText(text)
+        let copyable = hasCopyableText(entry)
         if isRetrying { return copyable ? [.copy, .delete] : [.delete] }
         var out: [RowAction] = []
-        if isBroken && canRetry && RetryMerge.canAcceptRecovery(text) { out.append(.retry) }
+        if entry.isBroken && canRetry { out.append(.retry) }
         if copyable { out.append(.copy) }
         out.append(.delete)
         return out
     }
 
-    /// Whether a row storing this text has anything worth putting on the
-    /// clipboard — the `.copy` term of `actions(...)` above, and the whole
-    /// of it.
+    /// Whether this row has anything worth putting on the clipboard — the
+    /// `.copy` term of `actions(...)` above, and the whole of it.
+    ///
+    /// **Derived from the sequence, not from splitting the rendered string
+    /// on the marker.** That is the same inversion R8 makes above: a
+    /// replacement pair rewrites how a gap *looks*, so any predicate that
+    /// finds gaps by looking for `[…]` in text answers differently once
+    /// the user adds a pair on the ellipsis. Asking the segments instead
+    /// makes the answer independent of the pair list — which is also why
+    /// this takes no `replacements` argument, and why the notice and the
+    /// row cannot disagree about it even if they render with different
+    /// lists.
+    ///
+    /// A segment holding whitespace-only text counts as nothing, for the
+    /// same reason `RetryMerge.isEmptyText` trims: a row rendering a lone
+    /// space is empty to the user in every sense that matters.
     ///
     /// Named and hoisted out of `actions`' body because it has a **second
-    /// caller outside this view**: `NoTypeErrorKind.pasteWithheld`'s notice
-    /// offers Copy iff the row it points at does (the 2026-08-11 ruling —
-    /// the notice and the row must not disagree about the same entry, which
-    /// is the same reason R30 routes the copied string through
-    /// `displayText(for:)`). That caller must not re-spell this test;
-    /// `NoType/UI/CLAUDE.md`'s threading rule puts predicates over the row's
-    /// own fields *here*, where one edit reaches every surface and a test
-    /// reaches the predicate.
-    ///
-    /// `RetryMerge.priors` already splits on `failureMarker`, trims, and
-    /// drops empties, so a row storing bare `[…] […]` reads the same as one
-    /// storing `""`: both render markers and neither is worth copying (AE4).
-    ///
-    /// **A consequence worth knowing before relying on `displayText`
-    /// diverging from `entry.text` anywhere:** `displayText` synthesises
-    /// markers only when the stored text is empty, and empty text is not
-    /// copyable — so wherever copy *is* offered, the two strings are equal.
-    nonisolated static func hasCopyableText(_ text: String) -> Bool {
-        !RetryMerge.priors(from: text).isEmpty
+    /// caller outside this view**: `NoTypeErrorKind.pasteWithheld`'s
+    /// notice offers Copy iff the row it points at does (the 2026-08-11
+    /// ruling — the notice and the row must not disagree about the same
+    /// entry, which is the same reason R30 routes the copied string
+    /// through `HistoryText.rendered`). That caller must not re-spell this
+    /// test; `NoType/UI/CLAUDE.md`'s threading rule puts predicates over
+    /// the row's own fields *here*, where one edit reaches every surface
+    /// and a test reaches the predicate.
+    nonisolated static func hasCopyableText(_ entry: HistoryEntry) -> Bool {
+        entry.segments.contains { segment in
+            guard let text = segment.text else { return false }
+            return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
     }
 
-    /// What the row shows for its transcript.
-    ///
-    /// A broken row renders exactly what the user was handed at paste
-    /// time: the transcript with `RecordingSession.failureMarker`
-    /// (`[…]`) sitting where each failed chunk's text should have been.
-    /// A session that recovered *nothing* was never pasted and stores an
-    /// empty string, so its markers are synthesised here rather than
-    /// stored.
-    ///
-    /// **Why synthesise instead of storing them.** That empty string is
-    /// load-bearing storage, not an oversight: `isBroken && text.isEmpty`
-    /// is how "lifetime stats never counted this session" is represented
-    /// (R15 / KTD7 — see `RecordingSession.brokenHistoryEntry()`, whose
-    /// doc-comment warns in as many words that seeding the row with
-    /// markers would make every recovered session double-count).
-    ///
-    /// **Why it does not drift from the retry path.** The synthesis is
-    /// `TextInjector.stitchChunks` over N markers — the same call
-    /// `RetryMerge`'s empty-text branch makes — so substituting a
-    /// recovery into what the user saw and merging it into the stored
-    /// empty string produce the same string, and the row does not reflow
-    /// the moment a retry lands its first chunk. That agreement is why
-    /// the branch is chosen by `RetryMerge.isEmptyText` and not by a
-    /// second, locally-spelled `.isEmpty`: the two disagreed on
-    /// whitespace-only text, which would have rendered a blank row that
-    /// then visibly reflowed into full markers on the first landed chunk
-    /// — the exact reflow this design claims to prevent.
-    ///
-    /// **Not the same question as the stats gate**, despite the shared
-    /// shape. `AppState.settleRetry` asks `row.isBroken && row.text.isEmpty`
-    /// *untrimmed* on purpose: it means "this row came from
-    /// `brokenHistoryEntry()` and was therefore never counted", and a
-    /// whitespace-only row that *pasted* was counted at paste time, so
-    /// loosening that one would let a retry count the session twice.
-    /// Rendering asks a different question — "is there anything here for
-    /// the user to read" — and trims.
-    nonisolated static func displayText(for entry: HistoryEntry) -> String {
-        guard entry.isBroken, RetryMerge.isEmptyText(entry.text) else { return entry.text }
-        return TextInjector.stitchChunks(
-            Array(repeating: RecordingSession.failureMarker, count: entry.failedChunkCount)
-        )
-    }
 }
 
 // MARK: - Broken / retrying leading slots

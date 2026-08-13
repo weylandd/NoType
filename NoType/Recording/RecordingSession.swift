@@ -375,6 +375,23 @@ final class RecordingSession {
         /// `nil` when nothing was frontmost at the stop, or when the freeze
         /// never ran.
         let pasteDestinationAppName: String?
+        /// The finalized transcript `stop()` produced — the exact string
+        /// it pasted, or would have pasted on the withheld arm (R15).
+        ///
+        /// Carried here because it exists nowhere else once the row stops
+        /// storing it as its display text: `HistoryEntry` holds raw
+        /// segments plus a legacy `text` mirror, and the string a reader
+        /// assembles from those segments is neither insertion-normalised
+        /// nor frozen to the pairs this session ran with. The dictionary
+        /// harvester wants the real one. See
+        /// `RecordingSession.finalizedTranscript`.
+        ///
+        /// `""` for a session that threw before the paste — the broken-row
+        /// path reads this summary too, and there is no transcript there
+        /// to describe.
+        ///
+        /// **Never log it** — it is the user's speech, verbatim.
+        let finalizedTranscript: String
 
         var hasFailures: Bool { failedChunkCount > 0 }
 
@@ -391,7 +408,8 @@ final class RecordingSession {
             model: GeminiModel,
             retained: RetainedRecording? = nil,
             pasteWithheldForDestinationChange: Bool = false,
-            pasteDestinationAppName: String? = nil
+            pasteDestinationAppName: String? = nil,
+            finalizedTranscript: String = ""
         ) {
             self.failedChunkCount = failedChunkCount
             self.dispatchedChunkCount = dispatchedChunkCount
@@ -400,6 +418,7 @@ final class RecordingSession {
             self.retained = retained
             self.pasteWithheldForDestinationChange = pasteWithheldForDestinationChange
             self.pasteDestinationAppName = pasteDestinationAppName
+            self.finalizedTranscript = finalizedTranscript
         }
     }
 
@@ -714,6 +733,27 @@ final class RecordingSession {
     /// `SessionSummary` for `AppState` (KTD7). Stays `false` for every
     /// session that pasted, including one that never reached the gate.
     private var pasteWithheldForDestinationChange = false
+    /// The string `stop()` handed to the paste — stitched, boundary-
+    /// normalised for insertion, and with the session's frozen
+    /// replacement pairs applied. Set immediately before the paste gate,
+    /// so it holds on the withheld arm too: nothing was pasted there, but
+    /// this is still the string that *would* have been, and the
+    /// distinction matters to nobody downstream.
+    ///
+    /// **It exists so the dictionary harvester keeps its input (R15).**
+    /// The harvester intersects what the user actually said with what was
+    /// on screen, and until this unit it read `HistoryEntry.text` — which
+    /// was that same string. It no longer is: a row now assembles from
+    /// raw segments and takes the user's *current* pairs at render time,
+    /// so `entry.text` is a legacy mirror and the assembled string is
+    /// neither insertion-normalised nor frozen to the session's pairs.
+    /// Harvesting from it would quietly change which terms are learned.
+    /// Riding `SessionSummary` (KTD7's defaulted-field channel) is what
+    /// gets the real string to `AppState` without widening `stop()`'s
+    /// return type.
+    ///
+    /// **Never log it** — it is the user's speech, verbatim.
+    private var finalizedTranscript = ""
     /// Find/replace pairs to apply between `finalizeForInsertion` and
     /// `paste`. Captured from `DictionaryContext` at session start and
     /// frozen — independent of `contextTask` so a quick-release session
@@ -1154,7 +1194,8 @@ final class RecordingSession {
             model: modelFrozen,
             retained: retained,
             pasteWithheldForDestinationChange: pasteWithheldForDestinationChange,
-            pasteDestinationAppName: destinationAppName
+            pasteDestinationAppName: destinationAppName,
+            finalizedTranscript: finalizedTranscript
         )
     }
 
@@ -1203,11 +1244,12 @@ final class RecordingSession {
     ///   returned; `TextInjector.finalizeForInsertion` and
     ///   `TextReplacementEngine.apply` run on the stitched whole, on the
     ///   paste path, and never touch these. The row's `text` mirror is
-    ///   post-replacement, the segments are not, and that is the point —
-    ///   the user's *current* pairs are to be applied when a row is
-    ///   displayed. Note the tense: this unit only stores the raw text.
-    ///   The render-time pass that reads it is a later unit's, and until it
-    ///   lands every display and copy path still reads the `text` mirror.
+    ///   post-replacement, the segments are not, and that is the point:
+    ///   the user's *current* pairs are applied when a row is displayed
+    ///   or copied, by `HistoryText.rendered`. So editing a pair changes
+    ///   how rows already on disk read, and a pair whose phrase spans a
+    ///   chunk seam still matches — neither of which per-chunk
+    ///   substitution at write time could do (KD2).
     /// - A chunk the hallucination gate filtered stays a **text segment
     ///   holding `""`**, not a gap (R19, R27). The gate stores `""` (not
     ///   `nil`) precisely so a call that answered can be told apart from
@@ -1228,11 +1270,13 @@ final class RecordingSession {
     /// dispatched chunk failed recoverably (R6, KTD3).
     ///
     /// **The text is empty on purpose, and that emptiness is load-bearing
-    /// twice over.** It is what `HistoryRowView.displayText(for:)` turns
-    /// into one `failureMarker` per failed chunk at render time (R9 as
-    /// superseded — the row shows `[…] […]`, not placeholder bars), and
-    /// it is how "lifetime stats never counted this session" is
-    /// represented (R15 / KTD7).
+    /// — but only once now.** It remains how "lifetime stats never
+    /// counted this session" is represented (R15 / KTD7). It no longer
+    /// decides what the row *shows*: the markers used to be synthesised
+    /// from `failedChunkCount` because the stored string carried none,
+    /// and `HistoryText.assemble` now renders one per gap segment
+    /// straight from the sequence this factory already stores. The two
+    /// encodings of a gap have collapsed into one (AE2).
     ///
     /// The exact invariant, because U6's accounting rests on it and the
     /// looser version of this sentence is false: **no row that is both
@@ -1474,6 +1518,14 @@ final class RecordingSession {
         // at session start; that way a Dictionary-tab edit during a
         // session doesn't perturb the result.
         let final = TextReplacementEngine.apply(finalRaw, replacements: replacementsFrozen)
+        // R15. This string used to survive as `HistoryEntry.text` and be
+        // read back from there by the dictionary harvester; the row now
+        // stores raw segments, so the harvester's input has to travel on
+        // its own channel (KTD7's defaulted `SessionSummary` field).
+        // Recorded here rather than after the paste gate so it holds on
+        // the withheld arm too — nothing was pasted there, but this is
+        // still what the user said.
+        finalizedTranscript = final
 
         // Re-check the cancellation latch immediately before committing
         // the paste. `cancel()` installs `failure` as its first statement,
