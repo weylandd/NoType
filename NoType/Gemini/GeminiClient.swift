@@ -61,11 +61,17 @@ actor GeminiClient {
             // offline, timeout and DNS indistinguishable in Console.
             //
             // Deliberately gated on the `URLError code=` prefix rather than
-            // on `s == 0` alone, so it is provably log-only: the only other
-            // producer of a status-0 error is `validateKey`'s
-            // "no HTTPURLResponse" body, which has no prefix, keeps the
-            // generic rendering, and is the one status-0 shape that reaches
-            // a user-facing surface (`GeminiKeyRow.errorMessage`).
+            // on `s == 0` alone, so it is provably log-only. The remaining
+            // producers of a *prefix-less* status-0 error are the two
+            // no-`HTTPURLResponse` guards that sit off the transcription
+            // path — `classifyApp`'s (fire-and-forget, log-only) and
+            // `validateKey`'s, which is the one status-0 shape that reaches
+            // a user-facing surface (`GeminiKeyRow.errorMessage`,
+            // `OnboardingAPIKeyStep`). `performOnce`'s guard used to be a
+            // third and is not any more: it throws through `wrapURLError`,
+            // so every status-0 error a *transcription* call can produce
+            // carries the prefix and is parseable by
+            // `NetworkErrorTranslator.parse`.
             case .http(let s, let body) where s == 0 && body.hasPrefix(Self.urlErrorBodyPrefix):
                 "Gemini network failure — \(body)"
             case .http(let s, let body):
@@ -78,10 +84,15 @@ actor GeminiClient {
         }
 
         /// Prefix of the `body` every wrapped `URLError` carries. Read by
-        /// `NetworkErrorTranslator.extractURLErrorCode` (which recovers the
-        /// numeric code for the HUD) and by the status-0 arm of
-        /// `errorDescription` above. Declared once so the producer
-        /// (`wrapURLError`) and the two consumers cannot drift.
+        /// `NetworkErrorTranslator.parse` (which recovers **both** the
+        /// numeric code and the OS sentence for the HUD) and by the
+        /// status-0 arm of `errorDescription` above. Declared once so the
+        /// producer (`wrapURLError`) and the two consumers cannot drift.
+        ///
+        /// Note that `parse` returns the code and the sentence *together*,
+        /// deliberately: a code-only accessor was deleted in U2 because a
+        /// caller taking the code and rendering the whole body is exactly
+        /// how `URLError code=…` reached a user's screen (R17).
         static let urlErrorBodyPrefix = "URLError code="
 
         /// The single place a `URLError` becomes a `GeminiError`.
@@ -90,11 +101,20 @@ actor GeminiClient {
         /// `RecordingSession.isTerminal` calls it recoverable,
         /// `RecordingSession.shouldRetain` retains its audio, and
         /// `AppState.payloadForSessionFailure` peels the code back out of
-        /// the body for the offline / timed-out HUDs. Both producers — the
-        /// real `URLSession` failure in `performOnce` and the pre-flight
-        /// short-circuit in `sendRequest` — go through here so a
+        /// the body for the offline / timed-out HUDs. All three producers
+        /// on the transcription path — the real `URLSession` failure in
+        /// `performOnce`, its no-`HTTPURLResponse` guard, and the pre-flight
+        /// short-circuit in `sendRequest` — go through here, so a
         /// short-circuited request is byte-for-byte indistinguishable
-        /// downstream from the 30-second timeout it replaces.
+        /// downstream from the timed-out request it replaces **and** no
+        /// transcription failure can reach the HUD as a bare `status: 0`
+        /// the body parser cannot read. That third one used to bypass this
+        /// function and rendered as "Unexpected response (HTTP 0)".
+        ///
+        /// The body's second half is the OS's own sentence for the code.
+        /// That is not incidental: `AppState`'s HUD builder passes *it*,
+        /// never the whole body, so the two network paths render the same
+        /// copy and no `URLError code=…` diagnostic reaches a user.
         static func wrapURLError(_ urlError: URLError) -> GeminiError {
             .http(
                 status: 0,
@@ -104,7 +124,8 @@ actor GeminiClient {
 
         /// The error thrown when the pre-flight reachability check reports
         /// no network path. Shaped exactly like the `URLError`
-        /// `URLSession` would have produced 30 seconds later, so every
+        /// `URLSession` would have produced one inactivity budget later
+        /// (`requestInactivityBudget(audioPartCount:)`), so every
         /// downstream classifier — `isTerminal`, `shouldRetain`, the
         /// retention path, `payloadForURLErrorCode` — behaves identically.
         /// Introducing a distinct error case here instead would require
@@ -234,22 +255,201 @@ actor GeminiClient {
         return probe
     }
 
-    init() {
+    // MARK: - Request budgets
+    //
+    // Both `URLSession` timers are sized from **the number of audio parts in
+    // the request**. That axis is a measured finding, not a guess — see
+    // `requestInactivityBudget(audioPartCount:)`.
+
+    /// Fixed term of the latency model, before the safety factor: the part of
+    /// a request's wall-clock that does not scale with the audio it carries
+    /// (TLS resumption, the byte-stable cache prefix, response assembly).
+    /// Fitted at ~1.4 s; carried at 2 s after the factor. See
+    /// `requestInactivityBudget(audioPartCount:)` for the derivation.
+    nonisolated static let requestBudgetFixedOverhead: TimeInterval = 2
+
+    /// Per-audio-part term of the latency model, after the safety factor.
+    /// Fitted at ~6.5 s per part; carried at 10 s.
+    nonisolated static let requestBudgetPerAudioPart: TimeInterval = 10
+
+    /// Shortest silence this client is willing to call a stall.
+    ///
+    /// Guards the *slope*, not the part count: the measured healthy maximum
+    /// for a single part was 7.8 s, so a budget below ten seconds would start
+    /// re-issuing against ordinary API latency rather than a dead transport,
+    /// and the retry would be pure cost. It binds today only for a request
+    /// carrying no audio at all (`audioPartCount <= 0`) — a shape
+    /// `sendRequest` cannot produce, but which a future refactor could, and
+    /// which must not compute a two-second budget from the fixed term alone.
+    nonisolated static let requestBudgetFloor: TimeInterval = 10
+
+    /// Hard cap on the derived budget, whatever the part count.
+    ///
+    /// Bounds a *pathological* batch rather than serving a legitimate one.
+    /// The chunker's own limits make a batch beyond ~8 parts a defect rather
+    /// than a session (chunks pile up behind one in-flight request, and the
+    /// adaptive pause ladder cuts long enough that a handful is the realistic
+    /// maximum), and 90 s still serves 8 parts at the full safety factor.
+    /// Past that the choice is between an unbounded freeze — the hotkey is
+    /// dead for the whole wait — and a bounded failure that keeps its audio
+    /// and offers a retry. The bounded failure is recoverable; the freeze is
+    /// not.
+    nonisolated static let requestBudgetCeiling: TimeInterval = 90
+
+    /// How long a request may go **without a byte moving** before
+    /// `URLSession` fails it, as a function of how many audio parts it
+    /// carries. Applied per request via `URLRequest.timeoutInterval`.
+    ///
+    /// ## What the measurement said
+    ///
+    /// Four repetitions of each of the two shapes the 2026-08-11 field sample
+    /// lacked, against the live API with the real request shape and real AAC
+    /// encoding (2026-08-13, one machine, one network):
+    ///
+    /// | shape                  | audio | bytes  | max idle | max total |
+    /// |------------------------|-------|--------|----------|-----------|
+    /// | 4-part batch           | 159 s | 653 KB | 26.85 s  | 27.16 s   |
+    /// | 1-part 180 s force-cut | 180 s | 735 KB |  7.62 s  |  7.81 s   |
+    ///
+    /// **Latency tracks the number of audio parts — not the byte size and not
+    /// the audio duration.** The 4-part batch carries *less* audio and *fewer*
+    /// bytes than the single-part force-cut and takes roughly four times as
+    /// long. That finding is the whole reason this is a function rather than
+    /// a constant: per part the two shapes agree (5.1–7.6 s), so one number
+    /// that clears the batch would leave the common single-part request
+    /// waiting nearly four times longer than it can possibly need.
+    ///
+    /// **KTD2's stop condition fired, and the flat cut R20 asked for is
+    /// dead.** 26.85 s sits against the retired 30 s ceiling, so no single
+    /// value both helps the common case and spares a large batch.
+    ///
+    /// ## The arithmetic
+    ///
+    /// Fitting a line through the two measured maxima gives ~1.4 s fixed plus
+    /// ~6.5 s per part. Multiplying both terms by a safety factor of **1.5**
+    /// and rounding up gives `requestBudgetFixedOverhead` = 2 s and
+    /// `requestBudgetPerAudioPart` = 10 s, which clears each measured maximum
+    /// by a near-uniform **~1.55×**:
+    ///
+    /// | parts | budget | measured max | factor |
+    /// |-------|--------|--------------|--------|
+    /// | 1     | 12 s   | 7.81 s       | 1.54×  |
+    /// | 4     | 42 s   | 27.16 s      | 1.55×  |
+    ///
+    /// The factor is deliberately generous rather than tight. The sample is
+    /// four runs per shape on one machine and one network — it is a sample,
+    /// not a distribution — and the cost of being wrong is asymmetric: too
+    /// generous and the user waits, too tight and a legitimate request is
+    /// killed, which becomes a `[…]` in text **already pasted into the user's
+    /// document**, where no retry can reach it.
+    ///
+    /// What the user actually pays in the common case: a single-part request
+    /// that stalls costs `2 × 12 s` plus the 500 ms backoff — 24.5 s against
+    /// the ~60.5 s the retired ceiling cost, so R22's "the hotkey comes back
+    /// in well under half the time" holds for the single-part case. It does
+    /// **not** hold for a large batch, and that is the honest reading of AE11
+    /// now: a 4-part batch that stalls costs 2 × 42 s. The compensation is
+    /// that a batch is rarer than a single chunk and that the alternative for
+    /// it is not a shorter wait but a lost chunk.
+    ///
+    /// ## Why the inactivity timer is the right control (KTD2 step 2)
+    ///
+    /// The response is not streamed, so the entire window from the last
+    /// uploaded byte to the first response byte is idle. Upload measured
+    /// 0.06–0.31 s in **every** row — under 1.5 % of the total — so
+    /// essentially all of the wait *is* the inactivity window. This timer is
+    /// therefore a direct cap on how long a chunk may take, not merely a
+    /// stall detector, and the whole-transfer ceiling can only bind on a
+    /// trickling upload. See `resourceCeiling`.
+    ///
+    /// Hoisted out of `init` so a test can reach it at all (KTD3);
+    /// `GeminiRetryPolicyTests` pins the values, the clamps and the safety
+    /// factor against the measured maxima, and
+    /// `GeminiClientOfflineShortCircuitTests` pins that every request in this
+    /// file sets a budget of its own.
+    nonisolated static func requestInactivityBudget(audioPartCount: Int) -> TimeInterval {
+        let derived = requestBudgetFixedOverhead
+            + requestBudgetPerAudioPart * TimeInterval(max(0, audioPartCount))
+        return min(requestBudgetCeiling, max(requestBudgetFloor, derived))
+    }
+
+    /// Inactivity budget for the requests that carry no audio and therefore
+    /// sit off the axis above: `classifyApp`, which sets it explicitly, and
+    /// — as the session-configuration default — anything that neglects to.
+    /// `validateKey` narrows further to 10 s of its own.
+    ///
+    /// Held at the value the whole client used before the derivation landed,
+    /// on purpose: the classifier is a grounded (`google_search`) call whose
+    /// latency was never measured here, and shortening it would be collateral
+    /// damage from a cut aimed at transcription. It is a ceiling on a
+    /// fire-and-forget background call, not on anything the user waits for.
+    nonisolated static let auxiliaryRequestBudget: TimeInterval = 30
+
+    /// Headroom the whole-transfer ceiling leaves above the inactivity budget
+    /// for the upload itself.
+    ///
+    /// The measurement uploaded 653–735 KB in 0.06–0.31 s. Thirty seconds
+    /// covers roughly a hundredfold slower uplink (~200 kbit/s); below that a
+    /// dictation is not going to work at all. Generous on purpose — this
+    /// margin exists so the resource timer can never be the one that kills a
+    /// request the inactivity timer would have allowed.
+    nonisolated static let uploadAllowance: TimeInterval = 30
+
+    /// Whole-transfer ceiling (`timeoutIntervalForResource`): the hard cap on
+    /// a single request from first byte to last, across any number of idle
+    /// periods.
+    ///
+    /// **An additional ceiling, never a fallback** (KTD1). The two timers are
+    /// independent and whichever fires first wins, so this one cannot rescue
+    /// a request the inactivity budget has already killed — it only bounds
+    /// the case where bytes keep trickling and the inactivity timer keeps
+    /// resetting.
+    ///
+    /// **It moved, and KTD1's "leave it at 30 s" no longer holds.** The
+    /// measured max *total* for a 4-part batch is 27.16 s against a 30 s
+    /// ceiling, so a 5-part batch was already exceeding it — killing a
+    /// legitimate request and producing a silent `[…]`. That was a live
+    /// shipped defect, not a future risk.
+    ///
+    /// **Flat rather than per-request, because the platform has no
+    /// per-request knob.** `URLRequest.timeoutInterval` overrides
+    /// `timeoutIntervalForRequest` in both directions (measured), but there
+    /// is no `URLRequest` counterpart for the resource timer: with
+    /// `timeoutIntervalForResource = 3` and `URLRequest.timeoutInterval = 30`
+    /// against a stalling socket, the task failed at 3.27 s — session-level
+    /// and not overridable. So this is sized for the largest request the
+    /// budget function will ever serve (`requestBudgetCeiling`) plus the
+    /// upload allowance, which is the same axis evaluated at its maximum.
+    /// The cost of that flatness is borne only by a request whose *upload*
+    /// trickles for minutes, and the safe direction there is to let it
+    /// finish.
+    nonisolated static let resourceCeiling: TimeInterval = requestBudgetCeiling + uploadAllowance
+
+    /// The session configuration, built in one testable place so the budgets
+    /// above are provably the ones that ship. Splitting this out of `init` is
+    /// the other half of KTD3: a constant nothing can read is a constant no
+    /// test can pin, and a test that pins the constant but not its wiring
+    /// stays green when the wiring is what breaks.
+    ///
+    /// Note what `timeoutIntervalForRequest` means here now: it is only the
+    /// **default** for a request that sets no `timeoutInterval` of its own.
+    /// Every request this file builds sets one — pinned by
+    /// `GeminiClientOfflineShortCircuitTests` — so the value below is a
+    /// backstop for a future path that forgets, and it is deliberately the
+    /// auxiliary budget rather than a transcription one.
+    nonisolated static func makeSessionConfiguration() -> URLSessionConfiguration {
         let cfg = URLSessionConfiguration.default
-        cfg.timeoutIntervalForRequest = 30
-        // 30 s is the hard ceiling for *any* single request to settle.
-        // gemini-3.1-flash-lite handles a typical chunk (≤40 s of audio
-        // after the PauseDetector adaptive ladder; ~3-5 s wall-clock) in
-        // ~5 s; even the 180 s force-cut safety-net chunk (rare —
-        // requires 3 min of unbroken speech) sits comfortably under 30
-        // s of wall-clock processing. If we're still waiting at 30 s,
-        // something is wrong (Gemini outage, dead Wi-Fi, hung CDN edge)
-        // and a fast user-visible error beats waiting for a response
-        // that won't usefully come. Coupled with PauseDetector.swift —
-        // if chunk sizing increases dramatically, revisit.
-        cfg.timeoutIntervalForResource = 30
+        cfg.timeoutIntervalForRequest = auxiliaryRequestBudget
+        cfg.timeoutIntervalForResource = resourceCeiling
+        // Off on purpose: `URLSession` must fail an offline request rather
+        // than park on it indefinitely. `sendRequest`'s reachability
+        // pre-check is what turns that failure into a fast one.
         cfg.waitsForConnectivity = false
-        self.session = URLSession(configuration: cfg)
+        return cfg
+    }
+
+    init() {
+        self.session = URLSession(configuration: Self.makeSessionConfiguration())
     }
 
     /// Output of `classifyApp(...)`. The classifier may return any of
@@ -313,6 +513,12 @@ actor GeminiClient {
         // model choice doesn't change classifier cost.
         var req = URLRequest(url: Self.generateContentURL(for: .flashLite))
         req.httpMethod = "POST"
+        // Explicit rather than inherited from the session configuration: the
+        // transcription paths derive their budget from the audio-part count,
+        // and a request that silently took whatever default was left over
+        // would be a budget nobody chose. This one carries no audio, so it
+        // sits off that axis — see `auxiliaryRequestBudget`.
+        req.timeoutInterval = Self.auxiliaryRequestBudget
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(trimmedKey, forHTTPHeaderField: "x-goog-api-key")
         req.httpBody = try JSONEncoder().encode(body)
@@ -800,6 +1006,9 @@ actor GeminiClient {
     /// - HTTP 4xx other than 429: no retry; fail immediately.
     /// - `GeminiError.blocked` / `.empty` / `.decoding` / `.missingKey`:
     ///   non-retryable.
+    /// - A network-class retry additionally **drops the pooled connections**
+    ///   before re-issuing (R28 / KTD13) — see `requiresFreshConnection(after:)`
+    ///   and `flushPooledConnections()`. The other arms do not.
     ///
     /// Before any of that, a pre-flight reachability check short-circuits
     /// the call when the system reports no network path. **That throw sits
@@ -825,7 +1034,7 @@ actor GeminiClient {
         guard !trimmedKey.isEmpty else { throw GeminiError.missingKey }
 
         // Pre-flight: fail immediately when the system reports no network
-        // path, instead of parking on `timeoutIntervalForRequest` for 30 s
+        // path, instead of parking on this request's whole inactivity budget
         // (`waitsForConnectivity` is off, so `URLSession` does not fail
         // fast on its own). Conservative by construction — only a
         // definitively `.unsatisfied` path short-circuits; see
@@ -860,12 +1069,25 @@ actor GeminiClient {
 
         var req = URLRequest(url: Self.generateContentURL(for: model))
         req.httpMethod = "POST"
+        // The budget is derived here because here is where the axis it
+        // depends on — how many audio parts this request carries — is known.
+        // Per request rather than on the session configuration: a batch and a
+        // single chunk share one `URLSession`, and the measurement says they
+        // need very different budgets. Verified that this actually takes
+        // effect rather than assumed: `URLRequest.timeoutInterval` overrides
+        // `URLSessionConfiguration.timeoutIntervalForRequest` in **both**
+        // directions (against a stalling socket, config 3 s / request 9 s
+        // failed at 9.01 s, and config 9 s / request 3 s failed at 3.01 s), so
+        // a batch genuinely gets more room than the session default and not
+        // silently less.
+        req.timeoutInterval = Self.requestInactivityBudget(audioPartCount: audios.count)
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(trimmedKey, forHTTPHeaderField: "x-goog-api-key")
         req.httpBody = try JSONEncoder().encode(body)
 
         let totalAudio = audios.reduce(0) { $0 + $1.data.count }
-        Self.log.info("POST \(logID) (final=\(mayBeEmpty), audios=\(audios.count), bytes=\(totalAudio), priors=\(priorTranscripts.count))")
+        let budgetSeconds = Int(req.timeoutInterval)
+        Self.log.info("POST \(logID) (final=\(mayBeEmpty), audios=\(audios.count), bytes=\(totalAudio), priors=\(priorTranscripts.count), budget=\(budgetSeconds)s)")
 
         // Retry-loop driver. `attempt` is 1-based for log readability.
         // The number of *retries* is dictated by the error class on the
@@ -880,10 +1102,24 @@ actor GeminiClient {
                     mayBeEmpty: mayBeEmpty
                 )
             } catch let error as GeminiError {
-                let decision = retryDecision(for: error, attempt: attempt)
+                let decision = Self.retryDecision(for: error, attempt: attempt)
                 guard let delayMs = decision.delayMs else {
                     Self.log.error("\(logID) failed (attempt \(attempt), no retry): \(error.localizedDescription, privacy: .public)")
                     throw error
+                }
+                // R28 / KTD13: a network-class failure is, in the measured
+                // case, a dead *pooled connection* rather than a dead
+                // network — a request stalled for the full budget and the
+                // same payload answered in 1.7 s on a new connection
+                // moments later. Re-issuing over the socket that just went
+                // silent would re-inherit the fault and turn the retry into
+                // nothing but a second wait, so drop the pool first. This
+                // is the axis that can make the retry *succeed*, which is
+                // what distinguishes it from the longer-wait and
+                // longer-ladder alternatives KD7 rejected.
+                if Self.requiresFreshConnection(after: error) {
+                    Self.log.info("\(logID) network-class failure — dropping pooled connections before retry")
+                    await flushPooledConnections()
                 }
                 Self.log.info("\(logID) retrying after \(delayMs)ms (attempt \(attempt) → \(attempt + 1)): \(error.localizedDescription, privacy: .public)")
                 try await Task.sleep(for: .milliseconds(delayMs))
@@ -929,7 +1165,33 @@ actor GeminiClient {
         let networkMs = Int(Date().timeIntervalSince(networkStart) * 1000)
 
         guard let http = response as? HTTPURLResponse else {
-            throw GeminiError.http(status: 0, body: "no HTTPURLResponse")
+            // Wrapped like every other transport failure on this path rather
+            // than raised as a bare `http(status: 0, body: "no
+            // HTTPURLResponse")`, which is what it used to be. That bare form
+            // carried no `urlErrorBodyPrefix`, so
+            // `AppState.payloadForSessionFailure` could not parse it, it fell
+            // past the network branch into the generic HTTP arm, and the user
+            // got **"Gemini rejected the request / Unexpected response (HTTP
+            // 0)"** — a status number that is not a status, for a request that
+            // never reached Gemini at all. Photographed in the field on
+            // 0.1.13-rc2.
+            //
+            // Wrapping converges the two status-0 producers *on this path*:
+            // after this, every status-0 error a transcription call can throw
+            // carries the prefix, so `NetworkErrorTranslator.parse` never
+            // fails on one and the HUD is always chosen by URLError code. That
+            // is the same seam-level fix KTD12 chose for R17 rather than a
+            // branch at the display.
+            //
+            // `.badServerResponse` is the code because that is exactly what
+            // happened — a response arrived and was not the shape the protocol
+            // requires. Nothing downstream shifts: the case is still
+            // `.http(status: 0, …)`, so `isTerminal` still calls it
+            // recoverable, `shouldRetain` still keeps its audio, and
+            // `isNetworkClass` still admits it. Only the body changes, and
+            // `payloadForURLErrorCode` gives the code its own branch so it
+            // never reaches the `default:` arm's synthesized sentence.
+            throw GeminiError.wrapURLError(URLError(.badServerResponse))
         }
 
         if http.statusCode != 200 {
@@ -1004,12 +1266,18 @@ actor GeminiClient {
         return (trimmed, TokenUsage(from: parsed.usageMetadata))
     }
 
+    /// One failed attempt's place on the retry ladder. `delayMs == nil`
+    /// means "don't retry, propagate".
+    ///
+    /// Widened past `private` with `retryDecision` below, deliberately
+    /// (KTD3) — the ladder was unreachable from a test, so the change that
+    /// alters it is also the change that makes it provable.
+    struct RetryDecision { let delayMs: Int? }
+
     /// Classifies a Gemini error into a retry decision. `delayMs == nil`
     /// means "don't retry, propagate". `attempt` is the 1-based count of
     /// the attempt that just failed.
-    private struct RetryDecision { let delayMs: Int? }
-
-    private func retryDecision(for error: GeminiError, attempt: Int) -> RetryDecision {
+    nonisolated static func retryDecision(for error: GeminiError, attempt: Int) -> RetryDecision {
         switch error {
         case .missingKey, .blocked, .empty, .decoding, .truncated:
             // `.truncated` re-issues identically → same cap hit; no point
@@ -1036,6 +1304,68 @@ actor GeminiClient {
                 // 4xx other than 429 (401, 403, 400, 404, …) — never retry.
                 return RetryDecision(delayMs: nil)
             }
+        }
+    }
+
+    /// Does this failure mean the retry must not reuse the connection that
+    /// produced it? (R28 / KTD13.)
+    ///
+    /// Exactly the status-0 class. That is where `performOnce` wraps every
+    /// `URLError` — and also where it reports a non-`HTTPURLResponse`
+    /// response, which is unreachable for an `https://` endpoint, so
+    /// folding it in costs nothing and keeps this a single equality rather
+    /// than a body sniff. A 429 or a 5xx came *back* from Gemini over a
+    /// demonstrably working connection, so dropping the pool for those
+    /// would buy a fresh TCP + TLS handshake and fix nothing.
+    ///
+    /// **Its twin is `RecordingSession.isNetworkClass(_:)`**, which asks the
+    /// same question one layer up to bound `splitRetry`. They are separate
+    /// because they answer for different consumers, but they must agree on
+    /// what "network class" *means* — widen one and you have to widen the
+    /// other, and adjacency cannot enforce that across a module boundary.
+    /// `GeminiRetryPolicyTests` pins them equal across the status space
+    /// instead. Distinct from the other two classifiers this sits beside:
+    /// it answers "is the pipe suspect", not "should we retry"
+    /// (`retryDecision`) and not "what does this mean for the session"
+    /// (`RecordingSession.isTerminal`).
+    ///
+    /// Swept over the status space by `GeminiRetryPolicyTests` rather than
+    /// enumerated case by case, so a new status cannot quietly land in the
+    /// wrong class.
+    nonisolated static func requiresFreshConnection(after error: GeminiError) -> Bool {
+        if case .http(let status, _) = error { return status == 0 }
+        return false
+    }
+
+    /// Drops `URLSession`'s idle pooled connections so the next request
+    /// opens a new one. `flush(completionHandler:)` is the documented
+    /// primitive for this; there is no async spelling of it, hence the
+    /// bridge.
+    ///
+    /// **Safe while a sibling request is outstanding — and invariant I1 is
+    /// not the reason.** I1 bounds one *recording* session's transcription
+    /// traffic to one in-flight request; it says nothing about
+    /// `classifyApp` and `validateKey`, which share this same `session` and
+    /// bypass `sendRequest` entirely. `classifyApp` is fire-and-forget
+    /// launched by the recording-start path itself, so a sibling request is
+    /// the normal case here, not a corner. What makes the call safe is the
+    /// primitive: `flush` clears the idle connection cache and affects only
+    /// *future* requests; it does not cancel or disturb tasks already
+    /// running. **Do not substitute `reset(completionHandler:)` or
+    /// `invalidateAndCancel()`** — those do disturb concurrent work, and
+    /// nothing in this file would stop them.
+    ///
+    /// The bridge is deliberately unbounded and not cancellation-aware.
+    /// `flush` does local work (cache plus cookie/credential storage), not
+    /// network I/O, so there is no transport to hang on — and a
+    /// `RecordingSession.withDeadline`-style race would not bound it
+    /// anyway: a task group awaits every child at scope exit, and
+    /// `cancelAll()` cannot interrupt a continuation only the completion
+    /// handler can resume. A real bound would need an unstructured task,
+    /// which is not worth it for a local flush.
+    private func flushPooledConnections() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            session.flush { continuation.resume() }
         }
     }
 

@@ -121,6 +121,160 @@ final class RecordingSession {
         failureIsSet || taskIsCancelled
     }
 
+    /// Pure gate: has the user moved to a different application since
+    /// they stopped dictating, so that pasting would edit a document
+    /// they never meant to touch? Extracted so
+    /// `RecordingSessionFocusGuardTests` can pin the table without
+    /// standing up a full session.
+    ///
+    /// Returns `true` — withhold the paste — iff **both** identifiers are
+    /// known and they differ.
+    ///
+    /// **The destination is frozen at the *stop*, not at session start.**
+    /// Product ruling (2026-08-11): the transcript belongs wherever the
+    /// cursor was when the user pressed stop. Freezing at start broke
+    /// hands-free dictation outright — with the recording locked, a user
+    /// who starts talking in one application, walks to another and taps
+    /// to stop there is *deliberately* aiming at the second one, and a
+    /// start-frozen identity withheld that paste every single time, so a
+    /// whole hands-free dictation delivered nothing. What KD8 protects
+    /// against is untouched: a transcript is still withheld when the user
+    /// moves away **during transcription**, which is the long wait this
+    /// guard exists for. Only moving around *during recording* stopped
+    /// costing the delivery. `AppState.finalizeRecording` performs the
+    /// freeze via `freezePasteDestination(_:)`.
+    ///
+    /// **Conservative by construction.** An unknown identifier on either
+    /// side pastes. A missing fact is never evidence of a mismatch, and
+    /// the failure modes are not symmetric: a wrong withhold silently
+    /// swallows an ordinary dictation every time the frontmost app can't
+    /// be read, whereas the case this gate exists for is rare and
+    /// recoverable from the history row. `NSWorkspace` answers `nil` when
+    /// nothing is frontmost (stored as `0`), and
+    /// `NSRunningApplication.processIdentifier` is documented to answer
+    /// `-1` when it has no pid for the application. So "known" is
+    /// `> 0` rather than "non-zero": a plain `!=` comparison would read
+    /// the `-1` sentinel as a live mismatch and withhold against it.
+    ///
+    /// **Process identity, not bundle identity** (KD9): an application
+    /// that quits and relaunches mid-transcription counts as changed,
+    /// which is the accepted cost of not pasting into a fresh process
+    /// whose document state has nothing to do with what the user saw.
+    /// **Window identity is not considered** (R26): two windows of one
+    /// process share a pid and therefore compare equal.
+    ///
+    /// NoType itself being frontmost — the user opened the popover while
+    /// waiting — withholds like any other mismatch. There is deliberately
+    /// no self-carve-out: it is not the process they stopped in.
+    ///
+    /// **The stop-moment freeze adds the mirror case, and it is not the
+    /// same case.** A user who *stops* with NoType frontmost makes NoType
+    /// the destination, so if they are still there at paste time nothing
+    /// mismatches and ⌘V lands in whatever field they left focused —
+    /// dictating into our own Dictionary or Instructions fields works, and
+    /// a popover left open swallows the paste into nothing. Both follow
+    /// from the rule rather than escaping it: NoType is only ever the
+    /// destination when the user deliberately put it in front, and the
+    /// transcript is in history either way. Do not "fix" this by excluding
+    /// our own pid — that reintroduces a withhold for a place the user
+    /// chose, which is the shape the 2026-08-11 ruling reversed.
+    ///
+    /// **That absence is only safe because NoType's own windows never
+    /// take frontmost by themselves.** `HUDPanel` is a
+    /// `.nonactivatingPanel` that refuses both key and main, so the
+    /// transcribing HUD on screen during *every* session cannot make
+    /// this gate fire; only a deliberate click on NoType can. If that
+    /// panel configuration ever regresses, this gate stops being rare —
+    /// it withholds every dictation, silently. Anything that makes a
+    /// NoType window activate on its own has to be weighed here first.
+    ///
+    /// **This is not `shouldAbortBeforePaste`, and must not be folded
+    /// into it** (KTD6). That gate aborts by *throwing*, which routes
+    /// `stop()` into `finalizeRecording`'s catch arm and writes no
+    /// history row at all. Here the transcript is good and the user must
+    /// keep it (R24): the caller skips only the paste and falls through
+    /// to the entry build and `history.append` unchanged.
+    nonisolated static func shouldWithholdPaste(
+        destinationPID: pid_t,
+        currentPID: pid_t
+    ) -> Bool {
+        guard destinationPID > 0, currentPID > 0 else { return false }
+        return destinationPID != currentPID
+    }
+
+    /// Pure gate: was this session's cursor context read in a *different*
+    /// application than the one the transcript is going to land in — so
+    /// that `TextInjector.finalizeForInsertion` would be correcting the
+    /// paste against another document's text?
+    ///
+    /// Returns `true` — discard the context and hand
+    /// `finalizeForInsertion` `InsertionTarget.unknown` instead — iff
+    /// **both** identifiers are known and they differ.
+    ///
+    /// **Why this exists.** `InsertionTarget` is captured once, in the
+    /// context phase of `start()`, from the focused field of whatever
+    /// application was frontmost then (`NoType/Context/CLAUDE.md`
+    /// invariant 6). Under the 2026-08-11 product ruling the transcript no
+    /// longer necessarily lands there: a hands-free locked dictation
+    /// starts in application A, walks to B, and stops — and is delivered
+    /// into B. `textBefore` / `textAfter` then describe A's document while
+    /// the paste happens in B's, and both of `finalizeForInsertion`'s
+    /// corrections become guesses about the wrong text. One of them is
+    /// destructive: it **strips a sentence-final `.` / `!` / `?`** when
+    /// `textAfter` looks like the middle of a sentence, so a period the
+    /// user dictated is silently deleted on the strength of a character
+    /// read out of an entirely different window. The maintainer's ruling:
+    /// "if I started recording in one window and pressed stop in a
+    /// different window, then everything has already changed, and those
+    /// formatting corrections should not be applied."
+    ///
+    /// **Why `.unknown` and not `.empty`.** `.unknown` is precisely "we do
+    /// not know what is around the cursor" — the branch that already
+    /// exists for Electron and web-views, where `kAXValueAttribute` is not
+    /// exposed. It prepends the defensive leading space and skips the
+    /// trailing-punctuation strip, which is exactly the right behaviour
+    /// under the same uncertainty. `.empty` would be a *claim* that the
+    /// field is empty: it suppresses the leading space and re-enables the
+    /// strip, asserting a fact we do not have.
+    ///
+    /// **This is not `shouldWithholdPaste`, and the two must not be
+    /// conflated.** That gate compares the frozen destination against the
+    /// frontmost process *at paste time* and answers "may we paste at
+    /// all". This one compares the frozen destination against the process
+    /// the session *started* in and answers "is the context we captured
+    /// about the place we are pasting into". Both can be true, both can be
+    /// false, and neither implies the other:
+    ///
+    ///   * hands-free — start in A, stop in B, still in B when the
+    ///     transcript is ready: this gate fires, the paste gate does not,
+    ///     and the paste goes through with a defensive boundary;
+    ///   * ordinary — start and stop in A, then switch to B during
+    ///     transcription: the paste gate fires, this one does not.
+    ///
+    /// **Conservative in the same direction as the paste gate** (KD9): an
+    /// unknown identifier on either side keeps the context, i.e. keeps the
+    /// behaviour that shipped before this gate existed. That is a
+    /// deliberate choice, not the only defensible one — the defensive path
+    /// is *milder* than the destructive correction it avoids, so "discard
+    /// when unsure" could be argued. It was rejected for two reasons.
+    /// Reading `> 0` as "known" the same way `shouldWithholdPaste` does
+    /// keeps one notion of process identity in the paste region rather
+    /// than two that can drift apart. And an unknown identifier is not
+    /// evidence of a move: it is a failed `NSWorkspace` read on what is
+    /// almost always an ordinary same-application dictation, which would
+    /// then acquire a stray leading space for nothing.
+    ///
+    /// **Process identity, not bundle identity** (KD9), and **window
+    /// identity is not considered** (R26) — inherited by comparing the
+    /// same two identifiers the paste gate does.
+    nonisolated static func shouldDiscardInsertionContext(
+        sourcePID: pid_t,
+        destinationPID: pid_t
+    ) -> Bool {
+        guard sourcePID > 0, destinationPID > 0 else { return false }
+        return sourcePID != destinationPID
+    }
+
     enum SessionError: Error, LocalizedError {
         case notStarted
         case noSpeech
@@ -191,26 +345,90 @@ final class RecordingSession {
         /// the user's speech and the context carries masked but real
         /// on-screen text from other applications.
         let retained: RetainedRecording?
+        /// `true` when the transcript was withheld because the user had
+        /// moved to a different process by the time it was ready
+        /// (`shouldWithholdPaste`, R23 / R24 / KD8). The row was still
+        /// written; only the paste was skipped.
+        ///
+        /// Read by `AppState` to tell the user the transcript is ready
+        /// and offer to copy it, since nothing appeared where they were
+        /// looking. Orthogonal to `hasFailures` and to `retained`: a
+        /// session can change destination without losing a chunk, and
+        /// lose chunks without changing destination.
+        let pasteWithheldForDestinationChange: Bool
+        /// Localized name of the application this session's transcript was
+        /// aimed at — the one frontmost when the user *stopped* recording,
+        /// frozen there by `freezePasteDestination(_:)`.
+        ///
+        /// This is what the withheld-paste notice names (R25): the place
+        /// the transcript was destined for, which since the 2026-08-11
+        /// product ruling is the stop-moment application rather than the
+        /// one the session started in. Frozen rather than re-read at
+        /// notice time — by then the user has moved again and the
+        /// frontmost app answers a different question entirely.
+        ///
+        /// Deliberately **not** the same fact as `HistoryEntry.sourceAppName`,
+        /// which stays frozen at session start because it records where the
+        /// dictation *happened* and feeds lifetime per-app statistics. The
+        /// two coincide for every session that stops where it started.
+        ///
+        /// `nil` when nothing was frontmost at the stop, or when the freeze
+        /// never ran.
+        let pasteDestinationAppName: String?
+        /// The finalized transcript `stop()` produced — the exact string
+        /// it pasted, or would have pasted on the withheld arm (R15).
+        ///
+        /// Carried here because it exists nowhere else once the row stops
+        /// storing it as its display text: `HistoryEntry` holds raw
+        /// segments plus a legacy `text` mirror, and the string a reader
+        /// assembles from those segments is neither insertion-normalised
+        /// nor frozen to the pairs this session ran with. The dictionary
+        /// harvester wants the real one. See
+        /// `RecordingSession.finalizedTranscript`.
+        ///
+        /// `""` for a session that threw *before reaching the finalize
+        /// step* — a terminal Gemini error, an empty stitch, an encode
+        /// failure. The broken-row path reads this summary too, and there
+        /// is no transcript there to describe.
+        ///
+        /// **Not** `""` for a session cancelled in the narrow window
+        /// between finalizing and pasting: `stop()` records the string one
+        /// statement before its last cancellation re-check, so an Escape
+        /// landing there leaves a real transcript on the summary. Nothing
+        /// consumes it — `finalizeRecording`'s `catch is CancellationError`
+        /// arm neither harvests nor counts — and the alternative (record
+        /// after the re-check) would cost the withheld arm its transcript,
+        /// which is the case R15 exists for.
+        ///
+        /// **Never log it** — it is the user's speech, verbatim.
+        let finalizedTranscript: String
 
         var hasFailures: Bool { failedChunkCount > 0 }
 
-        /// Spelled out rather than synthesized so `retained` can default
-        /// to `nil`: the pre-retention call sites (the summary-field
-        /// tests in `RecordingSessionPartialRecoveryTests`) keep
-        /// compiling, and the single production caller —
-        /// `RecordingSession.summary` — always passes it explicitly.
+        /// Spelled out rather than synthesized so the trailing fields can
+        /// default: the pre-retention call sites (the summary-field tests
+        /// in `RecordingSessionPartialRecoveryTests`) keep compiling, and
+        /// the single production caller — `RecordingSession.summary` —
+        /// always passes them explicitly. New facts about a session's
+        /// outcome are added here the same way (KTD7).
         init(
             failedChunkCount: Int,
             dispatchedChunkCount: Int,
             tokens: TokenUsage,
             model: GeminiModel,
-            retained: RetainedRecording? = nil
+            retained: RetainedRecording? = nil,
+            pasteWithheldForDestinationChange: Bool = false,
+            pasteDestinationAppName: String? = nil,
+            finalizedTranscript: String = ""
         ) {
             self.failedChunkCount = failedChunkCount
             self.dispatchedChunkCount = dispatchedChunkCount
             self.tokens = tokens
             self.model = model
             self.retained = retained
+            self.pasteWithheldForDestinationChange = pasteWithheldForDestinationChange
+            self.pasteDestinationAppName = pasteDestinationAppName
+            self.finalizedTranscript = finalizedTranscript
         }
     }
 
@@ -309,6 +527,14 @@ final class RecordingSession {
     /// might succeed. Swept over the whole status space by
     /// `SplitRetryNetworkBoundTests` rather than spot-checked, so a widened
     /// range cannot slip through.
+    ///
+    /// **Its twin is `GeminiClient.requiresFreshConnection(after:)`**, which
+    /// asks the same status-0 question one layer down to decide whether the
+    /// retry must drop the connection pool. Unlike the two classifiers
+    /// above, this pair has no adjacency to lean on and no compiler term
+    /// either — neither is an exhaustive switch, so widening one raises
+    /// nothing at the other. `GeminiRetryPolicyTests` pins them equal across
+    /// the status space instead; widen one and you have to widen the other.
     nonisolated static func isNetworkClass(_ error: Error) -> Bool {
         guard let gerr = error as? GeminiClient.GeminiError,
               case .http(let status, _) = gerr else { return false }
@@ -351,9 +577,10 @@ final class RecordingSession {
     ///
     /// **This term exists because the reachability pre-check took the cost
     /// out of the case the bound was measuring.** The bound was designed
-    /// when a network-class failure meant a 30 s `URLSession` timeout, so
-    /// two of them was ~60 s of evidence that the transport was down and
-    /// every remaining chunk was another 30 s. `GeminiClient`'s pre-flight
+    /// when a network-class failure meant a full `URLSession` timeout, so
+    /// two of them was two timeouts' worth of evidence that the transport
+    /// was down and every remaining chunk was another one.
+    /// `GeminiClient`'s pre-flight
     /// check now fails an `.unsatisfied`-path request in ~0 ms — so on a
     /// genuinely offline machine the batched call and the first split chunk
     /// both fail *instantly*, and "two independent observations" collapses
@@ -366,11 +593,40 @@ final class RecordingSession {
     /// after the first — permanently, because a retry rewrites the history
     /// row and never the text already pasted into the user's document.
     ///
-    /// 2 s sits far above a short-circuit (~0 ms) and far below the 30 s
-    /// timeout the bound is actually for, so the predicate fires on exactly
-    /// the case that motivated it: a `.satisfied` path whose requests still
-    /// time out — captive portal, dead router, DNS blackhole.
-    nonisolated static let abandonMinChunkFailureLatency: Duration = .seconds(2)
+    /// **Derived from the budget of the request it times, not restated as
+    /// a literal** (plan KTD4). The threshold has to sit far above a
+    /// pre-check short-circuit (~0 ms) and comfortably below the timeout
+    /// it must be clearable by, so that *every* genuine timeout counts as
+    /// evidence — which makes it a fraction of that timeout rather than a
+    /// number of its own, and means it shrinks in step with any future cut
+    /// instead of quietly drifting toward the ceiling it is measured
+    /// against.
+    ///
+    /// **The anchor is the *single-part* budget, and that is a fact about
+    /// the caller rather than a pick from the family.** `splitRetry` is
+    /// the only site that consults this, and it only ever issues
+    /// single-chunk `transcribe` calls — so the request whose latency is
+    /// being measured always carries exactly one audio part, and the
+    /// budget's variability collapses.
+    /// `GeminiClient.requestInactivityBudget(audioPartCount: 1)` is 12 s,
+    /// so `/ 6` evaluates to **2 s** — the value that shipped before this
+    /// derivation replaced it, unchanged.
+    ///
+    /// **Caveat to carry forward:** if a future change ever made
+    /// `splitRetry` re-issue *batches* instead of single chunks, the
+    /// anchor moves with it — the fraction would then be measured against
+    /// a budget four or more times larger than the request it is timing.
+    ///
+    /// At 1/6 both clearances hold. Far above a short-circuit, which is a
+    /// cached path-status read answering in microseconds. Comfortably
+    /// below 12 s, so a real timeout always clears it. And a *fast* real
+    /// failure — connection refused, DNS NXDOMAIN — still fails to clear
+    /// 2 s and so still dispatches every remaining chunk, which is the
+    /// conservative direction: the predicate fires on exactly the case
+    /// that motivated it, a `.satisfied` path whose requests still time
+    /// out (captive portal, dead router, DNS blackhole).
+    nonisolated static let abandonMinChunkFailureLatency: Duration =
+        .seconds(GeminiClient.requestInactivityBudget(audioPartCount: 1) / 6)
 
     /// What an abandoned split-retry owes the chunks it will never
     /// dispatch.
@@ -474,6 +730,70 @@ final class RecordingSession {
     /// time the user actually spoke.
     private var stoppedAt: Date?
     private var sourceApp: NSRunningApplication?
+    /// Process identifier of the application the session *started* in —
+    /// the one whose focused field `InsertionTarget` was read from, and
+    /// therefore the one this session's cursor context describes. Frozen
+    /// from the same `NSWorkspace` read `start()` already performs for
+    /// `sourceApp` and the OCR gate; never re-derived, for the same reason
+    /// `destinationPID` is not (an `NSRunningApplication` answers `-1`
+    /// once its process is gone, which reads as "unknown" precisely when
+    /// the identity has changed).
+    ///
+    /// Read once, by `shouldDiscardInsertionContext` in `stop()`. It is
+    /// deliberately **not** what the paste gate compares — the destination
+    /// is the stop-moment application (KD9 as amended), and this is where
+    /// the dictation began.
+    ///
+    /// `0` when nothing was frontmost at session start — the "unknown"
+    /// `shouldDiscardInsertionContext` keeps the context for.
+    private var sourcePID: pid_t = 0
+    /// Process identifier of the application this session's transcript is
+    /// aimed at — the one frontmost at the moment the user *stopped*
+    /// recording. Written once by `freezePasteDestination(_:)`; read in
+    /// `stop()` by the destination gate and, against `sourcePID`, by
+    /// `shouldDiscardInsertionContext`.
+    ///
+    /// Stored rather than derived from an `NSRunningApplication` on
+    /// demand. `NSRunningApplication.processIdentifier` is documented to
+    /// answer `-1` when it has no pid for the application, and an exited
+    /// process is observed to reach that state; either way, reading it
+    /// later risks reporting the destination as unknown precisely when it
+    /// has been replaced — which is the case the gate exists to catch.
+    /// Freezing it removes the question.
+    ///
+    /// `0` until the freeze runs, and after it when nothing was
+    /// frontmost — the "unknown" `shouldWithholdPaste` pastes through.
+    private var destinationPID: pid_t = 0
+    /// Localized name of that same application, frozen alongside the pid
+    /// so the withheld-paste notice can say where the transcript was
+    /// headed without re-reading the frontmost app at notice time (R25).
+    /// `nil` when unknown. Surfaced on `SessionSummary` (KTD7).
+    private var destinationAppName: String?
+    /// Set by `stop()` when `shouldWithholdPaste` fired, and surfaced on
+    /// `SessionSummary` for `AppState` (KTD7). Stays `false` for every
+    /// session that pasted, including one that never reached the gate.
+    private var pasteWithheldForDestinationChange = false
+    /// The string `stop()` handed to the paste — stitched, boundary-
+    /// normalised for insertion, and with the session's frozen
+    /// replacement pairs applied. Set immediately before the paste gate,
+    /// so it holds on the withheld arm too: nothing was pasted there, but
+    /// this is still the string that *would* have been, and the
+    /// distinction matters to nobody downstream.
+    ///
+    /// **It exists so the dictionary harvester keeps its input (R15).**
+    /// The harvester intersects what the user actually said with what was
+    /// on screen, and until this unit it read `HistoryEntry.text` — which
+    /// was that same string. It no longer is: a row now assembles from
+    /// raw segments and takes the user's *current* pairs at render time,
+    /// so `entry.text` is a legacy mirror and the assembled string is
+    /// neither insertion-normalised nor frozen to the session's pairs.
+    /// Harvesting from it would quietly change which terms are learned.
+    /// Riding `SessionSummary` (KTD7's defaulted-field channel) is what
+    /// gets the real string to `AppState` without widening `stop()`'s
+    /// return type.
+    ///
+    /// **Never log it** — it is the user's speech, verbatim.
+    private var finalizedTranscript = ""
     /// Find/replace pairs to apply between `finalizeForInsertion` and
     /// `paste`. Captured from `DictionaryContext` at session start and
     /// frozen — independent of `contextTask` so a quick-release session
@@ -714,7 +1034,19 @@ final class RecordingSession {
             name: frontmost?.localizedName ?? "Unknown",
             bundleID: frontmost?.bundleIdentifier ?? "unknown.bundle"
         )
+        // Consumed by the OCR gate below and frozen into `sourcePID` for
+        // the cursor-context gate in `stop()`. One read of `NSWorkspace`
+        // feeds all three, so the application this session believes it
+        // began in cannot drift between them.
+        //
+        // The paste *destination* is deliberately not frozen here: it is
+        // the application the user is in when they stop, which
+        // `AppState.finalizeRecording` freezes via
+        // `freezePasteDestination(_:)`. See `shouldWithholdPaste`. What is
+        // frozen here is the other end of that comparison — where the
+        // dictation began, which is what the cursor context describes.
         let pid: pid_t = frontmost?.processIdentifier ?? 0
+        sourcePID = pid
 
         // OCR fallback is opt-in via Screen Recording permission AND the
         // user's in-app "Use screen capture for context" toggle (frozen
@@ -847,12 +1179,6 @@ final class RecordingSession {
         recorder.recentSamples(count: count)
     }
 
-    /// Localised name of the app that was frontmost at session start —
-    /// used as the paste target label in the transcribing HUD.
-    var sourceAppName: String? {
-        sourceApp?.localizedName
-    }
-
     /// Best-effort cancel: stop capturing, drop any in-flight sender,
     /// and discard accumulated responses. Pasting is skipped.
     func cancel() async {
@@ -906,7 +1232,10 @@ final class RecordingSession {
             dispatchedChunkCount: counts.dispatched,
             tokens: sessionTokens,
             model: modelFrozen,
-            retained: retained
+            retained: retained,
+            pasteWithheldForDestinationChange: pasteWithheldForDestinationChange,
+            pasteDestinationAppName: destinationAppName,
+            finalizedTranscript: finalizedTranscript
         )
     }
 
@@ -919,10 +1248,13 @@ final class RecordingSession {
     /// derived from session state the caller does not have, and a second
     /// builder would drift on the first field either of them gains.
     ///
-    /// `failedChunkCount` comes from `summary` rather than being passed
-    /// in, so the persisted row and `SessionSummary.hasFailures` can
-    /// never disagree about how many chunks were lost — one predicate,
-    /// one source.
+    /// The row's response sequence comes from `responses` rather than
+    /// being passed in, so the persisted row and `SessionSummary` can
+    /// never disagree about which chunks were lost — one source, and now
+    /// a structural one: `HistoryEntry.failedChunkCount` and
+    /// `SessionSummary.failedChunkCount` are two readings of the same
+    /// per-response data (`chunkCounts(in:)` and the segment reduce count
+    /// the identical thing).
     private func makeHistoryEntry(text: String) -> HistoryEntry {
         // Duration = hotkey press → release. `stoppedAt` is captured at
         // the very top of `stop()`, which runs once the user has already
@@ -936,39 +1268,85 @@ final class RecordingSession {
             sourceBundleID: sourceApp?.bundleIdentifier ?? "",
             timestamp: startedAt ?? Date(),
             durationSeconds: max(0, endedAt.timeIntervalSince(startedAt ?? endedAt)),
-            failedChunkCount: summary.failedChunkCount
+            segments: Self.historySegments(from: responses)
         )
+    }
+
+    /// This session's responses in the shape a history row stores them
+    /// (R1) — a straight one-to-one map, because `ChunkResponse` already
+    /// *is* the segment: the positions one Gemini call covered plus the
+    /// text it answered with, or `nil` where it failed recoverably.
+    ///
+    /// Two properties fall out of that map rather than being enforced
+    /// here, and both are contracts elsewhere:
+    ///
+    /// - The **text is raw** (R2). `responses` holds what the model
+    ///   returned; `TextInjector.finalizeForInsertion` and
+    ///   `TextReplacementEngine.apply` run on the stitched whole, on the
+    ///   paste path, and never touch these. The row's `text` mirror is
+    ///   post-replacement, the segments are not, and that is the point:
+    ///   the user's *current* pairs are applied when a row is displayed
+    ///   or copied, by `HistoryText.rendered`. So editing a pair changes
+    ///   how rows already on disk read, and a pair whose phrase spans a
+    ///   chunk seam still matches — neither of which per-chunk
+    ///   substitution at write time could do (KD2).
+    /// - A chunk the hallucination gate filtered stays a **text segment
+    ///   holding `""`**, not a gap (R19, R27). The gate stores `""` (not
+    ///   `nil`) precisely so a call that answered can be told apart from
+    ///   one that failed; carrying that distinction onto disk unchanged
+    ///   is what keeps such a row out of the broken state.
+    ///
+    /// Pure and `nonisolated` so both properties can be proved without
+    /// standing up a session.
+    nonisolated static func historySegments(
+        from responses: [ChunkResponse]
+    ) -> [HistoryEntry.Segment] {
+        responses.map {
+            HistoryEntry.Segment(chunkIndices: $0.chunkIndices, text: $0.text)
+        }
     }
 
     /// The history row for a session whose `stop()` threw after every
     /// dispatched chunk failed recoverably (R6, KTD3).
     ///
-    /// **The text is empty on purpose, and that emptiness is load-bearing
-    /// twice over.** It is what `HistoryRowView.displayText(for:)` turns
-    /// into one `failureMarker` per failed chunk at render time (R9 as
-    /// superseded — the row shows `[…] […]`, not placeholder bars), and
-    /// it is how "lifetime stats never counted this session" is
-    /// represented (R15 / KTD7).
+    /// **The text is empty as a mirror, and nothing reads its emptiness
+    /// any more.** It used to carry two facts on its own. It no longer
+    /// decides what the row *shows*: the markers used to be synthesised
+    /// from `failedChunkCount` because the stored string carried none,
+    /// and `HistoryText.assemble` now renders one per gap segment
+    /// straight from the sequence this factory already stores — the two
+    /// encodings of a gap have collapsed into one (AE2). And it no longer
+    /// carries "lifetime stats never counted this session": that is
+    /// `HistoryEntry.isEntirelyLost` now (R18, KTD11), read off the
+    /// sequence rather than off a string that boundary normalisation and
+    /// replacement pairs both run over. `text: ""` stays because KTD10
+    /// wants the legacy mirror written on every row.
     ///
-    /// The exact invariant, because U6's accounting rests on it and the
-    /// looser version of this sentence is false: **no row that is both
-    /// `isBroken` and empty-texted can come from the success arm.** Not
-    /// "no empty row" — `stop()`'s `guard !stitched.isEmpty` tests the
-    /// *stitch*, and `finalizeForInsertion` (trailing-punctuation strip)
-    /// and `TextReplacementEngine.apply` both run after it, so a session
-    /// whose transcript normalises away does reach `makeHistoryEntry`
-    /// with `text: ""` and is counted. That row is not broken: it has no
-    /// recoverable failure, so `failedChunkCount == 0`. Conversely every
-    /// session that *is* broken had a chunk fail recoverably, and a
-    /// recoverable failure always stitches the `failureMarker` (`[…]`)
-    /// into the transcript — which survives both passes. So on the
-    /// success arm `isBroken` implies non-empty, and `isBroken` plus
-    /// empty means, unambiguously, that this factory built the row,
-    /// nothing was pasted, and `StatsStore.record` was never called.
-    /// **U6 must gate on `isBroken && text.isEmpty`, not `text.isEmpty`
-    /// alone.** A future change that seeds this row with the `[…]`
-    /// markers instead would silently make every recovered session
+    /// **What this factory owes that predicate is the session-side half
+    /// of its argument, and it is `stop()`'s, not this method's:** a
+    /// session that produced responses and lost every one of them
+    /// *throws* — `!responses.isEmpty && responses.allSatisfy { $0.text
+    /// == nil }`. Quote that guard in full when you check it: the
+    /// `!responses.isEmpty` term looks like a hole, because `allSatisfy`
+    /// is vacuously true over nothing, and it is not one — a session
+    /// with no responses at all stitches to `""` and throws `.noSpeech`
+    /// at the `guard !stitched.isEmpty` below it. So on either shape the
+    /// success arm — the one path that reaches `StatsStore.record` —
+    /// can never produce an all-gap sequence, and this factory is the
+    /// only producer of one. Keep those two in step, and note the
+    /// second one carries the empty case alone: a change that let an
+    /// empty-response session past it would need the
+    /// `HistoryEntry(segments:)` normalisation to keep
+    /// `isEntirelyLost` false. A change that let a fully-failed session
+    /// reach the success arm, or that seeded this row with anything other
+    /// than gaps, would silently make every recovered session
     /// double-count.
+    ///
+    /// The row carries the session's response sequence, which for this
+    /// factory is **all gaps** — every dispatched chunk failed, so every
+    /// `ChunkResponse` has `text == nil`. That is what makes the row's
+    /// brokenness structural (R3) rather than a count, and it is what
+    /// `isEntirelyLost` reads.
     ///
     /// Only meaningful once `stop()` has thrown; calling it on a live
     /// session dates the row from `Date()` instead of release time.
@@ -1011,6 +1389,44 @@ final class RecordingSession {
             context: existing.context,
             model: existing.model
         )
+    }
+
+    /// Freeze the application this session's transcript is aimed at.
+    ///
+    /// **Called from `AppState.finalizeRecording`, synchronously with the
+    /// user's stop action and before any `await` on that path.** That
+    /// ordering is the contract, not an implementation detail: every
+    /// suspension between the stop and this read is a window in which the
+    /// frontmost application can change, and a destination captured after
+    /// one of them is no longer the place the user was looking at when
+    /// they stopped — which is exactly the identity the guard is supposed
+    /// to defend. Reading it inside `stop()` would already be too late:
+    /// `stop()` runs from a `Task` the release handler schedules, so the
+    /// main actor can service an app-switch in between.
+    ///
+    /// Freezing here rather than at session start is the 2026-08-11
+    /// product ruling — see `shouldWithholdPaste` for what it fixes (a
+    /// hands-free locked dictation that starts in one application and
+    /// ends in another) and for what it deliberately leaves in force.
+    ///
+    /// Never called → `0` / `nil`, which the gate reads as unknown and
+    /// pastes through, matching the pre-guard behaviour.
+    ///
+    /// **Returns the frozen name so the transcribing HUD can label itself
+    /// from the same statement that arms the gate.** The HUD tells the
+    /// user where the transcript is about to land, so it has to name the
+    /// destination, not the application the session began in — under the
+    /// 2026-08-11 ruling those differ for every hands-free dictation that
+    /// walks somewhere else, and a label naming the wrong one is the same
+    /// class of false statement as the "Pasted with gaps" notice that used
+    /// to advise re-dictating a part that was never pasted. Returning it
+    /// rather than exposing a second accessor is what makes the two
+    /// impossible to drift: there is one read of `NSWorkspace`, and the
+    /// label and the comparison are the same value by construction.
+    func freezePasteDestination(_ app: NSRunningApplication?) -> String? {
+        destinationPID = app?.processIdentifier ?? 0
+        destinationAppName = app?.localizedName
+        return destinationAppName
     }
 
     /// Stop audio capture immediately, without draining or sending.
@@ -1084,9 +1500,19 @@ final class RecordingSession {
         // Failed chunks contribute `failureMarker` ("[…]") in place
         // of their text — the user sees a visible gap surrounded by
         // intact transcription and can re-dictate just that piece.
-        let pieces = responses.map { $0.text ?? Self.failureMarker }
-        let stitched = TextInjector.stitchChunks(pieces)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        //
+        // Assembled through `HistoryText.assemble` over this session's own
+        // segments rather than by re-spelling the map/stitch/trim here.
+        // The two used to be independent copies of one rule feeding two
+        // user-visible surfaces — what gets pasted, and what the history
+        // row shows — so a change to the join or the trim in one of them
+        // would have surfaced as "the row I re-open doesn't match what was
+        // pasted", which is the class of bug this plan exists to remove.
+        // `historySegments(from:)` is the same conversion `makeHistoryEntry`
+        // uses below, and every `ChunkResponse` carries at least one index
+        // (`processBatch` returns early on an empty batch), so the
+        // `Segment` precondition this now reaches earlier cannot trip.
+        let stitched = HistoryText.assemble(Self.historySegments(from: responses))
         guard !stitched.isEmpty else {
             throw SessionError.noSpeech
         }
@@ -1107,7 +1533,28 @@ final class RecordingSession {
         // computed — same reasoning as `InsertionTarget.unknown` itself:
         // we genuinely don't know what's around the cursor, so let
         // `finalizeForInsertion` use its defensive leading-space path.
-        let target = cachedContext?.insertionTarget ?? .unknown
+        //
+        // And take that same `.unknown` path when the context was read in
+        // a different application than the one we're pasting into — the
+        // hands-free flow, where the user dictates in A, walks to B and
+        // stops there. The text around A's cursor says nothing about B's
+        // document, and acting on it would silently delete a period the
+        // user dictated. `shouldDiscardInsertionContext` carries the
+        // reasoning, including why this is a different question from the
+        // paste gate further down.
+        let target: InsertionTarget
+        if Self.shouldDiscardInsertionContext(
+            sourcePID: sourcePID,
+            destinationPID: destinationPID
+        ) {
+            // Fact only — no transcript, no application names, no cursor
+            // text. `.info`: this is a formatting nuance on a session that
+            // still pastes, not an outcome the user would report.
+            Self.log.info("insertion context discarded: the session started in a different process than the one it is pasting into")
+            target = .unknown
+        } else {
+            target = cachedContext?.insertionTarget ?? .unknown
+        }
         let finalRaw = TextInjector.finalizeForInsertion(
             stitched,
             textBeforeCursor: target.textBefore,
@@ -1122,6 +1569,14 @@ final class RecordingSession {
         // at session start; that way a Dictionary-tab edit during a
         // session doesn't perturb the result.
         let final = TextReplacementEngine.apply(finalRaw, replacements: replacementsFrozen)
+        // R15. This string used to survive as `HistoryEntry.text` and be
+        // read back from there by the dictionary harvester; the row now
+        // stores raw segments, so the harvester's input has to travel on
+        // its own channel (KTD7's defaulted `SessionSummary` field).
+        // Recorded here rather than after the paste gate so it holds on
+        // the withheld arm too — nothing was pasted there, but this is
+        // still what the user said.
+        finalizedTranscript = final
 
         // Re-check the cancellation latch immediately before committing
         // the paste. `cancel()` installs `failure` as its first statement,
@@ -1142,14 +1597,51 @@ final class RecordingSession {
             throw failure ?? CancellationError()
         }
 
-        await TextInjector.paste(final)
+        // Last synchronous instruction before the paste (KTD5). Everything
+        // from the cancellation guard above to here runs without suspending
+        // on the main actor, and `TextInjector.paste` posts ⌘V before its
+        // own first suspension point, so this is the freshest reading of
+        // the frontmost process that can still be acted on. Compared
+        // against the destination frozen at the *stop* by
+        // `freezePasteDestination(_:)`, so what withholds is the user
+        // moving away during transcription — not moving around while
+        // still recording. Why a mismatch skips only the paste — and must
+        // not be folded into the throwing gate above — is on
+        // `shouldWithholdPaste`'s doc-comment (R24, KTD6).
+        let currentPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+        pasteWithheldForDestinationChange = Self.shouldWithholdPaste(
+            destinationPID: destinationPID,
+            currentPID: currentPID
+        )
+        if pasteWithheldForDestinationChange {
+            // Fact only — never the transcript, and never the app's name
+            // or bundle id: this line is about where the user went.
+            //
+            // `.notice` rather than `.info`: this is the one session
+            // outcome that ends in *nothing appearing* for the user, so
+            // "my dictation vanished" has to be answerable from the log
+            // store after the fact, and `.info` is not persisted there.
+            // Not `.warning` — the guard doing its job is correct
+            // behaviour, not a degradation the app caused.
+            Self.log.notice("paste withheld: destination process changed after the user stopped recording")
+        } else {
+            await TextInjector.paste(final)
+        }
         let tPaste = Date()
 
         let entry = makeHistoryEntry(text: final)
         await history.append(entry)
 
+        // `paste=` names a paste. On the withheld arm there wasn't one, so
+        // report that rather than timing the guard and passing it off as
+        // paste latency. Explicitly `.public`: a non-literal String
+        // interpolation is redacted by default, and this value is a
+        // fixed word or a duration, never user content.
+        let pasteField = pasteWithheldForDestinationChange
+            ? "withheld"
+            : "\(Int(tPaste.timeIntervalSince(tGemini)*1000))ms"
         Self.log.info(
-            "session timing: drain=\(Int(tStream.timeIntervalSince(t0)*1000))ms gemini=\(Int(tGemini.timeIntervalSince(tStream)*1000))ms paste=\(Int(tPaste.timeIntervalSince(tGemini)*1000))ms total=\(Int(Date().timeIntervalSince(t0)*1000))ms chunks=\(self.chunkCounter)"
+            "session timing: drain=\(Int(tStream.timeIntervalSince(t0)*1000))ms gemini=\(Int(tGemini.timeIntervalSince(tStream)*1000))ms paste=\(pasteField, privacy: .public) total=\(Int(Date().timeIntervalSince(t0)*1000))ms chunks=\(self.chunkCounter)"
         )
         return entry
     }
@@ -1584,9 +2076,9 @@ final class RecordingSession {
             // Re-query priors each iteration so a chunk that just
             // succeeded becomes context for the next one.
             let priors = currentPriors()
-            // Timed so the abandon arm can tell a 30 s timeout from a
-            // ~0 ms reachability short-circuit — see
-            // `abandonMinChunkFailureLatency`.
+            // Timed so the abandon arm can tell a real timeout — one
+            // single-part inactivity budget — from a ~0 ms reachability
+            // short-circuit. See `abandonMinChunkFailureLatency`.
             let dispatchedAt = ContinuousClock.now
             do {
                 let result = try await gemini.transcribeWithUsage(
@@ -1628,8 +2120,8 @@ final class RecordingSession {
                 // of it — the batched call and this standalone one — and
                 // this one cost real time rather than being answered from
                 // the reachability cache. Every remaining chunk is a
-                // guaranteed 30 s round-trip ending in the same error,
-                // 250 ms apart, so account for them here instead of
+                // guaranteed full-budget round-trip ending in the same
+                // error, 250 ms apart, so account for them here instead of
                 // spending minutes proving it. Each still gets its marker
                 // AND its audio retained, which is what keeps an
                 // undispatched chunk indistinguishable from this one — see

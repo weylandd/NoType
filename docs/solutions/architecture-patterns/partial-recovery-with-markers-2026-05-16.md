@@ -1,7 +1,7 @@
 ---
 title: Partial recovery — gap markers instead of all-or-nothing on Gemini failure
 date: 2026-05-16
-last_updated: 2026-07-11
+last_updated: 2026-08-13
 category: architecture-patterns
 module: Recording
 problem_type: architecture_pattern
@@ -27,6 +27,8 @@ Wispr Flow / Monologue / other dictation apps don't expose how they handle this;
 Track per-call outcomes (`ChunkResponse { chunkIndices, text: String? }` — `nil` text means the call failed) and stitch at `stop()` with `text ?? failureMarker` per response. The constant marker is `"[…]"` (single horizontal-ellipsis character in square brackets), declared as `RecordingSession.failureMarker`.
 
 `ChunkResponse.text` has gained a third state since this doc was written: `""` (empty string), used by [`HallucinationLengthGate`](hallucination-length-gate-2026-05-20.md) to drop a Gemini response whose word/char rate exceeded plausible dictation speed for the audio duration. An empty-string entry is deliberately not a recovery failure — Gemini answered, the client filtered the output as noise — so `summary.hasFailures` does NOT count it, no `[…]` marker is stitched, and `currentPriors()` filters `""` alongside `nil`. The two-state-vs-three-state distinction matters: `nil` is "the API didn't return for us", `""` is "the API returned but we decided to discard it".
+
+**That three-state table is now carried onto disk unchanged**, which is what makes it worth stating twice. A `ChunkResponse` becomes a `HistoryEntry.Segment` with the same three states — real text, `nil` for a gap, `""` for a gate-drop — so the distinction has to survive storage, not just stitching. `nil` is the only one that makes a row broken (`isBroken`), the only one a retry can write into, and the only one whose audio is retained; `""` is **text** for every one of those questions, because Gemini answered and the client filtered the answer. Reading `""` as "carries nothing" is the specific mistake that double-counts a recovered session's lifetime statistics — see `HistoryEntry.isEntirelyLost`'s doc-comment for the row that does it.
 
 Classify errors via the pure static `RecordingSession.isTerminal(_:)`:
 
@@ -54,7 +56,7 @@ When *every* dispatched response failed, `stop()` throws `lastRecoverableError` 
 
 `URLError` cancellation requires special handling: `URLSession` throws `URLError(.cancelled)` (code -999) when its parent Task is cancelled, NOT `CancellationError`. `GeminiClient.performOnce` translates this back to `CancellationError` before propagating, so the classifier sees the right type and `splitRetry` stops issuing requests against an already-cancelled session. Without that translation, the wrapped URLError would classify as recoverable and `splitRetry` would burn N sub-calls during cancellation.
 
-Other URLError codes are wrapped as `GeminiError.http(0, "URLError code=N: …")` to preserve the retry-decider's uniform classifier surface. `AppState.payloadForSessionFailure` peels the URLError code back out via `NetworkErrorTranslator.extractURLErrorCode(from:)` so offline / timeout HUDs still render correctly. The parser format stays in lockstep with `performOnce`'s wrap format; `NetworkErrorTranslatorTests` pins the round-trip.
+Other URLError codes are wrapped as `GeminiError.http(0, "URLError code=N: …")` to preserve the retry-decider's uniform classifier surface. `AppState.payloadForSessionFailure` takes the wrapped body apart via `NetworkErrorTranslator.parse(_:)`, which returns the URLError code **and** the OS sentence beside it; the HUD is built from the sentence, never from the body (R17 of the dictation-delivery-reliability plan — the whole body used to reach the user's screen as a raw `URLError code=…` diagnostic). The parser format stays in lockstep with `performOnce`'s wrap format — both read the prefix off one shared constant — and `NetworkErrorTranslatorTests` pins the round-trip.
 
 ## Why This Matters
 
@@ -104,19 +106,32 @@ let stitched = TextInjector.stitchChunks(pieces)
 
 `stitchChunks` inserts a single space between `,` and `[`, and between `]` and a word-starter, so a marker in the middle reads naturally: `"Hello, […] world"`.
 
-**A stitched marker is not durable, and later work depends on that.** Between `stop()` and storage, the transcript passes through `TextReplacementEngine.apply` (the Dictionary module's user-defined pairs). Its boundaries are Unicode look-arounds over `[\p{L}\p{N}]`, and brackets are neither — so the `…` inside `[…]` sits at a real word boundary and a user pair on the ellipsis rewrites markers out of the text before the history row is written. Harmless when a marker is only a visual placeholder; **not** harmless once something counts markers or substitutes into them. The failed-recording-retry feature does exactly that (a recovered chunk's text replaces its marker positionally), which is why `RetryMerge` reports what it actually *placed* and the retry releases a chunk's audio only on a landed recovery — a marker that was rewritten away must not license destroying the only copy of that chunk's audio. Anything new that treats a marker as a reliable count-of-failures should re-derive the count from `HistoryEntry.failedChunkCount`, not from the text.
+**A stitched marker is not durable — and that is why nothing structural is allowed to depend on one.** The transcript passes through `TextReplacementEngine.apply` (the Dictionary module's user-defined pairs) on its way to the cursor. Those boundaries are Unicode look-arounds over `[\p{L}\p{N}]`, and brackets are neither — so the `…` inside `[…]` sits at a real word boundary, and a user pair as ordinary as `…` → `...` rewrites every marker in the string.
+
+**This was learned the expensive way, and the fix was to stop storing the marker.** For one release the history row *was* the pasted string: a lost chunk existed only as those characters, and the retry found where to write by scanning left-to-right for the *i*-th `[…]`. On a row whose markers a pair had rewritten, the row stayed broken, kept its audio, and had nowhere for a recovery to land — every retry on it was billed and recovered nothing, on precisely the row the feature existed for. The shipped mitigation *hid the retry button* for that row, which dropped the user's recovery instead of fixing the model.
+
+Since `docs/plans/2026-08-11-001-fix-dictation-delivery-reliability-plan.md`, **a gap is a position, not a character.** `HistoryEntry.segments` stores the session's response sequence — per segment, the chunk indices it covered and either the model's **raw** text or `nil` for a gap — and the `[…]` is produced at render time by `HistoryText.assemble`, with the user's *current* pairs applied downstream of that. So a pair now restyles a gap and can no longer move or delete one, and a retry writes into the gap covering the chunk's own index (`RetryMerge.merge(into:outcomes:)`) without reading the row's rendered string at all.
+
+Two rules for anything new:
+
+- **Never derive a structural fact from the rendered text.** Not the failure count (`HistoryEntry.failedChunkCount` is itself *derived from* the sequence and encoded only as a legacy mirror for rollback), not brokenness (`isBroken` = "the sequence contains a gap"), not "was this session ever counted" (`isEntirelyLost` = "every segment is a gap"). Reading any of them out of a string reintroduces the same class of bug one layer up.
+- **Placement stays a reported outcome.** `RetryMerge.Merged.placed` says which recoveries actually reached the row, and the retry releases a chunk's audio only for those. Writing by index makes a mismatch rare, not impossible — a recovery aimed at an index no gap covers keeps its audio, because `RetainedAudioStore.take` hands out the only copy. See [`conventions/gate-irreversible-actions-on-the-outcome-2026-08-09.md`](../conventions/gate-irreversible-actions-on-the-outcome-2026-08-09.md).
 
 ### Surfacing partial state to the user
 
 ```swift
 let sessionSummary = session.summary
 // ...append to history, hide transcribing HUD, ...
-if sessionSummary.hasFailures {
-    self.surfaceError(.partialTranscription(summary: sessionSummary))
+if let notice = NoTypeErrorKind.noticeForFinishedSession(
+    entry: entry, summary: sessionSummary, replacements: dictionaryReplacements
+) {
+    self.surfaceError(notice)
 }
 ```
 
 A neutral `"Pasted with gaps"` HUD says "N of M chunks didn't transcribe — `[…]` was inserted in their place".
+
+**One notice per session, chosen up front rather than by whichever call ran last.** The success arm no longer decides inline: `noticeForFinishedSession` is a single pure seam returning `.pasteWithheld` when the paste was withheld because the destination process changed, `.partialTranscription` when only chunks were lost, and `nil` for the ordinary session. That shape is forced — `showErrorHUD` *replaces* rather than stacks, so two `surfaceError` calls in one arm silently discard one — and a session that both lost chunks and changed destination is the ordinary bad session rather than a rare intersection, since a stalled network causes both. The withheld notice wins and folds the gap count into its own copy, because "Pasted with gaps" is simply false about a session that pasted nothing. See `NoType/UI/CLAUDE.md` invariant 8.
 
 ## Related
 
@@ -129,4 +144,6 @@ A neutral `"Pasted with gaps"` HUD says "N of M chunks didn't transcribe — `[�
 - PR #39 — partial recovery (this entry).
 - `NoType/Recording/CLAUDE.md` — invariant 12 ("Partial recovery") and the per-class classifier matrix.
 - `RecordingSession.shouldRetain(_:)` — sibling classifier governed by this same recoverable/terminal split (it retains exactly the gap-marker class, including the 401/403 carve-out). **A new `GeminiError` case belongs in both.** Guard fidelity for the pair: [`conventions/source-scan-guard-fidelity-2026-07-25.md`](../conventions/source-scan-guard-fidelity-2026-07-25.md).
-- `NoType/Gemini/CLAUDE.md` — retry-policy subsection (flipped from "don't paste partial" to point at this layer).
+- `NoType/Gemini/CLAUDE.md` — retry-policy subsection (flipped from "don't paste partial" to point at this layer), and "Request budgets" for the per-request inactivity budget that decides how long a chunk may stall before it becomes one of these markers.
+- `NoType/History/CLAUDE.md` — Schema (the segment sequence a marker is stored as) and "Broken rows and retry" (the index write that lands a recovery).
+- `docs/plans/2026-08-11-001-fix-dictation-delivery-reliability-plan.md` — the change that moved the gap from characters to positions, and the two defects that forced it.

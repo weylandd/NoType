@@ -99,6 +99,8 @@ Hold Right Option → mic captures → Silero VAD detects pauses
                   → release → final chunk → stitched & pasted at cursor
 ```
 
+**If you switch apps while it's still transcribing, nothing is pasted.** The transcript only goes to the app you were in when you stopped talking — pasting into whatever window you happened to move to would edit a document you never aimed at. Instead it lands in your history and a notice offers to copy it. Moving around *while you're still talking* is fine, including hands-free: the destination is wherever you were when you stopped.
+
 Cache-friendly request structure means follow-up chunks within a session get a ~90% discount on prefix tokens. A free-tier Gemini key is enough for personal use.
 
 For the full architecture, see [docs/architecture.md](docs/architecture.md). For the why-not-X decisions, [docs/decisions.md](docs/decisions.md).

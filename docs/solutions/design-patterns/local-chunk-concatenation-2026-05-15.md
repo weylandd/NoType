@@ -64,11 +64,23 @@ let final    = TextInjector.finalizeForInsertion(
 
 The three-state `text` contract is important: `nil` is "Gemini didn't respond for us — leave a visible gap"; `""` is "Gemini responded but we filtered the output as noise — leave nothing". The empty-string path is deliberately invisible (no marker), since the gate's job is to suppress the very content a marker would draw attention to.
 
+**Assembly happens twice, over the same sequence, for two different destinations.** The block above is the *paste* path — the one that ends at the user's cursor and is final once it lands. The history row assembles the same per-call outcomes independently, via `HistoryText.assemble`, because a row stores the sequence rather than the pasted string:
+
+```swift
+// NoType/History/HistoryText.swift
+TextInjector
+    .stitchChunks(segments.map { $0.text ?? RecordingSession.failureMarker })
+    .trimmingCharacters(in: .whitespacesAndNewlines)
+```
+
+Same `stitchChunks` rule, deliberately **not** `finalizeForInsertion`: that pass strips stranded terminal punctuation and inserts a leading space using the *cursor's surroundings*, which are a fact about the user's document and not about the transcript. So a row may legitimately keep a sentence-final period the paste trimmed. Both are whitespace splits, so word counts are unaffected. The client-owns-assembly rule is what makes two consumers of one sequence possible at all; a model-side re-emit would have left exactly one string, produced once, at paste time.
+
 ## Related
 
 - `NoType/Injection/CLAUDE.md` — `stitchChunks` + `finalizeForInsertion` shapes.
 - `NoType/Gemini/CLAUDE.md` "What you must NEVER do".
-- `solutions/architecture-patterns/partial-recovery-with-markers-2026-05-16.md` — partial-recovery layer that rides on this assembly contract (markers stitched in place of failed chunks, never sent as priors).
+- `solutions/architecture-patterns/partial-recovery-with-markers-2026-05-16.md` — partial-recovery layer that rides on this assembly contract (markers stitched in place of failed chunks, never sent as priors), and why the marker is a *rendered* thing rather than the stored one.
+- `NoType/History/CLAUDE.md` — the stored response sequence and the second assembly, `HistoryText`.
 - `solutions/architecture-patterns/hallucination-length-gate-2026-05-20.md` — post-response gate that emits the third stitch state (`""`, no marker).
 - `docs/decisions.md` ADR-008 — legacy index entry, redirects here.
 - `solutions/architecture-patterns/serial-gemini-actor-2026-05-15.md` — the serial dispatch that makes "prior chunks are deterministic" true.

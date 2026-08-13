@@ -185,9 +185,13 @@ enum HUDPanelGeometry {
     /// **Non-finite terms are substituted with zero rather than propagated.**
     /// A NaN in `panelSize` or in an inset would otherwise poison the
     /// subtraction and produce exactly the NaN origin this helper exists to
-    /// keep away from AppKit. `HUDController.repositionPermissionPanels`
-    /// accumulates `topInset` from `panel.frame.height`, so a corrupt frame
-    /// on one card would otherwise travel into the next card's origin.
+    /// keep away from AppKit. ``column(_:topInset:gap:)`` accumulates each
+    /// row's `topInset` from the measured heights above it, so a corrupt
+    /// frame on one panel would otherwise travel into every origin below
+    /// it. That accumulator now substitutes an unusable height itself (and
+    /// reports it), so this limb is the second line rather than the first —
+    /// it still stands, because `topRightOrigin` is a chokepoint for any
+    /// caller, not a guard on one.
     ///
     /// Substituting zero anchors the arithmetic back to the screen, but the
     /// resulting point is **not a good placement**: the panel's real frame is
@@ -229,5 +233,139 @@ enum HUDPanelGeometry {
             ),
             sanitised: sanitised
         )
+    }
+
+    // MARK: - The top-right column
+
+    /// Every surface that can occupy the top-right HUD column, in the
+    /// order it stacks downward from the column's `topInset`.
+    ///
+    /// **This enum is the layering, and the order is the contract.**
+    /// Before it existed, all four HUD kinds were positioned by handing
+    /// `HUDController.topInset` verbatim to
+    /// ``topRightOrigin(visibleFrame:panelSize:topInset:rightInset:)``, so
+    /// any two co-visible panels were *superimposed* at the same point at
+    /// the same `NSWindow.Level.statusBar`. Two `.borderless` panels
+    /// stacked in Z with their close buttons in the same 22 × 22 box is
+    /// indistinguishable, to the user, from a close button that does not
+    /// work: the click lands on the front panel, and the identical panel
+    /// behind it is revealed in the same place.
+    ///
+    /// The error HUD owns the top slot because it is the only surface that
+    /// is *about* something having gone wrong and the only one that
+    /// auto-dismisses — a notice pushed below a permission card the user
+    /// has been ignoring for a week is a notice they will not read. Note
+    /// what this deliberately is **not**: the error HUD does not *hide* the
+    /// other surfaces. "Shows alone" was the old documented claim and it
+    /// cannot be honestly implemented — a permission card names something
+    /// the app cannot function without, and suppressing it to make room for
+    /// a transient toast trades one lost message for another.
+    ///
+    /// `recording` and `transcribing` are mutually exclusive by
+    /// construction (`HUDController.showTranscribingHUD` closes the
+    /// recording panel), so their relative order never resolves anything in
+    /// practice. They are still ranked, because a column with a
+    /// deterministic total order is testable and one with a partial order
+    /// is not.
+    enum Slot: Int, CaseIterable, Comparable, Sendable, CustomStringConvertible {
+        case error
+        case recording
+        case transcribing
+        case accessibilityCard
+        case microphoneCard
+
+        static func < (lhs: Slot, rhs: Slot) -> Bool { lhs.rawValue < rhs.rawValue }
+
+        var description: String {
+            switch self {
+            case .error:             "error"
+            case .recording:         "recording"
+            case .transcribing:      "transcribing"
+            case .accessibilityCard: "accessibility-card"
+            case .microphoneCard:    "microphone-card"
+            }
+        }
+    }
+
+    /// A live panel offered to ``column(_:topInset:gap:)`` for placement.
+    struct Occupant: Equatable, Sendable {
+        let slot: Slot
+        /// The panel's measured frame height. Sized by `HUDPanel.sizeToFit()`
+        /// before this is read — a column's second row cannot be placed until
+        /// the first row's height is known, which is the whole reason that
+        /// measure pass is separable from the place pass.
+        let height: CGFloat
+
+        init(slot: Slot, height: CGFloat) {
+            self.slot = slot
+            self.height = height
+        }
+    }
+
+    /// Where one occupant's panel goes: its own top inset within the column.
+    struct Row: Equatable, Sendable {
+        let slot: Slot
+        let topInset: CGFloat
+    }
+
+    /// The resolved column, plus whichever occupants' measured heights were
+    /// unusable and had to be assumed.
+    ///
+    /// `sanitised` exists for the same reason ``Placement/sanitised`` does:
+    /// a substituted height still yields arithmetically valid insets, so
+    /// nothing downstream would ever mention it, and a column silently laid
+    /// out against a made-up height is the silent-degradation shape this
+    /// whole file exists to stop.
+    struct Column: Equatable, Sendable {
+        let rows: [Row]
+        let sanitised: [Slot]
+    }
+
+    /// Lay `occupants` out as a single top-anchored column: slot order from
+    /// the top, `gap` between neighbours, each row's inset accumulated from
+    /// the heights above it.
+    ///
+    /// Input order is irrelevant — the column sorts by ``Slot``, so the
+    /// caller cannot change the layering by changing the order it happens
+    /// to collect its live panels in.
+    ///
+    /// **An unusable height is assumed to be ``seedContentSize``'s, not
+    /// skipped.** Skipping would advance the accumulator by nothing and
+    /// place the next panel at the *same* inset — re-creating the exact
+    /// superposition this function exists to prevent, and doing it on the
+    /// one path where something has already gone wrong. `seedContentSize`
+    /// is the honest assumption rather than an arbitrary one: it is what
+    /// `HUDPanel.applyValidated(contentSize:)` leaves a panel at when it
+    /// rejects a measurement, so on the path that produces a non-finite
+    /// height it is also the panel's real on-screen height.
+    ///
+    /// `topInset` and `gap` are not sanitised here. Both are compile-time
+    /// constants at the only call site, and a non-finite `topInset` is
+    /// already substituted (and reported) one layer down by
+    /// ``topRightOrigin(visibleFrame:panelSize:topInset:rightInset:)``, so
+    /// nothing non-finite reaches AppKit either way.
+    static func column(
+        _ occupants: [Occupant],
+        topInset: CGFloat,
+        gap: CGFloat
+    ) -> Column {
+        var rows: [Row] = []
+        var sanitised: [Slot] = []
+        var next = topInset
+
+        for occupant in occupants.sorted(by: { $0.slot < $1.slot }) {
+            rows.append(Row(slot: occupant.slot, topInset: next))
+
+            let height: CGFloat
+            if occupant.height.isFinite, occupant.height > 0 {
+                height = occupant.height
+            } else {
+                sanitised.append(occupant.slot)
+                height = seedContentSize.height
+            }
+            next += height + gap
+        }
+
+        return Column(rows: rows, sanitised: sanitised)
     }
 }

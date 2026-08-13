@@ -37,11 +37,15 @@ AND-mode (both ceilings must trip) is load-bearing. OR-mode would catch `"При
 
 The gate-dropped transcript is stored as `text: ""` (not `nil`) in `ChunkResponse`. This is a deliberate **third state** beyond the documented partial-recovery contract:
 
-| `text` | Source | `summary.hasFailures` | Stitch behaviour |
-|---|---|---|---|
-| `"<real text>"` | Gemini, gate passed | none | concatenated normally |
-| `nil` | Recoverable Gemini failure | `+1` | `[…]` failure marker, "Pasted with gaps" HUD |
-| `""` | Gate fired on disproportionate length | none | stitched as empty, no marker |
+| `text` | Source | `summary.hasFailures` | Stitch behaviour | Stored as | Makes the row broken? |
+|---|---|---|---|---|---|
+| `"<real text>"` | Gemini, gate passed | none | concatenated normally | a text segment | no |
+| `nil` | Recoverable Gemini failure | `+1` | `[…]` failure marker, "Pasted with gaps" HUD | a **gap** segment | **yes** |
+| `""` | Gate fired on disproportionate length | none | stitched as empty, no marker | a text segment holding `""` | no |
+
+**The last two columns are the reason this table survived into storage.** A history row stores the session's response sequence rather than its pasted string, and the same three states carry across: `nil` is the only one that is a gap. A gate-dropped chunk is stored as `text: ""` — *text*, not a gap (R27 of `docs/plans/2026-08-11-001-fix-dictation-delivery-reliability-plan.md`) — because Gemini answered and the client filtered the answer, so it makes no row broken (R19), offers no retry, and retains no audio.
+
+The subtlety worth carrying: a real session can hold **both** at once — one chunk failed recoverably and another was gate-dropped — and that row pastes `[…]`, takes the success arm, and is counted in lifetime statistics. Reading `""` as "carries nothing" would classify it as the never-counted row and double-count it the moment its gap recovered. `HistoryEntry.isEntirelyLost` is written as "every segment is a gap" for exactly that reason; its doc-comment names this row.
 
 In a single-chunk session, the stitched output becomes `""` → `stop()` throws `SessionError.noSpeech` → standard "no speech" Error HUD. In a multi-chunk session, the gate-dropped chunk contributes nothing to the stitch — by design, since the gate's verdict is "this is hallucination noise, not real speech". `currentPriors()` filters `""` out alongside `nil`, so the gate-emptied response doesn't disqualify a subsequent short chunk from the lite path.
 

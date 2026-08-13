@@ -6,8 +6,8 @@ import Foundation
 ///
 /// **Why not a plain `[Float]` + `removeFirst`.** That was the previous
 /// implementation; `removeFirst` is O(N) (memmove of every retained
-/// sample). For a session that talks continuously through several
-/// 30-second force-cuts that adds up. A ring with wrap-around writes is
+/// sample). For a session that talks continuously through many chunk
+/// dispatches that adds up. A ring with wrap-around writes is
 /// O(1) per chunk dispatched, regardless of session length.
 ///
 /// **Absolute indices.** Callers (`PauseDetector`, `RecordingSession`)

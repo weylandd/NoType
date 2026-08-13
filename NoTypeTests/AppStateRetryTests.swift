@@ -2,14 +2,23 @@ import XCTest
 @testable import NoType
 
 /// Pins the retry orchestration: what a run does to the row, to the
-/// retained-audio holder, and to lifetime stats (R11–R13, R15, R16, R19).
+/// retained-audio holder, and to lifetime stats (R7–R11, R15, R16, R19).
 ///
 /// Every test drives `AppState.retryChunkSender`, the injected stand-in for
 /// the per-chunk Gemini call. That seam is the whole reason these
-/// properties are testable: each of them — KTD7's stats split, R16's
+/// properties are testable: each of them — R18's stats split, R16's
 /// stop-at-first-failure, R19's leave-everything-alone — is only observable
 /// across a *sequence* of per-chunk outcomes, and there is no way to author
 /// that sequence against a live network.
+///
+/// **Rows are described as response sequences, never as a string plus a
+/// count.** `Fixture.appendRow(_:)` takes one answer per chunk (`nil` for a
+/// gap) and hands the payload exactly the indices those gaps carry, because
+/// the join between `HistoryEntry.Segment.chunkIndices` and
+/// `RetainedRecording.Chunk.idx` is what a retry writes by (R7). A fixture
+/// that let the two drift — as a marker-parsed row does, whose positions
+/// are ordinals of the parse — would be testing a row no session produces.
+/// Every chunk gets a distinct answer for the same reason.
 ///
 /// The `RetryMerge` half (which text lands where) is pinned separately by
 /// `RetryMergeTests`; what is pinned here is everything around it.
@@ -24,7 +33,7 @@ final class AppStateRetryTests: XCTestCase {
         // AE7. Both surfaces read `retryingEntryID`, so it has to be set
         // before the first `await` — not after the run returns.
         let fx = Fixture(self)
-        let row = fx.appendBrokenRow(text: "", failedChunkCount: 1, chunkCount: 1)
+        let row = fx.appendRow([nil], text: "")
 
         var seenAtFirstRequest: UUID??
         fx.state.retryChunkSender = { [state = fx.state] _, _, _, _ in
@@ -47,8 +56,8 @@ final class AppStateRetryTests: XCTestCase {
         // second run reaching the never-counted branch would count the
         // session twice and re-spend the user's Gemini budget.
         let fx = Fixture(self)
-        let first = fx.appendBrokenRow(text: "", failedChunkCount: 1, chunkCount: 1)
-        let second = fx.appendBrokenRow(text: "", failedChunkCount: 1, chunkCount: 1)
+        let first = fx.appendRow([nil], text: "")
+        let second = fx.appendRow([nil], text: "")
 
         var reentrantCalls = 0
         fx.state.retryChunkSender = { [state = fx.state] _, _, _, _ in
@@ -70,7 +79,7 @@ final class AppStateRetryTests: XCTestCase {
     func test_retry_isRefusedWhileASessionIsActive() async {
         // R14 / AE6, at the entry point rather than the predicate.
         let fx = Fixture(self)
-        let row = fx.appendBrokenRow(text: "", failedChunkCount: 1, chunkCount: 1)
+        let row = fx.appendRow([nil], text: "")
         fx.state.recordingState = .sending
 
         var requests = 0
@@ -82,7 +91,7 @@ final class AppStateRetryTests: XCTestCase {
         await fx.state.retryEntry(id: row.id)
 
         XCTAssertEqual(requests, 0)
-        XCTAssertEqual(fx.row(row.id)?.text, "")
+        XCTAssertEqual(fx.row(row.id)?.segments, row.segments, "the row's sequence is untouched")
         XCTAssertNotNil(fx.store.peek(row.id), "a refused retry does not consume the payload")
     }
 
@@ -90,17 +99,16 @@ final class AppStateRetryTests: XCTestCase {
 
     func test_retry_fullRecovery_fillsTheRow_clearsTheCount_andReleasesTheAudio() async {
         let fx = Fixture(self)
-        let row = fx.appendBrokenRow(
-            text: "Ship it by \(marker) and review \(marker) after.",
-            failedChunkCount: 2,
-            chunkCount: 2
-        )
+        let row = fx.appendRow(["Ship it by", nil, "and review", nil, "after."])
         fx.state.retryChunkSender = fx.sender(["the tenth", "the draft"])
 
         await fx.state.retryEntry(id: row.id)
 
         let settled = fx.row(row.id)
-        XCTAssertEqual(settled?.text, "Ship it by the tenth and review the draft after.")
+        XCTAssertEqual(
+            settled.map { HistoryText.assemble($0.segments) },
+            "Ship it by the tenth and review the draft after."
+        )
         XCTAssertEqual(settled?.failedChunkCount, 0)
         XCTAssertEqual(settled?.isBroken, false, "a fully recovered row is no longer broken")
         XCTAssertNil(fx.store.peek(row.id), "R5: a retry that succeeded releases the audio")
@@ -110,7 +118,7 @@ final class AppStateRetryTests: XCTestCase {
         // R11 / KD3: the retry reproduces the request the session made —
         // the context frozen at session start and the model it ran on.
         let fx = Fixture(self)
-        let row = fx.appendBrokenRow(text: "", failedChunkCount: 1, chunkCount: 1, model: .flash)
+        let row = fx.appendRow([nil], text: "", model: .flash)
 
         var seenBundle: String?
         var seenModel: GeminiModel?
@@ -126,14 +134,19 @@ final class AppStateRetryTests: XCTestCase {
         XCTAssertEqual(seenModel, .flash)
     }
 
-    func test_retry_sendsSurvivingTextAsPriors_withMarkersFilteredOut() async {
-        // KTD6. A prompt containing `[…]` teaches the model to emit them.
+    func test_retry_sendsTheRowsTextCarryingChunksAsPriors_rawAndGapFree() async {
+        // R10. One prior per text-carrying segment, in order — the same
+        // shape `RecordingSession.currentPriors()` produces, because both
+        // now read a response sequence rather than splitting a string on
+        // the marker. A gap contributes nothing, so no `[…]` reaches
+        // Gemini: a prompt containing one teaches the model to emit them.
+        //
+        // The pair below is the raw half of R10. It rewrites how the row
+        // *reads*, and a priors path that assembled-and-substituted would
+        // send Gemini a phrase the user never dictated.
         let fx = Fixture(self)
-        let row = fx.appendBrokenRow(
-            text: "before \(marker) middle \(marker) end",
-            failedChunkCount: 2,
-            chunkCount: 2
-        )
+        fx.state.dictionaryReplacements = [DictionaryReplacement(from: "before", to: "BEFOREHAND")]
+        let row = fx.appendRow(["before", nil, "middle", nil, "end"])
 
         var priorsPerCall: [[String]] = []
         var answers = ["FIRST", "SECOND"]
@@ -147,129 +160,41 @@ final class AppStateRetryTests: XCTestCase {
         XCTAssertEqual(priorsPerCall.first, ["before", "middle", "end"])
         XCTAssertEqual(
             priorsPerCall.last,
-            ["before FIRST middle", "end"],
-            "the chunk that just recovered becomes context for the next one"
+            ["before", "FIRST", "middle", "end"],
+            "the chunk that just recovered becomes context for the next one, in its own position"
         )
         for call in priorsPerCall {
             for prior in call {
                 XCTAssertFalse(prior.contains(marker), "no marker is ever sent to Gemini")
+                XCTAssertNotEqual(prior, "BEFOREHAND", "and no replacement pair is applied first")
             }
         }
     }
 
-    // MARK: - Partial run (R16)
+    // MARK: - Landing by index (R7, AE3)
 
-    func test_retry_stopsAtTheFirstFailure_andIssuesNoRequestForLaterChunks() async {
-        // R16. One request timeout is the bound on an uncancellable wait,
-        // not the sum of every retained chunk's.
+    func test_retry_onARowWhoseMarkersAReplacementPairRewrote_stillOffersAndStillLands() async {
+        // **AE1 / R8, and the regression that made this unit urgent.**
+        //
+        // The row's `text` mirror is the pasted string, so it is
+        // post-replacement — and `TextReplacementEngine`'s
+        // `(?<![\p{L}\p{N}])…(?![\p{L}\p{N}])` boundary matches the `…`
+        // inside `[…]`, so a pair as ordinary as `…` → `...` leaves a
+        // broken row carrying no marker at all. The merge used to scan that
+        // string, so on this exact row the retry button was offered, the
+        // request was billed, and the run fell through the nothing-recovered
+        // exit every single time. Writing by index is what closes it; a
+        // text-shaped gate on the button would only re-hide the recovery.
         let fx = Fixture(self)
-        let row = fx.appendBrokenRow(
-            text: "a \(marker) b \(marker) c \(marker) d",
-            failedChunkCount: 3,
-            chunkCount: 3
+        fx.state.dictionaryReplacements = [DictionaryReplacement(from: "…", to: "...")]
+        let row = fx.appendRow(["Ship it by", nil, "after."])
+
+        XCTAssertTrue(row.isBroken, "fixture check — the row is broken")
+        XCTAssertFalse(
+            row.text.contains(marker),
+            "fixture check — and its stored mirror carries no marker, or this test proves nothing"
         )
 
-        var attempted: [Int] = []
-        fx.state.retryChunkSender = { chunk, _, _, _ in
-            attempted.append(chunk.idx)
-            if chunk.idx == 1 { throw GeminiClient.GeminiError.http(status: 0, body: "offline") }
-            return ("ONE", .zero)
-        }
-
-        await fx.state.retryEntry(id: row.id)
-
-        XCTAssertEqual(attempted, [0, 1], "chunk 2 is never attempted")
-    }
-
-    func test_retry_partialRun_writesWhatRecovered_reputsOnlyTheRest_andDropsTheCount() async {
-        // R16's three consequences in one assertion block: the recovered
-        // text lands, the recovered chunks are released, and the count
-        // drops to what remains — so a second retry re-pays for the
-        // unrecovered chunk only.
-        let fx = Fixture(self)
-        let row = fx.appendBrokenRow(
-            text: "a \(marker) b \(marker) c \(marker) d",
-            failedChunkCount: 3,
-            chunkCount: 3
-        )
-        fx.state.retryChunkSender = { chunk, _, _, _ in
-            if chunk.idx == 2 { throw GeminiClient.GeminiError.http(status: 503, body: "") }
-            return ("R\(chunk.idx)", .zero)
-        }
-
-        await fx.state.retryEntry(id: row.id)
-
-        let settled = fx.row(row.id)
-        XCTAssertEqual(settled?.text, "a R0 b R1 c \(marker) d")
-        XCTAssertEqual(settled?.failedChunkCount, 1, "one gap remains, so the count is one")
-        XCTAssertEqual(settled?.isBroken, true, "the row stays broken")
-
-        let held = fx.store.peek(row.id)
-        XCTAssertEqual(
-            held?.chunks.map(\.idx),
-            [2],
-            "only the chunk that did not recover is re-put — the other two are released"
-        )
-        XCTAssertTrue(fx.state.canRetry(entryID: row.id), "and the row can be retried again")
-    }
-
-    func test_retry_secondRunFillsTheRemainingGap() async {
-        // The round trip the previous test sets up.
-        let fx = Fixture(self)
-        let row = fx.appendBrokenRow(
-            text: "a \(marker) b \(marker) c",
-            failedChunkCount: 2,
-            chunkCount: 2
-        )
-        fx.state.retryChunkSender = { chunk, _, _, _ in
-            if chunk.idx == 1 { throw GeminiClient.GeminiError.http(status: 0, body: "offline") }
-            return ("ONE", .zero)
-        }
-        await fx.state.retryEntry(id: row.id)
-
-        fx.state.retryChunkSender = fx.sender(["TWO"])
-        await fx.state.retryEntry(id: row.id)
-
-        XCTAssertEqual(fx.row(row.id)?.text, "a ONE b TWO c")
-        XCTAssertEqual(fx.row(row.id)?.failedChunkCount, 0)
-        XCTAssertNil(fx.store.peek(row.id))
-    }
-
-    func test_retry_anEmptyAnswerIsNotARecovery_soItsChunkStaysHeld() async {
-        // Gemini answered with nothing. Substituting `""` would delete the
-        // gap; keeping the marker AND the audio keeps the count honest and
-        // leaves the user something to retry.
-        let fx = Fixture(self)
-        let row = fx.appendBrokenRow(
-            text: "a \(marker) b \(marker) c",
-            failedChunkCount: 2,
-            chunkCount: 2
-        )
-        fx.state.retryChunkSender = fx.sender(["", "TWO"])
-
-        await fx.state.retryEntry(id: row.id)
-
-        XCTAssertEqual(fx.row(row.id)?.text, "a \(marker) b TWO c")
-        XCTAssertEqual(fx.row(row.id)?.failedChunkCount, 1)
-        XCTAssertEqual(fx.store.peek(row.id)?.chunks.map(\.idx), [0])
-    }
-
-    func test_retry_recoveryWithNoMarkerToLandIn_keepsTheAudioAndSurfacesTheFailure() async {
-        // The data-loss regression. A broken row can carry fewer markers
-        // than retained chunks — `TextReplacementEngine` runs over the
-        // stitched transcript before it is stored and its Unicode boundary
-        // matches the `…` inside `[…]`, so a user replacement pair on the
-        // ellipsis rewrites every marker in the row. Gemini then answers,
-        // the merge has nowhere to put the text, and the run must be
-        // treated as a failure: releasing the chunk on the strength of
-        // "it recovered" would destroy the only copy of the audio and
-        // throw the recovered text away in the same breath.
-        let fx = Fixture(self)
-        let row = fx.appendBrokenRow(
-            text: "Ship it by [...] and review after.",
-            failedChunkCount: 1,
-            chunkCount: 1
-        )
         fx.state.retryChunkSender = fx.sender(
             ["the tenth"],
             tokens: TokenUsage(input: 70, output: 5, cached: 0)
@@ -278,11 +203,189 @@ final class AppStateRetryTests: XCTestCase {
         await fx.state.retryEntry(id: row.id)
 
         let settled = fx.row(row.id)
-        XCTAssertEqual(settled?.text, "Ship it by [...] and review after.", "the row is not rewritten")
+        XCTAssertEqual(
+            settled.map { HistoryText.assemble($0.segments) },
+            "Ship it by the tenth after.",
+            "the recovery landed in the gap at chunk 1, whatever the pair did to the marker"
+        )
+        XCTAssertEqual(settled?.isBroken, false)
+        XCTAssertNil(fx.store.peek(row.id), "and the audio is released, not held for a run that failed")
+        XCTAssertFalse(fx.hud.errorHUDVisible, "no nothing-recovered notice — this run recovered")
+    }
+
+    func test_retry_storesRecoveredTextRaw_soTheUsersPairsApplyOnceAndStayEditable() async {
+        // **R2 / R9 / R5 / AE7 / R31, and the second regression this unit
+        // closes.** Rebuilding the row from the merged *post-replacement*
+        // string stored an already-substituted transcript into `segments`
+        // and persisted it. From that point the raw text was gone from
+        // disk, so `HistoryText.rendered` re-applied the current pairs on
+        // top of an old substitution.
+        //
+        // A pair whose `to` contains its `from` is what makes that visible:
+        // it double-applies. Every assertion below is red on a build that
+        // stores the merged string.
+        let fx = Fixture(self)
+        fx.state.dictionaryReplacements = [DictionaryReplacement(from: "ML", to: "ML models")]
+        let row = fx.appendRow(["we ship ML", nil])
+
+        XCTAssertEqual(
+            row.text,
+            "we ship ML models \(marker)",
+            "fixture check — the stored mirror is post-replacement, as a pasted string is"
+        )
+
+        fx.state.retryChunkSender = fx.sender(["and ML too"])
+
+        await fx.state.retryEntry(id: row.id)
+
+        let settled = fx.row(row.id)
+        XCTAssertEqual(
+            settled?.segments.compactMap(\.text),
+            ["we ship ML", "and ML too"],
+            "R2 / R9: each response is stored raw, per position — not one merged, substituted string"
+        )
+        XCTAssertEqual(
+            settled.map { HistoryText.rendered($0, replacements: fx.state.dictionaryReplacements) },
+            "we ship ML models and ML models too",
+            "R5: the pair is applied once, at render — a stored substitution would read '…models models…'"
+        )
+        XCTAssertEqual(
+            settled.map { HistoryText.rendered($0, replacements: []) },
+            "we ship ML and ML too",
+            "AE7 / R31: deleting the pair restores the original, because disk kept the pre-replacement text"
+        )
+    }
+
+    // MARK: - Partial run (R16)
+
+    func test_retry_stopsAtTheFirstFailure_andIssuesNoRequestForLaterChunks() async {
+        // R16. One request timeout is the bound on an uncancellable wait,
+        // not the sum of every retained chunk's.
+        let fx = Fixture(self)
+        let row = fx.appendRow(["a", nil, "b", nil, "c", nil, "d"])
+
+        var attempted: [Int] = []
+        fx.state.retryChunkSender = { chunk, _, _, _ in
+            attempted.append(chunk.idx)
+            if chunk.idx == 3 { throw GeminiClient.GeminiError.http(status: 0, body: "offline") }
+            return ("ONE", .zero)
+        }
+
+        await fx.state.retryEntry(id: row.id)
+
+        XCTAssertEqual(attempted, [1, 3], "chunk 5 is never attempted")
+    }
+
+    func test_retry_partialRun_writesWhatRecovered_reputsOnlyTheRest_andDropsTheCount() async {
+        // R16's three consequences in one assertion block: the recovered
+        // text lands, the recovered chunks are released, and the remaining
+        // gaps are exactly the chunks that did not come back (R11) — so a
+        // second retry re-pays for those only.
+        let fx = Fixture(self)
+        let row = fx.appendRow(["a", nil, "b", nil, "c", nil, "d"])
+        fx.state.retryChunkSender = { chunk, _, _, _ in
+            if chunk.idx == 5 { throw GeminiClient.GeminiError.http(status: 503, body: "") }
+            return ("R\(chunk.idx)", .zero)
+        }
+
+        await fx.state.retryEntry(id: row.id)
+
+        let settled = fx.row(row.id)
+        XCTAssertEqual(settled.map { HistoryText.assemble($0.segments) }, "a R1 b R3 c \(marker) d")
+        XCTAssertEqual(
+            settled.map { Set($0.segments.filter(\.isGap).flatMap(\.chunkIndices)) },
+            Set([5]),
+            "R11: the gaps left are read from the per-chunk results, not from a decremented count"
+        )
+        XCTAssertEqual(settled?.failedChunkCount, 1)
+        XCTAssertEqual(settled?.isBroken, true, "the row stays broken")
+
+        let held = fx.store.peek(row.id)
+        XCTAssertEqual(
+            held?.chunks.map(\.idx),
+            [5],
+            "only the chunk that did not recover is re-put — the other two are released"
+        )
+        XCTAssertTrue(fx.state.canRetry(entryID: row.id), "and the row can be retried again")
+    }
+
+    func test_retry_secondRunFillsTheRemainingGap() async {
+        // The round trip the previous test sets up — and the case that
+        // fabricated ordinals would break: the second run indexes against
+        // the positions the first run's row actually carries.
+        let fx = Fixture(self)
+        let row = fx.appendRow(["a", nil, "b", nil, "c"])
+        fx.state.retryChunkSender = { chunk, _, _, _ in
+            if chunk.idx == 3 { throw GeminiClient.GeminiError.http(status: 0, body: "offline") }
+            return ("ONE", .zero)
+        }
+        await fx.state.retryEntry(id: row.id)
+
+        XCTAssertEqual(
+            fx.row(row.id)?.segments.filter(\.isGap).flatMap(\.chunkIndices),
+            [3],
+            "the surviving gap keeps chunk 3's own index, not an ordinal of a re-parse"
+        )
+
+        fx.state.retryChunkSender = fx.sender(["TWO"])
+        await fx.state.retryEntry(id: row.id)
+
+        XCTAssertEqual(fx.row(row.id).map { HistoryText.assemble($0.segments) }, "a ONE b TWO c")
+        XCTAssertEqual(fx.row(row.id)?.failedChunkCount, 0)
+        XCTAssertNil(fx.store.peek(row.id))
+    }
+
+    func test_retry_anEmptyAnswerIsNotARecovery_soItsChunkStaysHeld() async {
+        // Gemini answered with nothing. Writing `""` into the gap would
+        // delete it; keeping the gap AND the audio leaves the user
+        // something to retry. It is also the AE3 shape at this layer: the
+        // *later* gap is the one that recovers, and it must not slide into
+        // the earlier one's place.
+        let fx = Fixture(self)
+        let row = fx.appendRow(["a", nil, "b", nil, "c"])
+        fx.state.retryChunkSender = fx.sender(["", "TWO"])
+
+        await fx.state.retryEntry(id: row.id)
+
+        let settled = fx.row(row.id)
+        XCTAssertEqual(
+            settled?.segments,
+            [
+                .carrying("a", at: [0]),
+                .gap(at: [1]),
+                .carrying("b", at: [2]),
+                .carrying("TWO", at: [3]),
+                .carrying("c", at: [4])
+            ],
+            "chunk 3 holds its text; chunk 1 stays a gap in its own position"
+        )
+        XCTAssertEqual(settled?.failedChunkCount, 1)
+        XCTAssertEqual(fx.store.peek(row.id)?.chunks.map(\.idx), [1])
+    }
+
+    func test_retry_recoveryWhoseIndexHasNoGap_keepsTheAudioAndSurfacesTheFailure() async {
+        // The data-loss shape, in the form that survives the index write: a
+        // payload out of step with its row, carrying a chunk whose position
+        // the row already holds text for. The merge has nowhere to put the
+        // answer, so the run must be treated as the failure it is —
+        // releasing the chunk on the strength of "it recovered" would
+        // destroy the only copy of the audio and throw the recovered text
+        // away in the same breath.
+        let fx = Fixture(self)
+        let row = fx.appendRow(["Ship it by", "already recovered", nil], retaining: [1])
+        fx.state.retryChunkSender = fx.sender(
+            ["the tenth"],
+            tokens: TokenUsage(input: 70, output: 5, cached: 0)
+        )
+
+        await fx.state.retryEntry(id: row.id)
+
+        let settled = fx.row(row.id)
+        XCTAssertEqual(settled?.segments, row.segments, "the row is not rewritten")
         XCTAssertEqual(settled?.failedChunkCount, 1, "and it stays broken")
         XCTAssertEqual(
             fx.store.peek(row.id)?.chunks.map(\.idx),
-            [0],
+            [1],
             "the audio the merge could not use goes back — it is the only copy"
         )
         XCTAssertTrue(fx.hud.errorHUDVisible, "R19: the user is told the run achieved nothing")
@@ -300,35 +403,27 @@ final class AppStateRetryTests: XCTestCase {
         // instead of summing (`tokens = result.tokens`) is caught. With a
         // single shared TokenUsage across calls, that mutation survives.
         let fx = Fixture(self)
-        let row = fx.appendBrokenRow(
-            text: "a \(marker) b \(marker) c \(marker) d",
-            failedChunkCount: 3,
-            chunkCount: 3
-        )
+        let row = fx.appendRow(["a", nil, "b", nil, "c", nil, "d"])
         fx.state.retryChunkSender = { chunk, _, _, _ in
             (
                 "R\(chunk.idx)",
-                TokenUsage(
-                    input: 100 * (chunk.idx + 1),
-                    output: 10 * (chunk.idx + 1),
-                    cached: chunk.idx
-                )
+                TokenUsage(input: 100 * chunk.idx, output: 10 * chunk.idx, cached: chunk.idx)
             )
         }
 
         await fx.state.retryEntry(id: row.id)
 
         let day = await fx.stats.summary().dayBuckets[fx.dayKey(row)]
-        XCTAssertEqual(day?.tokenInput, 600, "100 + 200 + 300")
-        XCTAssertEqual(day?.tokenOutput, 60, "10 + 20 + 30")
-        XCTAssertEqual(day?.tokenCached, 3, "0 + 1 + 2")
+        XCTAssertEqual(day?.tokenInput, 900, "100 + 300 + 500")
+        XCTAssertEqual(day?.tokenOutput, 90, "10 + 30 + 50")
+        XCTAssertEqual(day?.tokenCached, 9, "1 + 3 + 5")
     }
 
     // MARK: - Nothing recovered (R19)
 
     func test_retry_nothingRecovered_leavesTheRowAndPayloadUntouched_andSurfacesTheFailure() async {
         let fx = Fixture(self)
-        let before = fx.appendBrokenRow(text: "", failedChunkCount: 2, chunkCount: 2)
+        let before = fx.appendRow([nil, nil], text: "")
         fx.state.retryChunkSender = { _, _, _, _ in
             throw GeminiClient.GeminiError.http(status: 0, body: "offline")
         }
@@ -336,8 +431,9 @@ final class AppStateRetryTests: XCTestCase {
         await fx.state.retryEntry(id: before.id)
 
         let settled = fx.row(before.id)
-        XCTAssertEqual(settled?.text, "", "the row is not rewritten")
-        XCTAssertEqual(settled?.failedChunkCount, 2, "and its count is untouched")
+        XCTAssertEqual(settled?.segments, before.segments, "the row is not rewritten")
+        XCTAssertEqual(settled?.text, "", "and its legacy mirror is untouched")
+        XCTAssertEqual(settled?.failedChunkCount, 2)
         XCTAssertEqual(
             fx.store.peek(before.id)?.chunks.map(\.idx),
             [0, 1],
@@ -355,7 +451,7 @@ final class AppStateRetryTests: XCTestCase {
     func test_retry_everyChunkAnsweredEmpty_isStillANothingRecoveredRun() async {
         // No thrown error at all, and still nothing to show for it.
         let fx = Fixture(self)
-        let row = fx.appendBrokenRow(text: "", failedChunkCount: 2, chunkCount: 2)
+        let row = fx.appendRow([nil, nil], text: "")
         fx.state.retryChunkSender = fx.sender(["", ""])
 
         await fx.state.retryEntry(id: row.id)
@@ -365,18 +461,14 @@ final class AppStateRetryTests: XCTestCase {
         XCTAssertTrue(fx.hud.errorHUDVisible)
     }
 
-    // MARK: - Stats accounting (R15 / KTD7)
+    // MARK: - Stats accounting (R18 / KTD11)
 
     func test_retry_onARowWhoseSessionWasAlreadyCounted_addsTokensOnly() async {
         // AE8. The session pasted with gaps, so lifetime stats already
         // counted it. Counting again would invent a session and duplicate
         // the transcript's words.
         let fx = Fixture(self)
-        let row = fx.appendBrokenRow(
-            text: "Ship it by \(marker) and review after.",
-            failedChunkCount: 1,
-            chunkCount: 1
-        )
+        let row = fx.appendRow(["Ship it by", nil, "and review after."])
         fx.state.retryChunkSender = fx.sender(
             ["the tenth"],
             tokens: TokenUsage(input: 900, output: 40, cached: 700)
@@ -404,7 +496,7 @@ final class AppStateRetryTests: XCTestCase {
         // across two runs: the session count rises at the first retry that
         // recovers text and never again, and both runs add their tokens.
         let fx = Fixture(self)
-        let row = fx.appendBrokenRow(text: "", failedChunkCount: 2, chunkCount: 2)
+        let row = fx.appendRow([nil, nil], text: "")
 
         fx.state.retryChunkSender = { chunk, _, _, _ in
             if chunk.idx == 1 { throw GeminiClient.GeminiError.http(status: 0, body: "offline") }
@@ -433,14 +525,100 @@ final class AppStateRetryTests: XCTestCase {
         XCTAssertEqual(afterSecond.totalWords, 3, "and adds no second copy of the words")
         XCTAssertEqual(afterSecond.totalDurationSeconds, Fixture.durationSeconds)
         XCTAssertEqual(afterSecond.dayBuckets[fx.dayKey(row)]?.tokenInput, 155, "both runs' tokens")
-        XCTAssertEqual(fx.row(row.id)?.text, "hello world goodbye")
+        XCTAssertEqual(
+            fx.row(row.id).map { HistoryText.assemble($0.segments) },
+            "hello world goodbye"
+        )
+    }
+
+    func test_retry_onARowWhoseOnlyTextSegmentIsAGateFilteredEmptyString_addsTokensOnly() async {
+        // R27 is the trap in R18, and this is the row that springs it.
+        // Chunk 0 failed recoverably; chunk 1's answer
+        // `HallucinationLengthGate` dropped, which stores `text: ""` — a
+        // call that *answered*, not a lost chunk. The session stitched to
+        // "[…]", took the success arm, pasted, and was counted.
+        //
+        // So the never-counted signal must be "every segment is a gap",
+        // not "no segment carries any characters": under the looser
+        // reading this row looks never-counted and its recovery invents a
+        // second session with the transcript's words. `StatsStore.record`
+        // is not idempotent, so nothing downstream would notice.
+        let fx = Fixture(self)
+        let row = fx.appendRow(segments: [
+            .gap(at: [0]),
+            .carrying("", at: [1])
+        ])
+        XCTAssertEqual(
+            row.segments.map(\.text), [nil, ""],
+            "fixture check — a gap beside a gate-filtered empty answer is the whole case"
+        )
+        XCTAssertFalse(
+            row.text.isEmpty,
+            "fixture check — this row pasted \"\(marker)\", so it reached the success arm and was counted"
+        )
+
+        fx.state.retryChunkSender = fx.sender(
+            ["the tenth"],
+            tokens: TokenUsage(input: 700, output: 30, cached: 0)
+        )
+        await fx.state.retryEntry(id: row.id)
+
+        let snap = await fx.stats.summary()
+        XCTAssertEqual(
+            snap.totalSessions, 0,
+            "an empty-text segment is text (R27) — this session was already counted, so its "
+            + "recovery counts no second one"
+        )
+        XCTAssertEqual(snap.totalWords, 0, "and adds no second copy of its words")
+        XCTAssertEqual(
+            snap.dayBuckets[fx.dayKey(row)]?.tokenInput, 700,
+            "the retry's spend is still recorded"
+        )
+    }
+
+    func test_retry_countsTheWordsTheRowShows_withTheUsersCurrentPairsApplied() async {
+        // R13 / R14 on the retry side, and the reason it needs its own
+        // case: every other test here runs with `dictionaryReplacements`
+        // empty, where `HistoryText.rendered(updated, replacements: [])`,
+        // `HistoryText.assemble(updated.segments)` and `updated.text` all
+        // produce the same word count. That fixture cannot express the
+        // failure — it is green for a `settleRetry` that dropped the live
+        // pair list, which is exactly the regression R14 exists to stop
+        // (the convention this repo wrote down in
+        // `solutions/conventions/testing-spm-and-git-2026-05-15.md`).
+        //
+        // A pair that *expands* is what makes the readings diverge: the raw
+        // segment says two words, the rendered row says three.
+        let fx = Fixture(self)
+        let row = fx.appendRow([nil], text: "")
+        fx.state.dictionaryReplacements = [
+            DictionaryReplacement(from: "ML", to: "machine learning")
+        ]
+        fx.state.retryChunkSender = fx.sender(["ML rocks"])
+
+        await fx.state.retryEntry(id: row.id)
+
+        XCTAssertEqual(
+            fx.row(row.id).map {
+                HistoryText.rendered($0, replacements: fx.state.dictionaryReplacements)
+            },
+            "machine learning rocks",
+            "fixture check — the pair must reach the rendered row, or the count below proves nothing"
+        )
+        let snap = await fx.stats.summary()
+        XCTAssertEqual(snap.totalSessions, 1)
+        XCTAssertEqual(
+            snap.totalWords, 3,
+            "lifetime words must be counted from the string the row shows, current pairs applied "
+            + "(R13 / R14 / KD6). Counting the raw segments or the legacy `text` mirror records 2."
+        )
     }
 
     func test_retry_recordsTokensEvenWhenNothingRecovered() async {
         // R15 says every time. A chunk that answered with nothing still
         // cost the user a request.
         let fx = Fixture(self)
-        let row = fx.appendBrokenRow(text: "", failedChunkCount: 1, chunkCount: 1)
+        let row = fx.appendRow([nil], text: "")
         fx.state.retryChunkSender = fx.sender([""], tokens: TokenUsage(input: 800, output: 0, cached: 0))
 
         await fx.state.retryEntry(id: row.id)
@@ -458,7 +636,7 @@ final class AppStateRetryTests: XCTestCase {
         // row that no longer exists — memory nothing can reach and no
         // `retain(only:)` will visit until the next history mutation.
         let fx = Fixture(self)
-        let row = fx.appendBrokenRow(text: "", failedChunkCount: 2, chunkCount: 2)
+        let row = fx.appendRow([nil, nil], text: "")
 
         fx.state.retryChunkSender = { [state = fx.state] chunk, _, _, _ in
             if chunk.idx == 0 { state.deleteHistoryEntry(id: row.id) }
@@ -476,7 +654,7 @@ final class AppStateRetryTests: XCTestCase {
 
     func test_retry_deletedMidRun_stillRecordsTheTokensItSpent() async {
         let fx = Fixture(self)
-        let row = fx.appendBrokenRow(text: "", failedChunkCount: 1, chunkCount: 1)
+        let row = fx.appendRow([nil], text: "")
         fx.state.retryChunkSender = { [state = fx.state] _, _, _, _ in
             state.deleteHistoryEntry(id: row.id)
             return ("recovered", TokenUsage(input: 42, output: 7, cached: 0))
@@ -494,7 +672,7 @@ final class AppStateRetryTests: XCTestCase {
         // must abandon at the next boundary rather than discovering the
         // deletion once at settle time.
         let fx = Fixture(self)
-        let row = fx.appendBrokenRow(text: "", failedChunkCount: 4, chunkCount: 4)
+        let row = fx.appendRow([nil, nil, nil, nil], text: "")
 
         var attempted: [Int] = []
         fx.state.retryChunkSender = { [state = fx.state] chunk, _, _, _ in
@@ -531,15 +709,11 @@ final class AppStateRetryTests: XCTestCase {
             sourceBundleID: Fixture.bundleID,
             timestamp: Date(timeIntervalSinceNow: -600),
             durationSeconds: 4,
-            failedChunkCount: 0
+            segments: [.carrying("an earlier, healthy transcript", at: [0])]
         )
         await fx.history.append(older)
 
-        let row = fx.appendBrokenRow(
-            text: "Ship it by \(marker) and review after.",
-            failedChunkCount: 1,
-            chunkCount: 1
-        )
+        let row = fx.appendRow(["Ship it by", nil, "and review after."])
         await fx.history.append(row)
 
         fx.state.retryChunkSender = fx.sender(["the tenth"])
@@ -550,6 +724,15 @@ final class AppStateRetryTests: XCTestCase {
             onDisk.map(\.id),
             [older.id, row.id],
             "the row is replaced where it stood — a re-append would reorder the last-10 list"
+        )
+        XCTAssertEqual(
+            onDisk.last?.segments,
+            [
+                .carrying("Ship it by", at: [0]),
+                .carrying("the tenth", at: [1]),
+                .carrying("and review after.", at: [2])
+            ],
+            "the recovered sequence round-trips through the store, positions and all"
         )
         XCTAssertEqual(onDisk.last?.text, "Ship it by the tenth and review after.")
         XCTAssertEqual(onDisk.last?.failedChunkCount, 0, "the recovered row persists as un-broken")
@@ -602,25 +785,59 @@ final class AppStateRetryTests: XCTestCase {
             )
         }
 
-        /// A broken row plus its retained payload, appended through the same
-        /// path production uses.
+        /// A row described the way a session produces one: one answer per
+        /// chunk, in chunk order, `nil` for a gap.
+        ///
+        /// - Parameter text: the legacy `text` mirror. Defaults to what the
+        ///   paste would have been — assembled, with the state's *current*
+        ///   pairs applied — which is what `RecordingSession.makeHistoryEntry`
+        ///   stores. Pass `""` for the all-failed row, which is exactly what
+        ///   `brokenHistoryEntry()` writes. It is the mirror only (KTD10) —
+        ///   the never-counted-session signal is `isEntirelyLost`, read off
+        ///   `segments`, so what makes a row never-counted here is passing
+        ///   `nil` for every answer, not passing `""` for this.
+        /// - Parameter retaining: the chunk indices whose audio is held.
+        ///   Defaults to the gaps' own indices — the join a retry writes by
+        ///   (R7). Override it only to build a payload deliberately out of
+        ///   step with its row.
         @discardableResult
-        func appendBrokenRow(
-            text: String,
-            failedChunkCount: Int,
-            chunkCount: Int,
+        func appendRow(
+            _ answers: [String?],
+            text: String? = nil,
+            retaining: [Int]? = nil,
+            model: GeminiModel = .flashLite
+        ) -> HistoryEntry {
+            appendRow(
+                segments: answers.enumerated().map {
+                    HistoryEntry.Segment(chunkIndices: [$0.offset], text: $0.element)
+                },
+                text: text,
+                retaining: retaining,
+                model: model
+            )
+        }
+
+        @discardableResult
+        func appendRow(
+            segments: [HistoryEntry.Segment],
+            text: String? = nil,
+            retaining: [Int]? = nil,
             model: GeminiModel = .flashLite
         ) -> HistoryEntry {
             let entry = HistoryEntry(
                 id: UUID(),
-                text: text,
+                text: text ?? HistoryText.rendered(
+                    segments,
+                    replacements: state.dictionaryReplacements
+                ),
                 sourceAppName: "Slack",
                 sourceBundleID: Self.bundleID,
                 timestamp: Date(),
                 durationSeconds: Self.durationSeconds,
-                failedChunkCount: failedChunkCount
+                segments: segments
             )
-            state.recordHistoryEntry(entry, retaining: payload(chunkCount: chunkCount, model: model))
+            let indices = retaining ?? segments.filter(\.isGap).flatMap(\.chunkIndices)
+            state.recordHistoryEntry(entry, retaining: payload(chunkIndices: indices, model: model))
             return entry
         }
 
@@ -641,13 +858,16 @@ final class AppStateRetryTests: XCTestCase {
             }
         }
 
-        private func payload(chunkCount: Int, model: GeminiModel) -> RetainedRecording {
+        private func payload(chunkIndices: [Int], model: GeminiModel) -> RetainedRecording {
             RetainedRecording(
-                chunks: (0..<chunkCount).map {
+                chunks: chunkIndices.map { idx in
                     RetainedRecording.Chunk(
-                        idx: $0,
-                        isFinal: $0 == chunkCount - 1,
-                        audio: Data([UInt8(0xA0 + $0)]),
+                        idx: idx,
+                        isFinal: idx == chunkIndices.last,
+                        // Distinct per chunk, per the unit's execution note:
+                        // an ordering defect is invisible against equal
+                        // elements.
+                        audio: Data([0xA0 &+ UInt8(truncatingIfNeeded: idx)]),
                         // 4 s of audio: comfortably above
                         // `HallucinationLengthGate`'s floor, so a short
                         // fixture answer is never filtered as a

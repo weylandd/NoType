@@ -52,15 +52,77 @@ Then audio `inline_data` parts (1..N for batched calls). The **lite path** drops
 
 `thinkingLevel: "minimal"`, `top_p: 0.2`, `responseMimeType: "text/plain"`. Don't set `temperature` or `topK`. Don't enable `responseSchema` for transcription.
 
-## Retry policy
+## Request budgets and retry policy
+
+### Request budgets — both scale with the audio-part count
+
+**Latency tracks the number of audio parts in the request, not its byte size
+and not the audio duration.** Measured 2026-08-13 against the live API with
+the real request shape and real AAC encoding, four repetitions each:
+
+| shape | audio | bytes | max idle | max total |
+|---|---|---|---|---|
+| 4-chunk batch | 159 s | 653 KB | 26.85 s | 27.16 s |
+| 1-chunk 180 s force-cut | 180 s | 735 KB | 7.62 s | 7.81 s |
+
+The batch carries *less* audio and *fewer* bytes and takes roughly four times
+as long. That is why `requestInactivityBudget(audioPartCount:)` is a function
+and there is no flat request timeout any more: `2 s + 10 s × parts`, clamped
+to `[10 s, 90 s]`, which clears each measured maximum by a near-uniform
+~1.55×. The full derivation — the fitted model, the safety factor, and why
+the factor is generous rather than tight — lives in that function's
+doc-comment and is not repeated here.
+
+Four things about the wiring are load-bearing:
+
+- **The budget is applied per request** (`URLRequest.timeoutInterval`), set in
+  `sendRequest` where the part count is known. This works because
+  `URLRequest.timeoutInterval` **overrides**
+  `URLSessionConfiguration.timeoutIntervalForRequest` in *both* directions —
+  measured against a stalling socket, not assumed: config 3 s / request 9 s
+  failed at 9.01 s, config 9 s / request 3 s failed at 3.01 s. Had the
+  configuration clamped instead, a batch would have been silently killed at
+  the session default while every budget test stayed green.
+  `GeminiRetryPolicyTests` pins that precedence with a live loopback socket
+  for exactly that reason.
+- **Every request in the file sets its own budget**, and the count is pinned
+  against the count of `URLRequest` constructions, so a *new* request path
+  that inherits the session default breaks the guard rather than shipping a
+  budget nobody chose. `classifyApp` and `validateKey` carry no audio and sit
+  off the axis — `auxiliaryRequestBudget` (30 s, deliberately unchanged by
+  the transcription cut) and a 10 s literal respectively.
+- **`timeoutIntervalForResource` is session-level and has no per-request
+  counterpart** — also measured: resource 3 s against a request timeout of
+  30 s failed at 3.27 s. So the whole-transfer ceiling is a single value
+  sized for the largest request the budget function will serve
+  (`requestBudgetCeiling + uploadAllowance`). It is an additional ceiling and
+  never a fallback: the two timers are independent and whichever fires first
+  wins.
+- **It moved from 30 s, and that fixed a live defect.** The measured max
+  total for a 4-part batch is 27.16 s against the old 30 s ceiling, so a
+  5-part batch was already exceeding it — killing a legitimate request and
+  producing a silent `[…]` in text the user had already had pasted.
+
+**What the part-count finding means for the pause ladder.** `PauseDetector`'s
+adaptive threshold used to be justified partly as a network-budget device —
+"keep each chunk short so its request fits inside the 30 s ceiling". That
+reasoning is retired along with the flat ceiling: latency tracks *parts*, so a
+shorter chunk does not buy a shorter request, and what actually costs time is
+batching several chunks into one call. The ladder's shape is unchanged and
+still right on its own merits (chunk quality — no mid-sentence force-cuts), but
+prose anywhere that derives it from a fixed network timeout is wrong. Corrected
+in `PauseDetector.swift`, `NoType/Recording/CLAUDE.md` invariants 4–5 and
+`docs/solutions/design-patterns/adaptive-pause-threshold-2026-05-16.md`.
+
+### Retry policy
 
 **Before the retry loop: a reachability pre-check.** `sendRequest` asks
 `NetworkReachability` whether the system reports a network path and, when
 it definitively does not, throws without issuing a request. This exists
-because the session's `URLSession` runs `waitsForConnectivity = false` with
-a 30 s request timeout, so an offline request does *not* fail fast — it
-parks for the full 30 s, and with the status-0 retry below one Gemini call
-offline cost ~60.5 s. A `splitRetry` over N chunks multiplied that.
+because the session's `URLSession` runs `waitsForConnectivity = false`, so an
+offline request does *not* fail fast — it parks for the request's whole
+inactivity budget, and with the status-0 retry below one Gemini call offline
+cost twice that. A `splitRetry` over N chunks multiplied it again.
 
 Three things about it are load-bearing:
 
@@ -94,6 +156,24 @@ Three things about it are load-bearing:
   internet" HUD. A distinct case would require updating `isTerminal` /
   `shouldRetain` in lockstep — a stop condition in the retry plan.
 
+**Every status-0 error a transcription call can throw goes through
+`wrapURLError`.** All three producers — the `URLError` catch in
+`performOnce`, its no-`HTTPURLResponse` guard, and `sendRequest`'s pre-flight
+short-circuit — so the body always carries `urlErrorBodyPrefix` and
+`AppState`'s `NetworkErrorTranslator.parse` never fails on one. This is not
+tidiness: the no-response guard used to throw a bare
+`http(status: 0, body: "no HTTPURLResponse")`, which the parser rejected, and
+the failure fell past the network branch into the generic HTTP arm and
+rendered as **"Gemini rejected the request / Unexpected response (HTTP 0)"** —
+a status number that is not a status, about a request that never reached
+Gemini. Pinned by
+`GeminiClientOfflineShortCircuitTests.test_performOnce_throwsNoBareStatusZero`
+(a source guard, because the bare form is still a constructible `GeminiError`
+and no value test can see the revert). `classifyApp` and `validateKey` keep
+their bare status-0 guards deliberately — they sit off the transcription path
+and `validateKey`'s renders through `errorDescription` on the API-key surface,
+where "Gemini error 0." is pinned by that same file.
+
 The monitor is created on the first Gemini request and never at launch —
 `GeminiClient` is constructed inside `NoTypeApp.init()`, which runs before
 `NSApplicationMain`. See `NoType/UI/CLAUDE.md` "Launch ordering".
@@ -105,6 +185,32 @@ Implemented via `retryDecision(for:attempt:)`:
 - HTTP 5xx → 1 retry after 500 ms.
 - HTTP 4xx other than 429 → no retry.
 - `GeminiError.truncated` (`finishReason == MAX_TOKENS`) → no retry (an identical re-issue truncates identically; recovered one layer up as a `[…]` gap marker).
+
+**The network-class retry — and only that one — is issued over a fresh
+connection** (R28 / KTD13). `requiresFreshConnection(after:)` gates a
+`flushPooledConnections()` call (`URLSession.flush`) between the failure and
+the backoff sleep, because the measured failure was a dead *pooled
+connection*, not a dead network: a request stalled for the full budget and
+the same payload answered in 1.7 s on a new connection moments later.
+Re-issuing over the socket that just went silent re-inherits the fault and
+turns the retry into nothing but a second wait. A 429 or a 5xx came *back*
+from Gemini over a demonstrably working connection, so those arms do not pay
+for a handshake. Two things about it are load-bearing:
+
+- **`requiresFreshConnection` has a twin — `RecordingSession.isNetworkClass(_:)`.**
+  Both are `.http(status: 0, _)`. They are separate because they answer for
+  different consumers (drop the pool / bound `splitRetry`), and nothing
+  structural keeps them agreeing across the module boundary, so
+  `GeminiRetryPolicyTests` pins them equal over the status space. Widen one,
+  widen the other.
+- **`flushPooledConnections` is safe beside a sibling request, and invariant
+  I1 is not the reason.** I1 bounds one *recording* session's transcription
+  traffic; `classifyApp` and `validateKey` share the same `URLSession` and
+  bypass `sendRequest` entirely, and `classifyApp` is fire-and-forget
+  launched by the recording-start path itself. What makes it safe is that
+  `flush` clears the idle connection cache and affects only *future*
+  requests. `reset(completionHandler:)` and `invalidateAndCancel()` do
+  disturb in-flight work and must not be substituted.
 
 Each attempt logs `attempt=N`. These retries are the HTTP-level safety net inside one Gemini call. **Session-level resilience lives one layer up** in `RecordingSession`: if a call still fails after exhausting its retries, the session classifies the error as terminal (auth, blocked, encode, cancellation) or recoverable (everything else — HTTP, empty, decoding, `.truncated`). Recoverable failures become `RecordingSession.failureMarker` ("[…]") at stitch time and a batched call gets split into N independent `transcribe` retries first. The session aborts only on terminal errors or when every dispatched chunk failed. See `NoType/Recording/CLAUDE.md` "Partial recovery".
 
@@ -123,12 +229,14 @@ Each attempt logs `attempt=N`. These retries are the HTTP-level safety net insid
 - `NoTypeTests/PromptEvalTests.swift` + `NoTypeTests/PromptEvalHarness.swift` — live-API behavioural eval. Drives 9 audio fixtures through the prompts and asserts on substring / word-count / wordCountCeiling. Gated by Keychain entry `app.notype.tests.gemini` (or `NOTYPE_GEMINI_KEY` env). Skips cleanly when neither is set.
 - `NoTypeTests/AppCategorizerTests.swift` — pins the classifier JSON parser.
 - `NoTypeTests/NetworkReachabilityTests.swift` — pins the offline verdict's conservatism (only `.unsatisfied`; `nil` / `.requiresConnection` / an unrecognised future case all answer "not offline"), the `NWPath.Status` mapping, the first-delivery wait cap, and last-writer-wins on `record`. `test_liveProbe_onAnOnlineMachine_doesNotReportOffline` starts a **real** `NWPathMonitor` and asserts a value rather than skipping — deliberate, but it means the suite fails on a genuinely offline machine. Don't run the suite with Wi-Fi off during an offline smoke test and read that failure as a regression.
-- `NoTypeTests/GeminiClientOfflineShortCircuitTests.swift` — pins the short-circuit error's *shape* (same `.http(0, "URLError code=…")` both producers build, still recoverable and retainable downstream), the log-only status-0 description arm, and the *position* of the check via a source guard: present in `sendRequest`, absent from `performOnce`, and gating an actual `throw` ahead of the retry loop.
+- `NoTypeTests/GeminiRetryPolicyTests.swift` — pins the HTTP retry ladder (swept over the status space, not enumerated), `requiresFreshConnection` and its agreement with `RecordingSession.isNetworkClass`, and the budgets. The budget assertions are written **against the measurement table carried as a fixture**, not against the literals: the derived budget must clear each measured maximum with a stated safety factor, and that factor must stay near-uniform across the measured shapes — so a re-tune has to argue with the data rather than edit a number. Plus the clamps, the ceiling's margin over every derivable budget, the upload allowance derived from a slow-uplink figure (it appears on both sides of the ceiling's own definition, so without that it would have no mutation coverage), and AE11's restated cost. `test_perRequestTimeout_overridesTheSessionConfiguration_soAWidenedBudgetIsReal` stands up a **real loopback socket that listens and is never accepted** and asserts the request's own longer timeout wins over a shorter session default — the one platform fact the whole per-request derivation rests on. It costs ~4 s and is deliberate. None of this was reachable from a test before U1 of `docs/plans/2026-08-11-001-fix-dictation-delivery-reliability-plan.md` widened it past `private` (KTD3).
+- `NoTypeTests/GeminiClientOfflineShortCircuitTests.swift` — pins the short-circuit error's *shape* (same `.http(0, "URLError code=…")` both producers build, still recoverable and retainable downstream), the log-only status-0 description arm, and the *position* of the check via a source guard: present in `sendRequest`, absent from `performOnce`, and gating an actual `throw` ahead of the retry loop. It carries a second source guard for the R28 connection drop (present, gated, ordered ahead of the backoff), one pinning that the shipped `URLSession` is built from `makeSessionConfiguration()` — without that, a hand-rolled config in `init()` leaves every budget test green while the app ships a different timeout — and one pinning that **every** `URLRequest` in the module sets a budget of its own, by *count* rather than by needle, so a new request path silently inheriting the session default breaks it.
 
 ## Pointers
 
 - Why Gemini 3.1 Flash-Lite → `solutions/tooling-decisions/gemini-3-1-flash-lite-2026-05-15.md`.
-- Why one request in flight (serial actor) → `solutions/architecture-patterns/serial-gemini-actor-2026-05-15.md`.
+- Why one request in flight (serial actor), and the scope boundary that invariant does **not** reach → `solutions/architecture-patterns/serial-gemini-actor-2026-05-15.md`.
+- Why the connection flush's safety claim cites `flush`'s own semantics rather than invariant I1 → `solutions/conventions/cited-invariant-must-cover-the-population-2026-08-11.md`.
 - Why no streaming → `solutions/design-patterns/no-streaming-gemini-2026-05-15.md`.
 - Why local concat → `solutions/design-patterns/local-chunk-concatenation-2026-05-15.md`.
 - Per-app classifier → `solutions/architecture-patterns/per-app-categorization-instructions-2026-05-15.md` + `NoType/Instructions/CLAUDE.md`.

@@ -501,13 +501,29 @@ actor StatsStore {
     /// the caller can update its observable mirror without an extra
     /// round-trip.
     ///
-    /// Backwards-compat shim: callers that don't track per-session
+    /// Backwards-compat shims: callers that don't track per-session
     /// `TokenUsage` (legacy paths, tests, the still-extant
-    /// no-token-aware code path) route here. The `tokens:`-aware
-    /// overload below is the production wiring after U5.
+    /// no-token-aware code path) route here. The `text:`-aware
+    /// overload below is the production wiring.
+    ///
+    /// They assemble the row themselves and therefore count it with **no
+    /// replacement pairs applied**, which is right for a test surface
+    /// that has none and wrong for production — hence the split. A
+    /// production caller passes the rendered string it also shows the
+    /// user (R13, R14).
     @discardableResult
     func record(_ entry: HistoryEntry) -> StatsSnapshot {
         record(entry, tokens: .zero)
+    }
+
+    @discardableResult
+    func record(_ entry: HistoryEntry, tokens: TokenUsage, model: GeminiModel = .flashLite) -> StatsSnapshot {
+        record(
+            entry,
+            text: HistoryText.assemble(entry.segments),
+            tokens: tokens,
+            model: model
+        )
     }
 
     /// Token-aware record. Folds the session's word/duration/app
@@ -517,10 +533,32 @@ actor StatsStore {
     /// history-entry deletion (matches the existing carve-out for
     /// word counts — see
     /// `solutions/conventions/no-telemetry-with-statsstore-carveout-2026-05-15.md`).
+    ///
+    /// **`text` is passed in rather than read off the entry (R13, R14 /
+    /// KD6).** The row no longer *has* one string: it stores a sequence
+    /// of raw response segments, and the string a reader wants is the
+    /// assembled sequence with the user's current replacement pairs
+    /// applied — `HistoryText.rendered`, which needs a pair list this
+    /// actor has no business owning. Counting the raw segments instead
+    /// would silently re-base lifetime totals the first time a pair
+    /// expanded or collapsed a phrase; counting `entry.text` would read
+    /// the legacy mirror this unit stopped consuming. So the counter
+    /// receives the string and stays text-agnostic, and the caller —
+    /// which already has the pairs — decides what the row says.
+    ///
+    /// The insertion-normalised paste string and the assembled row
+    /// string can differ by a leading space or a stripped sentence-final
+    /// period. Neither moves a whitespace-split word count, which is why
+    /// AE8 holds: totals keep the meaning they had before this unit.
     @discardableResult
-    func record(_ entry: HistoryEntry, tokens: TokenUsage, model: GeminiModel = .flashLite) -> StatsSnapshot {
+    func record(
+        _ entry: HistoryEntry,
+        text: String,
+        tokens: TokenUsage,
+        model: GeminiModel = .flashLite
+    ) -> StatsSnapshot {
         var snap = summary()
-        let words = Self.wordCount(entry.text)
+        let words = Self.wordCount(text)
         let duration = max(0, entry.durationSeconds)
         // Sessions without measured duration (legacy entries) contribute
         // to text totals but NOT to WPM / Time-saved calculations.
@@ -578,23 +616,24 @@ actor StatsStore {
     /// Fold Gemini token usage into the day and day×app buckets **without**
     /// counting a session, words, or duration.
     ///
-    /// The retry half of KTD7. `record(_:tokens:model:)` is documented as
+    /// The retry half of R18. `record(_:tokens:model:)` is documented as
     /// non-idempotent (invariant 8) precisely because it increments
     /// `totalSessions`, so a retry that re-sends a row whose session was
     /// already counted when it pasted cannot go through it — the user would
     /// gain a phantom session and a second copy of the transcript's words
     /// every time they tapped retry (AE8). But the tokens are real spend on
-    /// the user's own key and R15 says every retry records them, so they need
-    /// a path of their own.
+    /// the user's own key and every retry records them whatever its outcome,
+    /// so they need a path of their own.
     ///
     /// Keyed off the row's `timestamp` and bundle id, not "now", so a retry
     /// tomorrow of a dictation from yesterday prices into yesterday's bucket
     /// alongside the session it belongs to.
     ///
     /// Deliberately does **not** touch `totalWords` / `totalSessions` /
-    /// `totalDuration*`: those are the once-per-entry half of KTD7 and are
+    /// `totalDuration*`: those are the once-per-entry half of R18 and are
     /// written by `record(_:tokens:model:)` on the first retry that recovers
-    /// text for a session lifetime stats never counted (AE9). A `.zero`
+    /// text for a session lifetime stats never counted — the rows for which
+    /// `HistoryEntry.isEntirelyLost` is true (AE9, KTD11). A `.zero`
     /// usage is a no-op, so a caller need not pre-check.
     @discardableResult
     func recordTokens(

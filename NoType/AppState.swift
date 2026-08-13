@@ -814,8 +814,8 @@ final class AppState {
     ///
     /// A seam, not a strategy — production has exactly one implementation
     /// (`sendRetryChunk`, below) and `retryChunkSender` stays `nil`. It
-    /// exists because everything U6 has to get right — the stats split of
-    /// KTD7, R16's stop-at-first-failure, R19's leave-everything-alone — is
+    /// exists because everything U6 has to get right — R18's stats split,
+    /// R16's stop-at-first-failure, R19's leave-everything-alone — is
     /// only observable across a *sequence* of per-chunk outcomes, and there
     /// is no other way to author that sequence without a live network. Test
     /// scenarios AE7 / AE8 / AE9 / R16 / R19 drive it.
@@ -877,7 +877,9 @@ final class AppState {
     ///    Stopping at the first failure (R16) bounds a *failing* run, but
     ///    one failure can itself cost two attempts —
     ///    `GeminiClient.retryDecision` re-issues network and 5xx classes
-    ///    once — against a 30 s `timeoutIntervalForResource`. And a run
+    ///    once — each capped by that request's own inactivity budget
+    ///    (`GeminiClient.requestInactivityBudget(audioPartCount:)`; a
+    ///    retry re-sends one chunk, so it is the single-part budget). And a run
     ///    whose chunks all answer, slowly, never breaks at all: it pays
     ///    every chunk's latency in turn. Since `canRetry` blocks every
     ///    row while any retry runs, that is also how long the other rows
@@ -921,12 +923,18 @@ final class AppState {
                 Self.log.info("retry abandoned — its row was removed mid-run")
                 break
             }
-            // KTD6: the row's surviving text, markers filtered out, plus
-            // whatever this run has recovered so far — so a chunk that just
-            // came back becomes context for the next one, exactly as
+            // R10: the row's text-carrying chunks, raw, plus whatever this
+            // run has recovered so far — so a chunk that just came back
+            // becomes context for the next one, exactly as
             // `RecordingSession.splitRetry` re-queries `currentPriors()`.
+            // A gap contributes nothing, so no marker reaches Gemini, and
+            // no replacement pair can move the seam the way splitting the
+            // row's rendered text on `[…]` could.
             let priors = RetryMerge.priors(
-                from: RetryMerge.merge(existingText: row.text, recovered: recovered)
+                from: RetryMerge.merge(
+                    into: row.segments,
+                    outcomes: Self.retryOutcomes(chunks: payload.chunks, recovered: recovered)
+                ).segments
             )
             do {
                 let result = try await send(chunk, payload.context, priors, payload.model)
@@ -954,8 +962,8 @@ final class AppState {
         }
 
         // One slot per retained chunk, so a run that stopped early still
-        // describes every chunk. `RetryMerge.merge`'s empty-text branch and
-        // the remaining-chunk derivation below both zip against the payload.
+        // describes every chunk. `retryOutcomes` and the remaining-chunk
+        // derivation in `settleRetry` both zip against the payload.
         while recovered.count < payload.chunks.count { recovered.append(nil) }
 
         await settleRetry(
@@ -1002,6 +1010,24 @@ final class AppState {
         )
     }
 
+    /// Pair each retained chunk with what this run got back for it — the
+    /// shape `RetryMerge` writes by (R7).
+    ///
+    /// The chunk supplies the index and the run supplies the text, which is
+    /// the only place those two facts meet: `RetainedRecording.Chunk.idx`
+    /// is the position the session recorded the audio under, and it is
+    /// the same number the row's gap segment carries. `zip` truncates on
+    /// purpose — mid-run the answers are shorter than the chunk list, and
+    /// the priors call wants exactly the chunks answered so far.
+    private nonisolated static func retryOutcomes(
+        chunks: [RetainedRecording.Chunk],
+        recovered: [String?]
+    ) -> [RetryMerge.ChunkOutcome] {
+        zip(chunks, recovered).map {
+            RetryMerge.ChunkOutcome(chunkIndex: $0.0.idx, text: $0.1)
+        }
+    }
+
     /// Land one retry run's outcome: rewrite the row, decide what stays
     /// held, and account for the spend.
     ///
@@ -1022,10 +1048,17 @@ final class AppState {
         tokens: TokenUsage,
         failure: Error?
     ) async {
+        // Each recovery is written into the gap covering its own chunk
+        // index (R7) — no scan over the row's text, so a replacement pair
+        // that restyled the `[…]` cannot cost the user their recovery (R8).
+        //
         // Placement, not recovery, is what licenses a release: a chunk
-        // whose text the merge could not land keeps its marker slot AND
-        // its audio. See `RetryMerge.Merged.placed`.
-        let merged = RetryMerge.mergeDetailed(existingText: row.text, recovered: recovered)
+        // whose text the merge could not land keeps its gap AND its audio.
+        // See `RetryMerge.Merged.placed`.
+        let merged = RetryMerge.merge(
+            into: row.segments,
+            outcomes: Self.retryOutcomes(chunks: payload.chunks, recovered: recovered)
+        )
         let placedCount = merged.placedCount
 
         // Exit 1: the row was deleted while the run was in flight. R13 keeps
@@ -1069,31 +1102,47 @@ final class AppState {
             return
         }
 
-        // Exit 3: something landed. The recovered text replaces its gap
-        // markers in the row (R12) — the text already pasted into the target
-        // app is not touched and cannot be, which is the whole of KD5.
-        let mergedText = merged.text
+        // Exit 3: something landed. The recovered text now occupies the gap
+        // it was re-sent for — the text already pasted into the target app
+        // is not touched and cannot be, which is the whole of KD5.
+        //
         // Whatever did not land stays held, so the next retry re-pays for
-        // those chunks only (R16). Re-putting the reduced payload — rather
-        // than releasing chunk by chunk — is what keeps `RetainedAudioStore`
-        // a whole-entry API.
+        // those chunks only. Re-putting the reduced payload — rather than
+        // releasing chunk by chunk — is what keeps `RetainedAudioStore` a
+        // whole-entry API.
         let remaining = zip(payload.chunks, merged.placed)
             .filter { !$0.1 }
             .map(\.0)
+        // The **producing** initializer, not the `failedChunkCount:`
+        // reconstruction one, and this is the load-bearing half of the
+        // unit. Two things follow from it:
+        //
+        // - **The positions are real.** Reconstruction derives a sequence
+        //   by parsing markers out of a string, so its indices are ordinals
+        //   of that parse rather than the chunk index any audio was
+        //   recorded under. A second retry on such a row would index
+        //   against positions no chunk ever had.
+        // - **The stored text stays raw** (R2, R9). Rebuilding from the
+        //   merged *post-replacement* string used to bake a substitution
+        //   into `segments` and persist it, after which the raw text was
+        //   gone from disk and `HistoryText.rendered` re-applied the
+        //   current pairs on top of the old one — a pair whose `to`
+        //   contains its `from` double-applied, and deleting the pair no
+        //   longer changed how the row read (R5 / AE7 / R31).
+        //
+        // `failedChunkCount` is derived from the sequence, so the remaining
+        // gaps are read from the per-chunk results rather than by
+        // decrementing a count (R11). `text` is written only as the legacy
+        // mirror an older build decodes (KTD10) — the rendered string, so
+        // it stays what that build would have shown.
         let updated = HistoryEntry(
             id: row.id,
-            text: mergedText,
+            text: HistoryText.rendered(merged.segments, replacements: dictionaryReplacements),
             sourceAppName: row.sourceAppName,
             sourceBundleID: row.sourceBundleID,
             timestamp: row.timestamp,
             durationSeconds: row.durationSeconds,
-            // Subtracted rather than set to `remaining.count`, so the count
-            // stays equal to the number of markers actually left in the
-            // text — which is the predicate U7 renders and the merge's
-            // next run indexes against. The subtrahend is `placedCount`
-            // for the same reason `remaining` is: a marker that is still
-            // in the text must still be counted.
-            failedChunkCount: max(0, row.failedChunkCount - placedCount)
+            segments: merged.segments
         )
         if let idx = history.firstIndex(where: { $0.id == entryID }) {
             history[idx] = updated
@@ -1112,15 +1161,24 @@ final class AppState {
         }
         retryingEntryID = nil
 
-        // KTD7. "Lifetime stats never counted this session" is `isBroken &&
-        // text.isEmpty` on the row as it stood *before* this run — read
-        // `RecordingSession.brokenHistoryEntry()`'s doc-comment for why the
-        // conjunction is load-bearing and bare `text.isEmpty` is not. Once
-        // that row carries any recovered text the branch can never be taken
-        // again, which is what makes the session count once across however
-        // many retries it takes (AE9).
-        if row.isBroken && row.text.isEmpty {
-            statsSummary = await statsStore.record(updated, tokens: tokens, model: payload.model)
+        // KTD11. "Lifetime stats never counted this session" is a
+        // structural fact about the row as it stood *before* this run:
+        // every segment in its sequence was a gap. Read
+        // `HistoryEntry.isEntirelyLost` for why a gate-filtered `""`
+        // segment still counts as text, and why the emptiness of the
+        // legacy `text` mirror is no longer the signal. Once the row
+        // carries any recovered text the branch can never be taken again,
+        // which is what makes the session count once across however many
+        // retries it takes (AE9).
+        if row.isEntirelyLost {
+            // R13 / R14, same as the session's own write point: the words
+            // counted are the ones the row shows, current pairs applied.
+            statsSummary = await statsStore.record(
+                updated,
+                text: HistoryText.rendered(updated, replacements: dictionaryReplacements),
+                tokens: tokens,
+                model: payload.model
+            )
         } else {
             await recordRetryTokens(tokens, model: payload.model, for: row)
         }
@@ -1128,7 +1186,9 @@ final class AppState {
     }
 
     /// Fold a retry's spend into lifetime stats without counting a session
-    /// (R15 / KTD7). A `.zero` usage is a no-op inside `StatsStore`.
+    /// (R18) — the `else` half of the `isEntirelyLost` arm above, and the
+    /// arm every other exit takes. A `.zero` usage is a no-op inside
+    /// `StatsStore`.
     private func recordRetryTokens(
         _ tokens: TokenUsage,
         model: GeminiModel,
@@ -1572,6 +1632,37 @@ final class AppState {
     private func finalizeRecording() {
         guard case .recording = recordingState, let session = currentSession else { return }
 
+        // Freeze the paste destination FIRST — before any other statement
+        // in this method, and long before the `Task` below suspends.
+        //
+        // *Where* it is frozen is the product ruling of 2026-08-11: the
+        // transcript belongs wherever the cursor was when the user pressed
+        // stop, not where the session began. That is what makes a
+        // hands-free locked dictation work — start talking in one
+        // application, walk to another, tap to stop there, and the text
+        // lands in the application you finished in. Freezing at session
+        // start withheld that paste every single time, so a whole
+        // hands-free dictation delivered nothing. R23 / KD8 keeps its
+        // teeth: what withholds is the user moving away *during
+        // transcription*, which is entirely after this line.
+        //
+        // *When* it is frozen is the correctness constraint. All three
+        // stop paths funnel through here — hold-release, the double-tap
+        // timeout, and the locked-session tap — and each reaches this
+        // statement without an intervening `await` once the session is
+        // known to be ending, so nothing can switch the frontmost
+        // application between the user's stop action and this read. (The
+        // tap path waits out the double-tap window *before* calling in;
+        // that wait decides whether a stop happened at all, so it precedes
+        // the stop rather than delaying this capture.) Reading it later —
+        // inside `stop()`, say — reopens the window this ordering closes,
+        // because `stop()` runs from the `Task` below.
+        //
+        // The name it returns is the transcribing HUD's label — the same
+        // value the gate compares, so the HUD cannot name one application
+        // while the transcript is aimed at another.
+        let destinationName = session.freezePasteDestination(NSWorkspace.shared.frontmostApplication)
+
         recordingState = .sending
         // Hotkey released → stop capturing *now* so the mic is truly
         // quiet before we lift the mute. Otherwise a few ms of
@@ -1588,7 +1679,22 @@ final class AppState {
         // Mac can't sleep mid-call. `releaseMusicInterruption()` is
         // idempotent, so the arms below no longer re-call it.
         releaseMusicInterruption()
-        let target = session.sourceAppName ?? "the focused app"
+        // Where the transcript is headed, not where the session began.
+        // Those are the same application for an ordinary hold-to-talk
+        // dictation and different ones for every hands-free dictation that
+        // walks somewhere else, and this HUD is on screen for the whole
+        // wait — naming the starting application would tell the user to
+        // watch the wrong window.
+        //
+        // NoType itself is a legitimate answer here: the user stopped with
+        // our own window frontmost, the gate will compare against it, and
+        // ⌘V will land in whatever field they left focused. Naming it is
+        // the honest reading and it matches what they just did — the one
+        // thing this label must never do is name somewhere the text isn't
+        // going. `nil` (nothing frontmost) keeps the pre-existing vague
+        // fallback, which is still true: the gate reads that as unknown
+        // and pastes wherever focus is at paste time.
+        let target = destinationName ?? "the focused app"
         // Dismiss-only: the X button hides the HUD without cancelling the
         // in-flight Gemini call. Transcription continues and the paste
         // still fires when ready. Escape (handled globally via the
@@ -1624,9 +1730,26 @@ final class AppState {
                 self.hud.hideTranscribingHUD()
                 if sessionSummary.hasFailures {
                     Self.log.warning(
-                        "session paste contains \(sessionSummary.failedChunkCount) failure marker(s) of \(sessionSummary.dispatchedChunkCount) chunk(s)"
+                        "session transcript contains \(sessionSummary.failedChunkCount) failure marker(s) of \(sessionSummary.dispatchedChunkCount) chunk(s)"
                     )
-                    self.surfaceError(.partialTranscription(summary: sessionSummary))
+                }
+                // At most one notice per session, chosen by the pure seam
+                // rather than by an `if` chain here — this method cannot be
+                // stood up in a test, and which notice wins *is* KTD9.
+                // `showErrorHUD` replaces rather than stacks, so a second
+                // call would silently discard the first. The withhold is
+                // logged by `stop()` itself, at `.notice`.
+                //
+                // Fired after `hideTranscribingHUD()` above so the panel it
+                // replaces is already gone, and after `recordHistoryEntry`
+                // so "the transcript is in your history" is true by the
+                // time the user reads it.
+                if let notice = NoTypeErrorKind.noticeForFinishedSession(
+                    entry: entry,
+                    summary: sessionSummary,
+                    replacements: self.dictionaryReplacements
+                ) {
+                    self.surfaceError(notice)
                 }
                 // Fold into lifetime stats — survives the history cap so
                 // the Home tab's totals / top-apps / heatmap keep
@@ -1637,8 +1760,18 @@ final class AppState {
                 // calls; failed (recoverable) chunks contribute zero.
                 let tokens = sessionSummary.tokens
                 let model = sessionSummary.model
+                // R13 / R14: the counter is fed the string the row shows,
+                // not `entry.text`. Rendered here, on the main actor,
+                // because that is where the pair mirror lives — the store
+                // is an actor with no view of it.
+                let countedText = HistoryText.rendered(
+                    entry,
+                    replacements: self.dictionaryReplacements
+                )
                 Task { [statsStore = self.statsStore] in
-                    let snap = await statsStore.record(entry, tokens: tokens, model: model)
+                    let snap = await statsStore.record(
+                        entry, text: countedText, tokens: tokens, model: model
+                    )
                     await MainActor.run { [weak self] in
                         self?.statsSummary = snap
                     }
@@ -1653,7 +1786,18 @@ final class AppState {
                 // hallucination risk. The only gate left is "no room" —
                 // if the user has filled all 100 slots with sticky
                 // entries, harvesting can't write anything anyway.
-                self.harvestDictionaryIfRoom(session: session, transcript: entry.text)
+                //
+                // R15: the *finalized pasted string*, off the summary —
+                // not `entry.text` (a legacy mirror) and not the
+                // assembled row (which carries the user's current pairs
+                // and no insertion normalisation). Harvesting is an
+                // intersection with what was on screen, so feeding it a
+                // different string silently changes which terms are
+                // learned.
+                self.harvestDictionaryIfRoom(
+                    session: session,
+                    transcript: sessionSummary.finalizedTranscript
+                )
             } catch is CancellationError {
                 // User-initiated abort via Escape during `.sending`.
                 // `cancelRecording` already cleared state, hid the HUD,
@@ -2384,6 +2528,80 @@ enum NoTypeErrorKind {
     /// this HUD, so the row's retryability is readable from the payload
     /// itself.
     case partialTranscription(summary: RecordingSession.SessionSummary)
+    /// Session finished, but the user had moved to a different process by
+    /// the time the transcript was ready, so the paste was withheld
+    /// (`RecordingSession.shouldWithholdPaste`, R23 / R24 / KD8). The row
+    /// was written; nothing appeared where the user was looking, which is
+    /// why this notice exists at all (R25). Neutral severity — the
+    /// dictation succeeded, it just has nowhere safe to land.
+    ///
+    /// **Three associated values, with a deliberate split of duties.**
+    /// `summary` is the only source of the destination's name and of the
+    /// gap counts: the name was frozen at the stop by U3's
+    /// `freezePasteDestination(_:)` and rides this channel precisely so
+    /// the notice never re-reads `NSWorkspace.frontmostApplication` —
+    /// by notice time the user has moved again and that read answers a
+    /// different question. `entry` supplies one thing and one thing only,
+    /// the string the Copy action places (R30), and it does so through
+    /// `HistoryText.rendered` — the same function the row's own copy
+    /// button calls — so the notice and the row cannot hand the user two
+    /// different transcripts.
+    ///
+    /// `replacements` rides along for that render, frozen at the moment
+    /// the notice is built. It is **not** read from `AppState` inside the
+    /// handler, and the reason is a shipped property worth keeping: the
+    /// wrapper in `surfaceError` captures `[weak self]`, so a click
+    /// landing after teardown passes `nil`, and a handler that needed
+    /// `AppState` would there copy a string the row does not show —
+    /// breaking R30 in exactly the case nobody would test. Carrying the
+    /// list makes the handler self-contained, as it was before this unit.
+    ///
+    /// `entry.failedChunkCount` mirrors `summary.failedChunkCount` and is
+    /// deliberately *not* what the copy reads: `.partialTranscription`
+    /// counts from the summary, and one source keeps the two notices'
+    /// count wording from drifting. The summary is also the only side
+    /// carrying `dispatchedChunkCount`, the "of M" denominator.
+    case pasteWithheld(
+        entry: HistoryEntry,
+        summary: RecordingSession.SessionSummary,
+        replacements: [DictionaryReplacement]
+    )
+
+    /// The single notice a finished session surfaces, or `nil` for the
+    /// ordinary session that pasted everything it transcribed.
+    ///
+    /// **Exactly one, and the order is the contract (KTD9).**
+    /// `HUDController.showErrorHUD` replaces rather than stacks, so two
+    /// `surfaceError` calls in one arm leave whichever ran last and the
+    /// other is simply lost. A session that both lost chunks and changed
+    /// destination is not a rare intersection — a stalled network drops
+    /// chunks *and* creates the wait during which the user switches away,
+    /// so it is the ordinary bad session — and the withheld notice is the
+    /// one that must survive: it is the only one carrying an action, and
+    /// `.partialTranscription` would be false twice over on that session
+    /// ("Pasted with gaps" when nothing was pasted, "re-dictate just that
+    /// part" when no part arrived). The gap count is folded into the
+    /// withheld notice's own copy instead, which is what stops Copy from
+    /// handing over a transcript with unannounced holes.
+    ///
+    /// Written as a pure seam rather than an `if` chain inside
+    /// `AppState.finalizeRecording` because that method cannot be stood
+    /// up in a test — it needs a live `RecordingSession` — and this
+    /// choice is the whole of KTD9. Same reasoning as
+    /// `RecordingSession.shouldWithholdPaste` and `HistoryRowView.actions`.
+    static func noticeForFinishedSession(
+        entry: HistoryEntry,
+        summary: RecordingSession.SessionSummary,
+        replacements: [DictionaryReplacement]
+    ) -> NoTypeErrorKind? {
+        if summary.pasteWithheldForDestinationChange {
+            return .pasteWithheld(entry: entry, summary: summary, replacements: replacements)
+        }
+        if summary.hasFailures {
+            return .partialTranscription(summary: summary)
+        }
+        return nil
+    }
 
     /// The consequence clause a recoverable-class failure ends with when
     /// the recording survived into a retryable history row (R6).
@@ -2406,6 +2624,20 @@ enum NoTypeErrorKind {
     /// text already pasted into the target app (plan KD5).
     static let retainedGapClause =
         "The recording is kept in your history, where a retry can fill the gaps."
+
+    /// Diagnosis for a transport failure we can name only as "the
+    /// connection did not work", declared once because two branches need
+    /// exactly the same sentence and neither may invent its own.
+    ///
+    /// Both are places where the alternative was a raw number on a user's
+    /// screen: `payloadForURLErrorCode`'s `.badServerResponse` arm (the
+    /// no-`HTTPURLResponse` guard, which used to render "Unexpected
+    /// response (HTTP 0)") and the `?? ` floor in
+    /// `payloadForSessionFailure`'s wrapped branch (which used to render
+    /// Foundation's "(NSURLErrorDomain error -N.)"). A pure diagnosis, no
+    /// imperative — `describe`'s contract, see its doc-comment.
+    private static let unexpectedConnectionFailureCause =
+        "The connection failed unexpectedly."
 
     /// Join a cause sentence to the right consequence clause.
     ///
@@ -2466,11 +2698,11 @@ enum NoTypeErrorKind {
             return Self.payloadForSessionFailure(err, retainedForRetry: retainedForRetry)
         case .partialTranscription(let summary):
             let failed = summary.failedChunkCount
-            let total = summary.dispatchedChunkCount
             let marker = RecordingSession.failureMarker
+            let lost = Self.chunkLossPhrase(summary)
             let cause = failed == 1
-                ? "1 of \(total) chunks didn't transcribe — \(marker) was inserted in its place."
-                : "\(failed) of \(total) chunks didn't transcribe — \(marker) was inserted in their place."
+                ? "\(lost) — \(marker) was inserted in its place."
+                : "\(lost) — \(marker) was inserted in their place."
             // Non-nil `retained` is exactly what gave the row its retry
             // action; without it the row is written but dead, and
             // re-dictating is still the only way back.
@@ -2489,7 +2721,110 @@ enum NoTypeErrorKind {
                 severity: .neutral,
                 iconSymbol: "ellipsis.bubble"
             )
+        case .pasteWithheld(let entry, let summary, _):
+            // Exactly one bit is read off the entry, by the helper below,
+            // and the entry is never touched again in this arm — R29 is
+            // preserved by that discipline rather than by the old
+            // `(_, let summary)` binding. A `Bool` cannot carry a word of
+            // the transcript.
+            let offersCopy = Self.withheldNoticeOffersCopy(for: entry)
+            // The destination was frozen at the stop and travels on the
+            // summary. Never re-read here: `NSWorkspace.frontmostApplication`
+            // at notice time names wherever the user has drifted to since,
+            // which is the one place the transcript is guaranteed *not* to
+            // have been headed.
+            //
+            // The fallback is hard to reach — a withhold needs
+            // `destinationPID > 0`, so *something* was frontmost — but it
+            // is not dead code, and the earlier phrasing ("unreachable on
+            // today's gate") invited exactly that misreading.
+            // `NSRunningApplication.localizedName` is optional, and it is
+            // the process's own answer rather than one we validate, so a
+            // nameless *or* blank-named process is what this guards.
+            // Trimmed, not just nil-checked: `?? ` alone lets `""` through
+            // and renders "headed for , which is no longer the active app."
+            let named = summary.pasteDestinationAppName?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let destination = named.isEmpty ? "the app you were in" : named
+            let cause = "This dictation was headed for \(destination), which is no longer the active app."
+            // Ahead of the copy consequence, so the user knows the
+            // transcript they are about to take has holes in it before
+            // they take it (KTD9). Worded for a transcript that was never
+            // pasted: `.partialTranscription`'s "was inserted in its
+            // place" describes text in the user's document, and there is
+            // no such text here.
+            let gaps: String
+            if summary.hasFailures {
+                let marker = RecordingSession.failureMarker
+                let lost = Self.chunkLossPhrase(summary)
+                gaps = summary.failedChunkCount == 1
+                    ? " \(lost), so \(marker) marks the gap."
+                    : " \(lost), so \(marker) marks the gaps."
+            } else {
+                gaps = ""
+            }
+            // The final clause is the only thing the copy gate moves, and
+            // it moves by subtraction: the sentence keeps naming where the
+            // transcript is and stops before promising a button that isn't
+            // rendered. Same discipline as `describe`'s `cause` / `ifKept` /
+            // `ifLost` split — `cause` and `gaps` above stay pure diagnosis,
+            // so nothing here can stutter onto the other arm.
+            let delivery = offersCopy
+                ? "Nothing was pasted — the transcript is in your history, and Copy puts it on your clipboard."
+                : "Nothing was pasted — the transcript is in your history."
+            // R29: no part of the transcript appears in either string.
+            // This panel renders over whatever the user moved to, which
+            // may be a screen share or a call.
+            return ErrorPayload(
+                title: "Transcript ready, not pasted",
+                description: "\(cause)\(gaps) \(delivery)",
+                code: "INFO_NOT_PASTED",
+                severity: .neutral,
+                iconSymbol: "doc.on.clipboard",
+                retryLabel: offersCopy ? "Copy" : nil,
+                retryKind: .accent
+            )
         }
+    }
+
+    /// "2 of 4 chunks didn't transcribe" — the count phrase both
+    /// gap-bearing notices open with.
+    ///
+    /// Shared so the two cannot drift on the count itself while staying
+    /// free to differ on what follows it: one describes markers sitting in
+    /// the user's document, the other markers in a transcript that never
+    /// left the app.
+    private static func chunkLossPhrase(_ summary: RecordingSession.SessionSummary) -> String {
+        "\(summary.failedChunkCount) of \(summary.dispatchedChunkCount) chunks didn't transcribe"
+    }
+
+    /// Whether the withheld notice offers its Copy action for this row.
+    ///
+    /// **The notice matches the row** (the 2026-08-11 ruling). A transcript
+    /// that is nothing but gap markers — reachable when one chunk fails
+    /// recoverably and another is dropped by the hallucination gate, so the
+    /// row stores `[…]` — is one the history row deliberately offers no copy
+    /// button for, on the grounds that it is not worth putting on the
+    /// clipboard. The notice offering Copy there would put the two surfaces
+    /// in disagreement about the same entry, which is the exact thing R30
+    /// routes the copied string through `HistoryText.rendered` to prevent.
+    ///
+    /// So the answer comes from `HistoryRowView.hasCopyableText` — the row's
+    /// own predicate, not a second spelling of it here. Re-deriving it at
+    /// this call site is the regression `NoType/UI/CLAUDE.md`'s threading
+    /// rule names.
+    ///
+    /// That predicate reads the row's **segments**, so it needs no
+    /// replacement pairs and cannot answer differently for the notice than
+    /// for the row even if the two ever rendered with different lists.
+    ///
+    /// One helper rather than the same call in both members, because
+    /// `payload` and `retryHandler` disagreeing *with each other* is the
+    /// dead-button regression `MissingKeyHUDRetryTests` exists for — a
+    /// conditional label and a conditional handler are two chances to get
+    /// that wrong, and this is one.
+    private static func withheldNoticeOffersCopy(for entry: HistoryEntry) -> Bool {
+        HistoryRowView.hasCopyableText(entry)
     }
 
     var retryHandler: (@MainActor (AppState?) -> Void)? {
@@ -2540,7 +2875,67 @@ enum NoTypeErrorKind {
                 // Notes / ...). Same pattern as `HistoryPopover.openSettings`.
                 NSApp.activate(ignoringOtherApps: true)
             }
-        default:
+        case .pasteWithheld(let entry, _, let replacements):
+            // The second catalog entry to ship an action button, and it is
+            // not the dead-button class `MissingKeyHUDRetryTests` guards:
+            // that regression is `retryLabel != nil && retryHandler == nil`,
+            // and this handler is both wired and self-contained — it writes
+            // the clipboard and needs no AppState, no window raise, no
+            // navigation, so it cannot half-work.
+            //
+            // Nor is it the "second retry entry point" the same file argues
+            // against for `.sessionFailure`. That objection is about
+            // duplicating an affordance the history row already owns on a
+            // panel that auto-dismisses in 8 s. Copy is the *only*
+            // affordance this moment offers — the paste the user was
+            // expecting did not happen — and the row's own copy button
+            // remains the durable path once the panel is gone.
+            //
+            // `HistoryText.rendered` rather than `entry.text`: R30
+            // requires the notice to place exactly the string the row
+            // shows, and `entry.text` is no longer that string — it is a
+            // legacy mirror, un-re-substituted and holding whatever pairs
+            // were frozen at session start. The row assembles its
+            // sequence and applies the current pairs; going through the
+            // same function with the same list is what makes the two
+            // strings equal by construction instead of by coincidence.
+            //
+            // The gate below is what keeps that promise honest in the other
+            // direction: a row the history list offers no copy button for
+            // gets a notice with no Copy button either, so the label and the
+            // handler vanish together and the panel degrades to pure
+            // information. Both members ask the same helper — a conditional
+            // label paired with an unconditional handler is dead code, and
+            // the reverse is the dead button.
+            guard Self.withheldNoticeOffersCopy(for: entry) else { return nil }
+            return { _ in
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(
+                    HistoryText.rendered(entry, replacements: replacements),
+                    forType: .string
+                )
+            }
+        case .vadLoadFailed, .sessionStartFailed, .sessionFailure, .partialTranscription:
+            // Deliberately button-less, and listed by name rather than
+            // swept up by `default:` — **the compiler owns the case axis
+            // here, not `MissingKeyHUDRetryTests`.**
+            //
+            // That guard sweeps a hand-maintained array, so the regression
+            // it cannot see is a *seventh* case: one that ships a
+            // `retryLabel`, is never added to the array, and falls through
+            // to a `nil` handler. Nothing goes red — the case is simply
+            // absent from the population being swept, which is the
+            // discovery-set failure in
+            // `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`
+            // ("the scan's own discovery set"). An exhaustive switch moves
+            // that axis to the compiler: a new case fails to build right
+            // here, and its author decides about a handler at the moment
+            // they write the label. `payload` above is already exhaustive
+            // for the same reason; this arm just stops `retryHandler` from
+            // being the looser of the two.
+            //
+            // The sweep stays — it still pins the label/handler *pairing*
+            // per case, which no switch can express.
             return nil
         }
     }
@@ -2579,10 +2974,64 @@ enum NoTypeErrorKind {
         // so peel the code back out and route through the same
         // URLError-class HUDs as the native-URLError branch above.
         if let g = err as? GeminiClient.GeminiError, case let .http(0, body) = g,
-           let code = NetworkErrorTranslator.extractURLErrorCode(from: body) {
+           let wrapped = NetworkErrorTranslator.parse(body) {
             return payloadForURLErrorCode(
-                code,
-                fallbackDescription: body,
+                wrapped.code,
+                // **R17 is fixed here, at the seam that produces the
+                // string — not at the display** (plan KTD12). The
+                // `default:` arm below renders `fallbackDescription`
+                // verbatim, so handing it the whole wrapped body put
+                // `URLError code=-1003: …` on a user's screen for every
+                // network code without a branch of its own. The body's
+                // second half *is* the OS sentence `wrapURLError`
+                // embedded, so passing it needs no invented wording and
+                // makes this branch byte-identical to the native-URLError
+                // branch above for the same code — which is the property
+                // `ErrorCopyRetentionTests` pins, rather than the absence
+                // of one substring.
+                //
+                // The `?? ` arm covers a body carrying a code and nothing
+                // else (`"URLError code=-1009"`), which no current
+                // producer writes but the parser accepts — `wrapURLError`
+                // always appends `": \(localizedDescription)"`, and a real
+                // `URLError`'s is never empty. It is a defensive floor.
+                //
+                // It re-derived the sentence from the code at first, and
+                // that was wrong in the one way this branch must never be
+                // wrong: a *synthesized* `URLError` carries no
+                // `NSLocalizedDescriptionKey`, so its
+                // `localizedDescription` is Foundation's generic "The
+                // operation couldn't be completed. (NSURLErrorDomain error
+                // -1003.)" — an internal diagnostic with a raw error number
+                // in it, which is the exact shape R17 removes. (The
+                // `URLError` `URLSession` actually throws *does* carry a
+                // real sentence — a stall on this machine produced "A TLS
+                // error caused the secure connection to fail." — and that
+                // is what `wrapURLError` embeds, which is why the reachable
+                // path was never affected.) So the floor is the same ruled
+                // sentence `payloadForURLErrorCode` gives a
+                // `.badServerResponse`: no wording invented here either,
+                // and no number to leak.
+                fallbackDescription: wrapped.message ?? Self.unexpectedConnectionFailureCause,
+                retainedForRetry: retainedForRetry
+            )
+        }
+        // **A floor, not the fix.** R17's fix is the seam above plus
+        // `GeminiClient.performOnce` throwing its no-`HTTPURLResponse` guard
+        // through `wrapURLError`, which is what actually makes that failure
+        // parseable and network-classed (KTD12: fix where the string is
+        // produced). This catches a status 0 whose body is *not* parseable
+        // — no producer on the transcription path writes one today, and the
+        // point is that a future one cannot silently reintroduce "Gemini
+        // rejected the request / Unexpected response (HTTP 0)" by adding a
+        // bare `throw`. Status 0 means the request never reached Gemini, so
+        // the generic HTTP arm below is the wrong arm for it by
+        // construction: both halves of its sentence are false and the
+        // number it interpolates is not a status.
+        if let g = err as? GeminiClient.GeminiError, case .http(0, _) = g {
+            return payloadForURLErrorCode(
+                URLError.Code.badServerResponse.rawValue,
+                fallbackDescription: Self.unexpectedConnectionFailureCause,
                 retainedForRetry: retainedForRetry
             )
         }
@@ -2759,11 +3208,62 @@ enum NoTypeErrorKind {
                 title: "Couldn't reach Gemini",
                 description: describe(
                     "The transcription request timed out.",
-                    ifKept: "Check your connection.",
-                    ifLost: "Check your connection and try again.",
+                    // **No `ifKept:`, and the lost arm no longer names the
+                    // user's connection.** Both arms used to say "Check
+                    // your connection", which the 2026-08-11 measurement
+                    // showed is the wrong place to look: connection setup
+                    // to the API took 3 ms with TLS at ~200 ms, and a
+                    // request that stalled for a full budget succeeded on
+                    // a *fresh* connection 1.7 s later. The failure is a
+                    // dead pooled connection, not a dead link — so the
+                    // advice sent users to audit something that was
+                    // working, which is why R28 now issues the one retry
+                    // over a fresh connection instead.
+                    //
+                    // The kept arm needs no imperative of its own:
+                    // `retainedRecordingClause` already names the row and
+                    // the retry, which is the whole action. Anything more
+                    // here would be the stutter `describe`'s doc-comment
+                    // warns about, one indirection later.
+                    ifLost: "Try again in a moment.",
                     retainedForRetry: retainedForRetry
                 ),
                 code: "ERR_NET_TIMEOUT",
+                severity: .danger,
+                iconSymbol: "exclamationmark.triangle.fill"
+            )
+        case .badServerResponse:
+            // The transport answered with something that was not an
+            // `HTTPURLResponse` at all — `GeminiClient.performOnce`'s guard,
+            // which now throws through `wrapURLError` so it lands here
+            // instead of in the generic HTTP arm, where it rendered as
+            // **"Gemini rejected the request / Unexpected response (HTTP
+            // 0)"**. Status 0 is this project's "never reached Gemini"
+            // marker, so both halves of that sentence were false and the
+            // one number in it was not a status.
+            //
+            // It needs a branch of its own rather than the `default:` arm
+            // below, and the reason is specific: `wrapURLError` embeds
+            // `URLError.localizedDescription`, and the `URLError` *we*
+            // synthesize here carries no `NSLocalizedDescriptionKey`, so
+            // that sentence is Foundation's "The operation couldn't be
+            // completed. (NSURLErrorDomain error -1011.)" — the same class
+            // of internal diagnostic, with the same raw number, that R17
+            // exists to keep off the screen. A code `URLSession` itself
+            // raises does carry a real sentence and the `default:` arm
+            // serves those correctly; this one is ours.
+            return ErrorPayload(
+                title: "Couldn't reach Gemini",
+                description: describe(
+                    Self.unexpectedConnectionFailureCause,
+                    // No `ifKept:`, for the same reason `.timedOut` has
+                    // none: the retained clause already names the row and
+                    // the retry, and there is nothing for the user to do
+                    // *first*. An imperative here would render beside it.
+                    ifLost: "Try again in a moment.",
+                    retainedForRetry: retainedForRetry
+                ),
+                code: "ERR_NET_BAD_RESPONSE",
                 severity: .danger,
                 iconSymbol: "exclamationmark.triangle.fill"
             )
@@ -2788,14 +3288,35 @@ enum NoTypeErrorKind {
 
 }
 
-/// Pull the URLError code out of a `GeminiError.http(0, body)`
-/// body string of the form `"URLError code=-1009: not connected"`.
-/// Returns `nil` when the body isn't a wrapped URLError. Internal so
-/// `AppStateNetworkErrorRoutingTests` can pin the parser against
-/// `GeminiClient.performOnce`'s wrapping format — drift between the
-/// two would silently re-break the offline / timeout HUD routing.
+/// Take a `GeminiError.http(0, body)` body string of the form
+/// `"URLError code=-1009: not connected"` apart into the two facts the
+/// HUD needs from it. Returns `nil` when the body isn't a wrapped
+/// URLError. Internal so `NetworkErrorTranslatorTests` can pin the
+/// parser against `GeminiClient.GeminiError.wrapURLError`'s format — drift
+/// between the two would silently re-break the offline / timeout HUD
+/// routing.
 enum NetworkErrorTranslator {
-    static func extractURLErrorCode(from body: String) -> Int? {
+
+    /// The two halves of a wrapped `URLError` body.
+    ///
+    /// Parsed together, in one pass, because the code and the sentence
+    /// are separated by the same colon: two independent parsers would be
+    /// free to disagree about where the split is, and the consequence of
+    /// that disagreement is the whole of R17 — a `message` that still
+    /// carries the `URLError code=…` prefix goes straight onto the
+    /// user's screen through `payloadForURLErrorCode`'s `default:` arm.
+    struct WrappedURLError: Equatable {
+        /// The numeric `URLError.Code` raw value.
+        let code: Int
+        /// The OS's own sentence for `code` — literally the
+        /// `urlError.localizedDescription` that `wrapURLError` embedded,
+        /// so it is byte-identical to what the native-`URLError` branch
+        /// of `payloadForSessionFailure` passes for the same failure.
+        /// `nil` when the body carried a code and nothing after it.
+        let message: String?
+    }
+
+    static func parse(_ body: String) -> WrappedURLError? {
         // The producer's own constant, not a second copy of the literal.
         // `GeminiError.urlErrorBodyPrefix`'s doc-comment claims it is
         // "declared once so the producer and the two consumers cannot
@@ -2806,8 +3327,12 @@ enum NetworkErrorTranslator {
         guard body.hasPrefix(prefix) else { return nil }
         let rest = body.dropFirst(prefix.count)
         guard let colon = rest.firstIndex(of: ":") else {
-            return Int(rest.trimmingCharacters(in: .whitespaces))
+            guard let code = Int(rest.trimmingCharacters(in: .whitespaces)) else { return nil }
+            return WrappedURLError(code: code, message: nil)
         }
-        return Int(rest[..<colon].trimmingCharacters(in: .whitespaces))
+        guard let code = Int(rest[..<colon].trimmingCharacters(in: .whitespaces)) else { return nil }
+        let sentence = rest[rest.index(after: colon)...]
+            .trimmingCharacters(in: .whitespaces)
+        return WrappedURLError(code: code, message: sentence.isEmpty ? nil : sentence)
     }
 }

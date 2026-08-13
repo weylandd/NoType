@@ -8,7 +8,7 @@ Reference products: Wispr Flow, Monologue.
 
 ## How it works (one paragraph)
 
-User holds **Right Option** anywhere in macOS → NoType starts recording from the mic and shows a stopwatch + mic indicator in the menu bar. **Silero VAD** detects natural pauses (≥1s); each completed phrase is shipped as an audio chunk to **Gemini 3.1 Flash-Lite** along with the user's accessibility-tree context — optionally augmented by a Vision-OCR'd screenshot of the active window when AX returned nothing useful (Electron / web-views; see ADR-014). Chunks are processed serially (one in-flight at a time). User releases Right Option → final chunk goes out with `is_final=true`; the stitched transcript runs through user-defined word replacements (Dictionary tab, see ADR-016) and is pasted at the cursor via clipboard + ⌘V. The last 10 transcripts are kept in a popover, accessible by clicking the menu-bar icon.
+User holds **Right Option** anywhere in macOS → NoType starts recording from the mic and shows a stopwatch + mic indicator in the menu bar. **Silero VAD** detects natural pauses (≥1s); each completed phrase is shipped as an audio chunk to **Gemini 3.1 Flash-Lite** along with the user's accessibility-tree context — optionally augmented by a Vision-OCR'd screenshot of the active window when AX returned nothing useful (Electron / web-views; see ADR-014). Chunks are processed serially (one in-flight at a time). User releases Right Option → final chunk goes out with `is_final=true`; the stitched transcript runs through user-defined word replacements (Dictionary tab, see ADR-016) and is pasted at the cursor via clipboard + ⌘V — **but only into the process the user was frontmost in when they stopped recording.** If they moved on during transcription the paste is withheld and a notice offers to copy it instead, because a late paste into a foreign window edits a document nobody aimed at. The last 10 transcripts are kept in a popover, accessible by clicking the menu-bar icon; each is stored as an ordered sequence of response segments (raw model text, or a **gap** where a chunk was lost) rather than as one flat string, so a lost chunk's *position* survives and a retry writes back into it.
 
 ---
 
@@ -36,6 +36,7 @@ External SPM dependencies: **Sparkle 2** (auto-updates, see ADR-017 and `NoType/
 
 Read these in order when onboarding:
 
+- **@CONCEPTS.md** — shared domain vocabulary (recording session, chunk, gap, history row, paste destination, network class) plus the ambiguous words to qualify; read it first so the other docs' nouns mean what they say.
 - **@docs/architecture/overview.md** — current-state snapshot (Mermaid data flow, module table, external integrations, threading model, invariants). Regenerate when drift appears, don't hand-edit for accuracy.
 - **@docs/architecture.md** — short index pointing at `architecture/overview.md` and the solutions store.
 - **@docs/decisions.md** — index of architecture decisions → per-decision files in `docs/solutions/`.
@@ -51,7 +52,7 @@ Per-module guides (Claude Code auto-loads the relevant one when working in that 
 - **@NoType/Recording/CLAUDE.md** — Core Audio HAL capture (`AudioDeviceCreateIOProcIDWithBlock`; bypasses `AVAudioEngine` deliberately), Silero VAD (unified-256 ms), PCM buffer + pre-roll, chunking strategy. **Most complex part of the project.**
 - **@NoType/Context/CLAUDE.md** — full-screen accessibility tree, secure-field masking. **Security boundary — extra care.**
 - **@NoType/Instructions/CLAUDE.md** — per-app `AppCategory`, user/category instruction storage, `CategoryResolver` AX search-override, the Gemini-driven `AppCategorizer`. Drives the `User instruction:` / `Category instruction:` cache-prefix sections (ADR-015).
-- **@NoType/Dictionary/CLAUDE.md** — personal dictionary (canonical spellings shipped in `User dictionary:` cache-prefix section) and user-defined auto-replacement pairs applied at paste time. Post-session `DictionaryHarvester` (pure client-side function) intersects the transcript with the on-screen context to add auto-entries (ADR-016 v2).
+- **@NoType/Dictionary/CLAUDE.md** — personal dictionary (canonical spellings shipped in `User dictionary:` cache-prefix section) and user-defined auto-replacement pairs applied twice over: once on the paste path, and again at render time over a history row's assembled text, so editing a pair changes how rows already on disk read. Post-session `DictionaryHarvester` (pure client-side function) intersects the transcript with the on-screen context to add auto-entries (ADR-016 v2).
 - **@NoType/Gemini/CLAUDE.md** — request shape, cache-friendly part ordering (load-bearing!), prompt templates, retries.
 - **@NoType/Injection/CLAUDE.md** — clipboard save/restore, paste delay, edge cases.
 - **@NoType/History/CLAUDE.md** — JSON store, last-10 cap, schema.
