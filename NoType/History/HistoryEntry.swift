@@ -369,17 +369,23 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
     /// still bare `try`, so a row missing `id` / `text` / `sourceAppName` /
     /// `sourceBundleID` / `timestamp`, or carrying a `null` text, a
     /// non-UUID id, or a timestamp the `.iso8601` strategy rejects, still
-    /// takes the whole file down. That is **unchanged** from the
-    /// pre-sequence decoder — measured, not assumed: across a corpus of
-    /// hostile rows, exactly those inputs throw here and threw there, and
-    /// every `segments`-shaped malformation that is fatal to nothing was
-    /// fatal to nothing before either. This unit widens no cliff and
-    /// narrows one (a wrong-typed `failedChunkCount` used to be fatal and
-    /// now degrades to 0). Whether the *remaining* cliff should become a
-    /// per-row `try?` that drops one row instead of ten is a real question
-    /// and deliberately not this unit's to answer: defaulting an absent
-    /// `id` or `timestamp` invents data, and "silently lose one row"
-    /// against "rename the file" is a product call, not a refactor.
+    /// throws from here. That is **unchanged** from the pre-sequence decoder
+    /// — measured, not assumed: across a corpus of hostile rows, exactly
+    /// those inputs throw here and threw there, and every `segments`-shaped
+    /// malformation that is fatal to nothing was fatal to nothing before
+    /// either.
+    ///
+    /// **What a throw here now costs is one row, not the file — and the
+    /// difference is not in this type.** The question this doc-comment used
+    /// to leave open ("should the remaining cliff become a per-row `try?`")
+    /// has since been decided by the maintainer as product owner: skip only
+    /// the broken row. It is implemented one level up, in
+    /// `HistoryStore.allEntries()`, which decodes the top-level array
+    /// element-by-element so a row that throws is dropped while the rest
+    /// load. Nothing about *this* decoder changed for it, and nothing here
+    /// should be loosened on the strength of it: the reason those five
+    /// fields stay bare `try` is that defaulting an absent `id` or
+    /// `timestamp` would invent data, which a dropped row does not.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         // Bound to a local before assignment: the log below is an escaping

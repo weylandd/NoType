@@ -663,6 +663,258 @@ final class HistoryStoreTests: XCTestCase {
         }
     }
 
+    // MARK: - Per-row decode tolerance (U8 — one bad row costs one row)
+
+    private static let idA = "1B9A1F3E-6C4D-4F0A-9B2E-7A5C81D3E0F1"
+    private static let idB = "4E2D4C61-9F70-4C3D-AE51-8D6F14061B3C"
+    private static let idC = "5F3E5D72-A081-4D4E-BF62-9E70251721D4"
+
+    /// A well-formed row, in the shape `JSONFileStorage.makeEncoder()` writes.
+    private static func goodRow(id: String, text: String) -> String {
+        """
+        { "id":"\(id)","sourceAppName":"Slack","sourceBundleID":"com.tinyspeck.slackmacgap",\
+        "text":"\(text)","timestamp":"2026-08-01T09:41:12Z","durationSeconds":3,"failedChunkCount":0 }
+        """
+    }
+
+    /// A row missing its `id` — the representative undecodable row for the
+    /// positional tests below. `id` is one of the five fields
+    /// `HistoryEntry.init(from:)` decodes non-optionally, and it is the one
+    /// that cannot be defaulted without inventing identity.
+    private static let badRow = """
+    { "sourceAppName":"Mail","sourceBundleID":"com.apple.mail",\
+    "text":"the row with no id","timestamp":"2026-08-01T09:41:12Z" }
+    """
+
+    /// The row shapes a full-depth review of U5 measured as destroying
+    /// `history.json` outright: each one threw out of the row's decoder,
+    /// which failed the whole top-level array, which sent `JSONFileStorage`
+    /// down its rename path — nine remaining transcripts lost to one bad
+    /// field.
+    ///
+    /// All of them are **pre-existing** cliffs, not U5 regressions; U5
+    /// narrowed the set (a wrong-typed `failedChunkCount` used to throw and
+    /// now reads as 0) and every `segments`-shaped malformation already
+    /// degraded cleanly, which `test_load_multiRowFileWithOneMalformedSequence_keepsTheOtherRows`
+    /// pins from the other side.
+    ///
+    /// The tenth measured destroyer — a truncated file — is deliberately not
+    /// in this list: it has no element boundaries to salvage and keeps taking
+    /// the whole-file path. See
+    /// `test_load_truncatedFile_stillTakesTheWholeFileRecoveryPath`.
+    private static let rowShapesThatUsedToDestroyTheFile: [(String, String)] = [
+        ("missing id", badRow),
+        ("missing text", """
+        { "id":"\(idB)","sourceAppName":"Mail","sourceBundleID":"com.apple.mail",\
+        "timestamp":"2026-08-01T09:41:12Z" }
+        """),
+        ("missing sourceAppName", """
+        { "id":"\(idB)","sourceBundleID":"com.apple.mail","text":"two",\
+        "timestamp":"2026-08-01T09:41:12Z" }
+        """),
+        ("missing sourceBundleID", """
+        { "id":"\(idB)","sourceAppName":"Mail","text":"two",\
+        "timestamp":"2026-08-01T09:41:12Z" }
+        """),
+        ("missing timestamp", """
+        { "id":"\(idB)","sourceAppName":"Mail","sourceBundleID":"com.apple.mail","text":"two" }
+        """),
+        ("text is null", """
+        { "id":"\(idB)","sourceAppName":"Mail","sourceBundleID":"com.apple.mail",\
+        "text":null,"timestamp":"2026-08-01T09:41:12Z" }
+        """),
+        ("id is not a UUID", """
+        { "id":"nope","sourceAppName":"Mail","sourceBundleID":"com.apple.mail",\
+        "text":"two","timestamp":"2026-08-01T09:41:12Z" }
+        """),
+        ("timestamp the iso8601 strategy rejects", """
+        { "id":"\(idB)","sourceAppName":"Mail","sourceBundleID":"com.apple.mail",\
+        "text":"two","timestamp":"not-a-date" }
+        """),
+    ]
+
+    private func writeArray(_ rows: [String]) throws {
+        try "[\(rows.joined(separator: ",\n"))]"
+            .write(to: tempURL, atomically: true, encoding: .utf8)
+    }
+
+    private func corruptSiblings() throws -> [String] {
+        try FileManager.default
+            .contentsOfDirectory(atPath: tempURL.deletingLastPathComponent().path)
+            .filter { $0.hasPrefix("history.json.corrupt-") }
+    }
+
+    /// The ruling this unit implements: **skip only the broken row.**
+    ///
+    /// Every shape that used to cost the user all ten transcripts now costs
+    /// exactly the row carrying it, with the rows either side of it intact.
+    /// The `.corrupt-` assertion is the half that makes this a data-loss test
+    /// rather than a parsing test — a row that still threw would rename the
+    /// file, and `allEntries()` returning two rows in-memory would say
+    /// nothing about what the *next* launch reads.
+    func test_load_everyRowShapeThatUsedToDestroyTheFile_nowCostsOnlyThatRow() async throws {
+        for (label, damaged) in Self.rowShapesThatUsedToDestroyTheFile {
+            try writeArray([
+                Self.goodRow(id: Self.idA, text: "one"),
+                damaged,
+                Self.goodRow(id: Self.idC, text: "three"),
+            ])
+
+            let rows = await HistoryStore(url: tempURL).allEntries()
+            XCTAssertEqual(rows.map(\.text), ["one", "three"],
+                "\(label): the rows either side of the damage survive it")
+            XCTAssertTrue(try corruptSiblings().isEmpty,
+                "\(label): one undecodable row must never reach the whole-file rename path")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: tempURL.path),
+                "\(label): history.json stays where it is")
+        }
+    }
+
+    /// Position must not matter. A cursor bug in the element loop shows up
+    /// here and nowhere else: the first-row case is what proves the decoder
+    /// advances past a failure at all (the naive
+    /// `try? container.decode(HistoryEntry.self)` shape does not — it re-reads
+    /// the same bad element forever), and the last-row case is what proves the
+    /// loop terminates on it.
+    func test_load_aBadRow_isDroppedWhereverItSits() async throws {
+        let good1 = Self.goodRow(id: Self.idA, text: "one")
+        let good2 = Self.goodRow(id: Self.idC, text: "three")
+
+        for (label, rows) in [
+            ("first", [Self.badRow, good1, good2]),
+            ("middle", [good1, Self.badRow, good2]),
+            ("last", [good1, good2, Self.badRow]),
+        ] {
+            try writeArray(rows)
+            let loaded = await HistoryStore(url: tempURL).allEntries()
+            XCTAssertEqual(loaded.map(\.text), ["one", "three"],
+                "bad row \(label): the good rows load in file order")
+            XCTAssertTrue(try corruptSiblings().isEmpty,
+                "bad row \(label): no rename")
+        }
+    }
+
+    /// An array element that isn't a row-shaped object at all is dropped the
+    /// same way.
+    ///
+    /// **`null` is the interesting one**, and this test pins the behaviour
+    /// rather than the mechanism on purpose. The decoder handles it in an
+    /// explicit `decodeNil()` branch, but that branch is defence-in-depth, not
+    /// a requirement: deleting it was mutation-tested and this test stayed
+    /// green, because Swift 6.3 / macOS 26 Foundation routes a null element
+    /// through the row wrapper like any other value. Older Foundation unboxed
+    /// `NSNull` before reaching a non-optional type's initializer — which
+    /// would throw past the wrapper and cost the whole file — and NoType
+    /// deploys back to macOS 15, so the branch stays. Asserting the outcome
+    /// keeps this test true under either implementation.
+    func test_load_rowsThatArentObjects_areDroppedNotFatal() async throws {
+        for (label, junk) in [
+            ("null", "null"),
+            ("a string", "\"nope\""),
+            ("a number", "42"),
+            ("an array", "[1,2]"),
+            ("an empty object", "{}"),
+        ] {
+            try writeArray([
+                Self.goodRow(id: Self.idA, text: "one"),
+                junk,
+                Self.goodRow(id: Self.idC, text: "three"),
+            ])
+
+            let rows = await HistoryStore(url: tempURL).allEntries()
+            XCTAssertEqual(rows.map(\.text), ["one", "three"],
+                "row is \(label): the real rows either side survive")
+            XCTAssertTrue(try corruptSiblings().isEmpty,
+                "row is \(label): no rename")
+        }
+    }
+
+    func test_load_twoBadRows_dropBothAndKeepTheRest() async throws {
+        try writeArray([
+            Self.badRow,
+            Self.goodRow(id: Self.idA, text: "one"),
+            Self.badRow,
+            Self.goodRow(id: Self.idC, text: "three"),
+        ])
+
+        let rows = await HistoryStore(url: tempURL).allEntries()
+        XCTAssertEqual(rows.map(\.text), ["one", "three"])
+        XCTAssertTrue(try corruptSiblings().isEmpty)
+    }
+
+    /// Every row bad reads empty — but it is **not** corruption, and the
+    /// difference is the file. The array parsed; it simply yielded nothing.
+    /// Renaming here would destroy the only copy of a file that a later build
+    /// (or a hand edit) might still read, which is the same argument the
+    /// heal-on-write decision rests on.
+    func test_load_everyRowBad_readsEmptyWithoutRenamingTheFile() async throws {
+        try writeArray([Self.badRow, Self.badRow])
+
+        let rows = await HistoryStore(url: tempURL).allEntries()
+        XCTAssertTrue(rows.isEmpty)
+        XCTAssertTrue(try corruptSiblings().isEmpty,
+            "an array of undecodable rows is not a corrupt file")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tempURL.path),
+            "the bytes stay on disk — nothing else holds a copy of them")
+    }
+
+    func test_load_emptyArray_readsEmptyAndIsNotCorruption() async throws {
+        try "[]".write(to: tempURL, atomically: true, encoding: .utf8)
+
+        let rows = await HistoryStore(url: tempURL).allEntries()
+        XCTAssertTrue(rows.isEmpty)
+        XCTAssertTrue(try corruptSiblings().isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tempURL.path))
+    }
+
+    // MARK: - Heal-on-write (U8 — decided against; both halves pinned)
+
+    /// Half one: **a read never rewrites the file.** The dropped row has no
+    /// `.corrupt-` sibling, so the bytes still at `history.json` are the only
+    /// copy of it in existence — and `allEntries()` runs at launch, before
+    /// anyone knows a row was lost. Byte-equality is the assertion because a
+    /// re-serialization that happened to preserve the survivors would still
+    /// have destroyed the dropped row.
+    func test_allEntries_droppingARow_doesNotRewriteTheFile() async throws {
+        try writeArray([
+            Self.goodRow(id: Self.idA, text: "one"),
+            Self.badRow,
+            Self.goodRow(id: Self.idC, text: "three"),
+        ])
+        let before = try Data(contentsOf: tempURL)
+
+        let rows = await HistoryStore(url: tempURL).allEntries()
+        XCTAssertEqual(rows.count, 2, "the read did drop a row")
+
+        XCTAssertEqual(try Data(contentsOf: tempURL), before,
+            "reading is not a mutation — history.json is byte-identical afterwards")
+        XCTAssertTrue(String(data: try Data(contentsOf: tempURL), encoding: .utf8)?
+            .contains("the row with no id") ?? false,
+            "and the dropped row's own bytes are still there to be recovered by hand")
+    }
+
+    /// Half two, recorded rather than hidden: the **next mutation** does drop
+    /// it, because `append` / `update` / `remove` re-serialize the whole array
+    /// by design. This is the honest ceiling of the decision above — the read
+    /// buys a window in which the bytes survive, not a guarantee that they do.
+    func test_append_afterADrop_rewritesTheArrayWithoutTheDroppedRow() async throws {
+        try writeArray([
+            Self.goodRow(id: Self.idA, text: "one"),
+            Self.badRow,
+            Self.goodRow(id: Self.idC, text: "three"),
+        ])
+
+        let store = HistoryStore(url: tempURL)
+        await store.append(entry(text: "four"))
+
+        let onDisk = try XCTUnwrap(String(data: try Data(contentsOf: tempURL), encoding: .utf8))
+        XCTAssertFalse(onDisk.contains("the row with no id"),
+            "the undecodable row leaves the file on the first real mutation")
+        let reread = await HistoryStore(url: tempURL).allEntries()
+        XCTAssertEqual(reread.map(\.text), ["one", "three", "four"],
+            "and what remains is the survivors plus the new row")
+    }
+
     // MARK: - Corruption recovery
 
     /// Garbage JSON is renamed aside and the store starts fresh —
@@ -691,6 +943,32 @@ final class HistoryStoreTests: XCTestCase {
         // `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`.
         XCTAssertFalse(FileManager.default.fileExists(atPath: tempURL.path),
             "the corrupt file is renamed aside, not copied — nothing is left at history.json")
+    }
+
+    /// The boundary of the per-row tolerance above, asserted from the other
+    /// side: a file truncated mid-write has no element boundaries to salvage
+    /// — the JSON parser fails before any array element exists — so it still
+    /// takes the whole-file path, and the renamed sibling is the user's only
+    /// recourse.
+    ///
+    /// Worth pinning separately from the "not even an array" case: this one
+    /// *starts* as a valid array with a decodable row in it, so a decoder that
+    /// tried to salvage elements from a partial parse would surface here as a
+    /// one-row read with no backup — the file silently truncated for real.
+    func test_load_truncatedFile_stillTakesTheWholeFileRecoveryPath() async throws {
+        try """
+        [
+        \(Self.goodRow(id: Self.idA, text: "one")),
+        { "id":"4E2D4C6
+        """.write(to: tempURL, atomically: true, encoding: .utf8)
+
+        let rows = await HistoryStore(url: tempURL).allEntries()
+        XCTAssertTrue(rows.isEmpty, "a file that cannot be parsed reads as an empty history")
+
+        XCTAssertEqual(try corruptSiblings().count, 1,
+            "a truncated file is preserved as history.json.corrupt-<ts>")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: tempURL.path),
+            "and is renamed aside, not copied")
     }
 
     // MARK: - Round-trip
