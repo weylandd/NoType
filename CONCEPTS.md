@@ -38,6 +38,14 @@ A gap is what makes partial delivery possible: the surviving chunks are delivere
 
 **A gap is a position; the *gap marker* is only how one looks.** The marker — `[…]` — is drawn wherever a gap sits when a transcript is rendered, and the user's dictionary replacement pairs may restyle it like any other text. Nothing structural is read back out of those characters: whether a row is broken, how many chunks it lost, and where a recovery belongs are all answered from the stored positions. This distinction was learned by shipping the other one, where the marker *was* the storage and an ordinary replacement pair on the ellipsis silently erased the user's ability to recover.
 
+### History row
+The stored record of one finished dictation, in a rolling window of the most recent ones — the only place a transcript survives after it has been delivered, and the only place it exists at all when delivery was withheld or the dictation lost chunks.
+
+A row stores the session's ordered sequence of responses, each covering one or more chunk positions and holding either the model's text **exactly as it came back** or a gap. Everything a reader sees is derived from that sequence: whether the row is broken, where its gaps are drawn, and the single string it both displays and copies. The user's replacement pairs are applied to that string when the row is *rendered*, not when it is written — so editing a pair changes how already-stored rows read, and for any row recorded under this model, deleting a pair restores what the model actually said. (Rows carried over from the older model are the exception: their text was already substituted before it was stored, and nothing can recover what it said before.) Where a dictation *happened* is recorded on the row and stays fixed; where it was *delivered* is not the same fact.
+
+A row is **broken** when its sequence contains a gap. A broken row is **dead** once the audio behind its gaps is gone — which happens to every broken row when the application quits, because that audio only ever lives in memory. A dead row still shows its gaps and, where any text survived, still offers to copy it; what it no longer offers is recovery — and that is the designed outcome rather than a hole to fill. A row that lost every chunk offers neither, because there is nothing to copy.
+*Avoid:* "history entry" and "transcript" used interchangeably for this — a transcript is the text, the row is the record around it.
+
 ### Network class
 The failure class meaning *the transport itself did not answer* — nothing came back from the server, as opposed to the server answering with a refusal or an error. It is distinguished from every other failure because it is the only one where the connection itself is suspect, so it is the only one whose retry is issued over a fresh connection rather than the one that just went silent.
 

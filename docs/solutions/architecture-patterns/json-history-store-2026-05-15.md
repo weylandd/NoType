@@ -51,10 +51,14 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
 }
 ```
 
+**The schema above is the 2026-05 shape and has since grown (2026-08-13).** The decision this entry records — one plain JSON file, a top-level array, a ten-entry FIFO, no database — is unchanged and is what the entry is about. What changed is the row: a `failedChunkCount` was added by the retry feature, and `docs/plans/2026-08-11-001-fix-dictation-delivery-reliability-plan.md` then replaced the flat `text` with an ordered **response sequence** — per segment, the chunk positions it covered and either the model's raw text or a gap. `text` and `failedChunkCount` are still written, as legacy mirrors a rollback can decode, and are no longer what the app reads. The live schema and its migration rule live in `NoType/History/CLAUDE.md`; don't take the block above as current.
+
+Two consequences worth knowing here, because they bear on the "plain text, not encrypted" ruling this entry made: the file now holds the model's text **before** the user's dictionary replacements are applied (those run at render), and a row that will not decode is dropped on its own rather than costing the whole file — see [tolerating a decode failure deletes the recovery the throw was driving](../conventions/tolerance-deletes-the-recovery-the-throw-was-driving-2026-08-13.md).
+
 **Failure modes** (handled in `HistoryStore`):
 
 - File doesn't exist → empty list, create on first write.
-- File is corrupt JSON → log, rename to `history.json.corrupt-<ts>`, start fresh.
+- File is corrupt JSON → log, rename to `history.json.corrupt-<ts>`, start fresh. **Since 2026-08-13 this is the boundary case rather than the only case**: damage that can be split into rows drops just the unreadable row and keeps the other nine; a truncated write, non-JSON, or a top-level object still takes the whole-file rename.
 - Disk full on write → log, in-memory state stays accurate until next launch.
 - Concurrent writes from two app instances → not supported (LSUIElement single-instance).
 

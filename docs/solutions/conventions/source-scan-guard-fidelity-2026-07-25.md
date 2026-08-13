@@ -213,7 +213,7 @@ U6 sharpens the conclusion rather than just extending the count. By then the aut
 
 ## When to Apply
 
-- **Writing any new source-scan / convention test.** Walk the four checklist items plus the anchor-and-overload notes, then prove it red.
+- **Writing any new source-scan / convention test.** Walk the six checklist items plus the anchor-and-overload notes, then prove it red.
 - **Any refactor that relocates work, or extracts a seam for testability** — init → launch hook, view → controller, sync → async, one module to another, a constant hoisted into a factory a test can call. Ask: *if the destination were deleted, which test goes red?* — and, for an extraction, *does any test fail if the production call site stops calling this?* If the answer is none, the guard is absence-only.
 - **Reviewing a diff that adds "and a test pins this."** Check what the test would do if the feature were entirely removed rather than merely misplaced.
 - **Writing a guard for an installed hook, a swapped pointer, a redaction rule, or an ordering between two steps.** Apply the hook-guard section: name the worst outcome in that area, then check whether the assertion would be green under it.

@@ -30,6 +30,8 @@ Even with full-screen AX context, Gemini transcription occasionally mishears bra
 1. **`User dictionary:` cache-prefix section.** A new section in every Gemini transcription request, between `Category instruction:` (optional) and `Insertion target:`. Comma-separated list of canonical spellings — brands, proper nouns, jargon — that biases Gemini's transcription. **Always present**, even when the list is empty (body `(empty)`).
 2. **Auto-replacement pass.** Pure client-side find/replace pairs (e.g. `то есть → т.е.`) applied to the final stitched transcript **between** `finalizeForInsertion` and `paste` — i.e. after Gemini, never sent to Gemini.
 
+   **The pass now runs twice, and only one of the two is described above (2026-08-13).** That sentence is still true of the *paste*: the string typed at the cursor is substituted once, on the way out, and is never revisited. It is no longer the whole picture, because a history row stopped storing that string. Since `docs/plans/2026-08-11-001-fix-dictation-delivery-reliability-plan.md`, a row stores the model's text **raw** and the user's *current* pairs are applied when the row is **rendered** — so editing a pair changes how already-stored rows read, deleting one restores what the model actually said, and `history.json` on disk holds pre-replacement text. Read the sentence above as describing the delivered text, not the stored record; `NoType/Dictionary/CLAUDE.md` carries the before/after and the on-disk consequence.
+
 Both concerns persist to `~/Library/Application Support/NoType/dictionary.json`. Mirrors `InstructionsStore` operationally: actor isolation, atomic writes, corruption recovery via `.corrupt-<ts>` rename.
 
 Dictionary entries are mixed-source:
