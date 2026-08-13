@@ -354,6 +354,19 @@ final class AudioRecorder: @unchecked Sendable {
     /// `AudioRecorder` free of `MainActor` plumbing and matches the
     /// session lifetime exactly.
     ///
+    /// **Known consequence of that choice: the *picker* is not a trigger.**
+    /// This listens for the system default changing, not for the user
+    /// pinning a different device in the mic picker — that writes
+    /// `AudioDeviceManager.selectedUID`, which nothing here observes. So a
+    /// device change made from the popover footer or Settings → Recording
+    /// *during* a session is not picked up until the next session, even
+    /// though `openAndStartHAL`'s `resolveEffectiveDevice()` would honour
+    /// it on any rebuild. Same shape as issue #86 in `MicProbe`, and
+    /// deliberately **not** fixed alongside it — the impact is different in
+    /// the way that matters: nothing on screen claims the switch happened,
+    /// so the user is not misled, and the dictation still completes on the
+    /// device it started on. Tracked in `docs/TECHDEBT.md`.
+    ///
     /// The listener dispatches on `DispatchQueue.main` so the
     /// rebuild path can read `AudioDeviceManager` (which is
     /// `@MainActor`-isolated) without an extra hop.

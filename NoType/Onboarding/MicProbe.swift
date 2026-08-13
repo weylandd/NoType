@@ -252,14 +252,28 @@ final class MicProbe: @unchecked Sendable {
     /// read is re-validated against the live node immediately before the
     /// tap goes in.
     ///
-    /// **Moving the pin here raises how often the gate is consulted right
-    /// after a switch, and that is the accepted trade.** Before, a picker
-    /// change never re-pinned, so it never raced — it also never switched
-    /// the microphone. The gate declines an unsafe install rather than
-    /// raising, and the `.AVAudioEngineConfigurationChange` observer
-    /// installed in `start()` retries once the switch lands, so a decline
-    /// costs a moment of flat meter, not a dead screen. Verify by hand
-    /// against a Bluetooth headset, where the switch is slowest.
+    /// **The accepted trade, stated precisely — it is a change in *kind*,
+    /// not only in frequency.** `start()` runs from `.onAppear`, a
+    /// synchronous main-actor callback; `rebuild()` runs from two
+    /// `Task { @MainActor }` bodies. So while the pin lived in `start()`
+    /// alone, the switch it provokes never overlapped a *concurrency-job*
+    /// install — which is §1 of the executor-identity mechanism. It does
+    /// now. What bounds it is `apply`'s idempotence: a set happens only
+    /// when the device genuinely differs, so the overlap is **one racing
+    /// install per real user device change**, and not on the
+    /// configuration-change rebuild that follows (device already current,
+    /// nothing re-set). One racing install per switch is the irreducible
+    /// cost of switching the microphone at all.
+    ///
+    /// The residual is the few instructions between the gate's `live` read
+    /// and `installTap`; a switch landing anywhere earlier makes the gate
+    /// *decline*, and the config-change observer retries once it lands —
+    /// a moment of flat meter, not a dead screen. Verify by hand against a
+    /// Bluetooth headset, where the switch is slowest. If a reporter's
+    /// `OBJC THROW` ever names `com.apple.coreaudio.avfaudio` on a build
+    /// ≥ 0.1.14, the fix is to make the install **wait** for the switch —
+    /// not to move the pin back, which restores the silent-wrong-device
+    /// bug.
     ///
     /// `@MainActor` because `AudioDeviceManager` is; both callers
     /// (`start()`, `rebuild()`) already were, so no isolation changes.
