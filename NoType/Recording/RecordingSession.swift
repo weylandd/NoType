@@ -1204,7 +1204,10 @@ final class RecordingSession {
     ///   `TextReplacementEngine.apply` run on the stitched whole, on the
     ///   paste path, and never touch these. The row's `text` mirror is
     ///   post-replacement, the segments are not, and that is the point —
-    ///   the user's *current* pairs are applied when a row is displayed.
+    ///   the user's *current* pairs are to be applied when a row is
+    ///   displayed. Note the tense: this unit only stores the raw text.
+    ///   The render-time pass that reads it is a later unit's, and until it
+    ///   lands every display and copy path still reads the `text` mirror.
     /// - A chunk the hallucination gate filtered stays a **text segment
     ///   holding `""`**, not a gap (R19, R27). The gate stores `""` (not
     ///   `nil`) precisely so a call that answered can be told apart from

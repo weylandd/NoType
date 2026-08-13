@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 struct HistoryEntry: Codable, Identifiable, Sendable {
 
@@ -24,12 +25,29 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
     /// `NoType/Recording/CLAUDE.md` documents under "Post-response
     /// hallucination gate", carried onto disk unchanged.
     ///
-    /// `chunkIndices` is **never empty**: both producers guarantee it (a
-    /// `ChunkResponse` always covers at least one chunk; a migrated segment
-    /// is assigned exactly one ordinal), and the decoder rejects a stored
-    /// sequence that violates it. Without that guarantee `isBroken` and
-    /// `failedChunkCount` could disagree, which is the split representation
-    /// this whole shape exists to remove.
+    /// `chunkIndices` is **never empty**, and the enforcement sits in three
+    /// different places on purpose:
+    ///
+    /// - **In-process construction** — the `precondition` below. Both
+    ///   producers already satisfy it upstream (`processBatch` returns early
+    ///   on `encoded.isEmpty`, and every `recordRecoverableFailure` caller
+    ///   passes exactly one index), but those guards are three call-frames
+    ///   away from the type that states the invariant. The house pattern for
+    ///   a contract a value type asserts about itself is a `precondition` at
+    ///   construction — `GeminiClient`'s lite-path `audios.count == 1` is the
+    ///   same shape. Synthesized `Codable` assigns stored properties
+    ///   directly rather than routing through this initializer, so the check
+    ///   guards the in-process paths only and cannot turn a damaged file into
+    ///   a crash.
+    /// - **Decode** — `init(from:)` rejects a stored sequence violating it
+    ///   and reconstructs instead, which is the path a damaged file takes.
+    ///
+    /// Without the guarantee `isBroken` and `failedChunkCount` could
+    /// disagree, which is the split representation this whole shape exists
+    /// to remove. Worse, an empty-positioned segment written to disk would
+    /// make the decoder reject the *whole* sequence on the next read, so a
+    /// row **this build wrote** would go through R12's marker parse — the
+    /// one thing KTD10 declares structurally impossible.
     struct Segment: Codable, Sendable, Equatable {
         /// The chunk positions this segment covers, ascending. Non-empty.
         let chunkIndices: [Int]
@@ -39,12 +57,19 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
         /// ran (R2). `nil` means the call failed recoverably and this
         /// position is a gap.
         ///
-        /// Raw is the point: a replacement pair is applied to the assembled
-        /// row at display and copy time, so editing a pair changes how
-        /// already-stored rows read, and a pair whose phrase spans a chunk
-        /// seam still matches (KD2). It also means `history.json` holds
-        /// pre-replacement text — presentation-only substitution removes
-        /// nothing from disk (R31).
+        /// Raw is the point, and storing it raw is what this unit ships;
+        /// the pass that consumes it has **not landed yet**. Once the
+        /// assembler does, a replacement pair will be applied to the
+        /// assembled row at display and copy time, so editing a pair will
+        /// change how already-stored rows read and a pair whose phrase spans
+        /// a chunk seam will still match (KD2). Today every reader still
+        /// goes through the post-replacement `text` mirror below.
+        ///
+        /// What is already true as of this unit: `history.json` holds
+        /// pre-replacement text (R31). That is a present-tense consequence
+        /// of storing raw, not something the assembler brings — the file is
+        /// unencrypted and readable by anything running as the user, so it
+        /// is recorded rather than implied.
         let text: String?
 
         /// True when this position carries no text because its Gemini call
@@ -53,6 +78,10 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
         var isGap: Bool { text == nil }
 
         init(chunkIndices: [Int], text: String?) {
+            precondition(
+                !chunkIndices.isEmpty,
+                "a segment must cover at least one chunk position — see the type's doc-comment"
+            )
             self.chunkIndices = chunkIndices
             self.text = text
         }
@@ -238,12 +267,42 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
     ///
     /// **Positions are ordinal, not recovered.** A migrated text segment
     /// stands for an unknown number of original chunks and its index is
-    /// just its place in the sequence. Nothing may depend on these
-    /// positions, and nothing has to: no migrated row can be retried,
-    /// because the audio a retry needs is memory-only and did not survive
-    /// the restart that produced the migration.
+    /// just its place in the sequence.
+    ///
+    /// **Nothing may depend on these positions, and the reason is narrower
+    /// than "no migrated row can be retried" — that sentence is false.** It
+    /// holds on the *decode* path: a row read off disk without a sequence
+    /// outlived the process whose memory held its audio, so `canRetry` is
+    /// already false for it. But decoding is not the only producer.
+    /// `AppState.settleRetry` rebuilds a retried row through the
+    /// `failedChunkCount:` initializer below, in-process, and re-`put`s the
+    /// audio for whatever did not land — so a **live, retryable** row can
+    /// carry these fabricated ordinals, and a second retry on it would be
+    /// indexing against positions no chunk ever had. Today nothing does:
+    /// `RetryMerge` still substitutes markers positionally in `text`, which
+    /// this reconstruction keeps in step by construction. The index write
+    /// that would break is the next unit's, and converting `settleRetry` to
+    /// the `segments:` initializer is that unit's first job.
+    ///
+    /// **`maxMigratedGaps` bounds the tail.** `failedChunkCount` is read
+    /// straight off disk, and the loop below turns it into that many
+    /// allocations — ten bytes of JSON buying an unbounded array. A
+    /// corrupt-but-parseable count therefore hangs or OOM-kills the app
+    /// *at launch*, every launch, which is strictly worse than the
+    /// renamed-file outcome the rest of this decoder works to avoid: that
+    /// one self-heals, a boot loop does not. Measured: 5 000 000 allocates
+    /// in 0.09 s, `Int.max` never returns. The ceiling is far above any
+    /// real session — it would take that many separately-failed Gemini
+    /// responses in one dictation — so no honest row is clamped, and a
+    /// clamped row still reads as broken, which is the fact that matters.
+    ///
+    /// Note the clamp is deliberately *not* also applied to a stored
+    /// sequence's gap count: there the gaps are physically in the file, so
+    /// the array cannot be larger than the bytes that carried it. The
+    /// amplification exists only on this count-to-segments path, and that
+    /// is the only place it is bounded.
     static func migratedSegments(text: String, failedChunkCount: Int) -> [Segment] {
-        let gapsWanted = max(0, failedChunkCount)
+        let gapsWanted = min(max(0, failedChunkCount), maxMigratedGaps)
         guard gapsWanted > 0 else {
             return [Segment.carrying(text, at: [0])]
         }
@@ -271,6 +330,15 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
         return segments
     }
 
+    /// Ceiling on the gaps a *reconstruction* may fabricate from a stored
+    /// count — see `migratedSegments`. Sized to be unreachable by an honest
+    /// row rather than to be tight: a session would need this many
+    /// separately-failed Gemini responses, and the whole array costs a few
+    /// tens of kilobytes, so there is nothing to buy by lowering it.
+    static let maxMigratedGaps = 4096
+
+    private static let log = Logger(subsystem: "app.notype", category: "history")
+
     private enum CodingKeys: String, CodingKey {
         case id, text, sourceAppName, sourceBundleID, timestamp
         case durationSeconds, failedChunkCount, segments
@@ -295,9 +363,30 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
     /// by renaming `history.json` aside, so one bad row would cost the user
     /// all ten transcripts. Reconstruction reproduces the row's appearance
     /// from fields that were readable.
+    ///
+    /// **Know the scope of that sentence — the tolerance covers `segments`
+    /// and `failedChunkCount`, not the row.** The five fields above it are
+    /// still bare `try`, so a row missing `id` / `text` / `sourceAppName` /
+    /// `sourceBundleID` / `timestamp`, or carrying a `null` text, a
+    /// non-UUID id, or a timestamp the `.iso8601` strategy rejects, still
+    /// takes the whole file down. That is **unchanged** from the
+    /// pre-sequence decoder — measured, not assumed: across a corpus of
+    /// hostile rows, exactly those inputs throw here and threw there, and
+    /// every `segments`-shaped malformation that is fatal to nothing was
+    /// fatal to nothing before either. This unit widens no cliff and
+    /// narrows one (a wrong-typed `failedChunkCount` used to be fatal and
+    /// now degrades to 0). Whether the *remaining* cliff should become a
+    /// per-row `try?` that drops one row instead of ten is a real question
+    /// and deliberately not this unit's to answer: defaulting an absent
+    /// `id` or `timestamp` invents data, and "silently lose one row"
+    /// against "rename the file" is a product call, not a refactor.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.id              = try c.decode(UUID.self,   forKey: .id)
+        // Bound to a local before assignment: the log below is an escaping
+        // autoclosure, and interpolating `self.id` from inside an
+        // initializer captures a mutating `self`, which does not compile.
+        let rowID = try c.decode(UUID.self, forKey: .id)
+        self.id              = rowID
         self.text            = try c.decode(String.self, forKey: .text)
         self.sourceAppName   = try c.decode(String.self, forKey: .sourceAppName)
         self.sourceBundleID  = try c.decode(String.self, forKey: .sourceBundleID)
@@ -308,6 +397,19 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
         if let stored, !stored.isEmpty, stored.allSatisfy({ !$0.chunkIndices.isEmpty }) {
             self.segments = stored
         } else {
+            // Absence is the *expected* legacy shape and says nothing — it
+            // would fire for every row of a pre-sequence file. A key that is
+            // present and still unusable is the anomaly: no writer produces
+            // it, so it means either on-disk damage or a future unit
+            // emitting a sequence this decoder rejects. Recovering from that
+            // silently is how such a bug stays invisible for a release —
+            // the row still renders, just from the legacy pair. Only the id
+            // is logged; a segment holds the user's speech.
+            if c.contains(.segments) {
+                Self.log.error(
+                    "row \(rowID, privacy: .public) carries an unusable response sequence; reconstructing from the legacy pair"
+                )
+            }
             let legacyCount = ((try? c.decodeIfPresent(Int.self, forKey: .failedChunkCount)) ?? nil) ?? 0
             self.segments = Self.migratedSegments(text: text, failedChunkCount: legacyCount)
         }

@@ -315,6 +315,154 @@ final class HistoryStoreTests: XCTestCase {
         )
     }
 
+    /// The migration's *shape* edges, none of which R12 enumerates and all
+    /// of which drive `migratedSegments`' empty-head / empty-tail branches
+    /// — the ones that decide whether a zero-length text segment gets
+    /// emitted and therefore whether the ordinal indices stay contiguous.
+    /// A stray empty segment is invisible in the rendered row and lethal to
+    /// the index write a later unit keys on.
+    func test_migration_markerAtEitherEdge_andAdjacentMarkers_emitNoEmptySegments() {
+        let cases: [(String, Int, [HistoryEntry.Segment])] = [
+            // Leading marker: no head, so no empty text segment before it.
+            ("\(Self.marker) tail", 1, [.gap(at: [0]), .carrying(" tail", at: [1])]),
+            // Trailing marker: no remainder, so nothing appended after it.
+            ("head \(Self.marker)", 1, [.carrying("head ", at: [0]), .gap(at: [1])]),
+            // Adjacent markers: the second iteration's head is empty too.
+            ("a \(Self.marker)\(Self.marker) b", 2,
+             [.carrying("a ", at: [0]), .gap(at: [1]), .gap(at: [2]), .carrying(" b", at: [3])]),
+            // The whole transcript was one lost chunk.
+            (Self.marker, 1, [.gap(at: [0])]),
+            // Whitespace is text, not absence — it must not collapse away.
+            ("   ", 2, [.carrying("   ", at: [0]), .gap(at: [1]), .gap(at: [2])]),
+            // A marker with no spaces around it still splits on real bounds.
+            ("wait\(Self.marker), go", 1,
+             [.carrying("wait", at: [0]), .gap(at: [1]), .carrying(", go", at: [2])]),
+        ]
+        for (text, count, expected) in cases {
+            let segments = HistoryEntry.migratedSegments(text: text, failedChunkCount: count)
+            XCTAssertEqual(segments, expected, "text \(text.debugDescription) count \(count)")
+            XCTAssertFalse(
+                segments.contains { $0.text?.isEmpty == true },
+                "an empty-string text segment is not a gap and renders as nothing — "
+                + "it would silently shift every later position"
+            )
+            XCTAssertEqual(
+                segments.flatMap(\.chunkIndices), Array(0..<segments.count),
+                "ordinal positions stay contiguous from 0"
+            )
+        }
+    }
+
+    /// The count is read straight off disk and the reconstruction turns it
+    /// into that many allocations, so ten bytes of JSON buy an unbounded
+    /// array. Left unclamped this is **worse than the outcome the whole
+    /// tolerant decoder exists to avoid**: a throw gets `history.json`
+    /// renamed aside and the app starts fresh, but an unbounded allocation
+    /// hangs or OOM-kills the app *at launch*, every launch, and
+    /// `JSONFileStorage` cannot rescue what never returns. Measured before
+    /// the clamp: 5 000 000 built in 0.09 s, `Int.max` never returned.
+    ///
+    /// The row must stay **broken** through the clamp — that is the fact
+    /// the user sees, and a clamp that quietly healed the row would trade
+    /// a hang for a lie.
+    func test_migration_absurdCount_isClampedAndStillReadsAsBroken() throws {
+        for count in [HistoryEntry.maxMigratedGaps + 1, 5_000_000, Int.max] {
+            let segments = HistoryEntry.migratedSegments(text: "a transcript", failedChunkCount: count)
+            XCTAssertEqual(segments.count, HistoryEntry.maxMigratedGaps + 1,
+                "one text segment plus the clamped gaps, for count \(count)")
+            XCTAssertEqual(segments.filter(\.isGap).count, HistoryEntry.maxMigratedGaps)
+        }
+        // And through the real decoder, because that is where a corrupt
+        // file actually arrives.
+        let json = """
+        [
+          {
+            "durationSeconds" : 8.5,
+            "failedChunkCount" : 9223372036854775807,
+            "id" : "3D1C3B50-8E6F-4B2C-9D40-7C5E03F5A2B3",
+            "sourceAppName" : "Slack",
+            "sourceBundleID" : "com.tinyspeck.slackmacgap",
+            "text" : "a transcript",
+            "timestamp" : "2026-08-01T09:41:12Z"
+          }
+        ]
+        """
+        let rows = try JSONFileStorage.makeDecoder()
+            .decode([HistoryEntry].self, from: Data(json.utf8))
+        XCTAssertEqual(rows.first?.failedChunkCount, HistoryEntry.maxMigratedGaps)
+        XCTAssertEqual(rows.first?.isBroken, true, "a clamped row is still a broken row")
+        XCTAssertEqual(rows.first?.text, "a transcript", "and its transcript is untouched")
+    }
+
+    /// A count no honest session could reach is clamped, but a count a
+    /// session *could* reach must survive verbatim — otherwise the clamp
+    /// is silently rewriting real rows. Pins the boundary from below.
+    func test_migration_countAtTheCeiling_isNotClamped() {
+        let segments = HistoryEntry.migratedSegments(
+            text: "", failedChunkCount: HistoryEntry.maxMigratedGaps
+        )
+        XCTAssertEqual(segments.count, HistoryEntry.maxMigratedGaps)
+        XCTAssertTrue(segments.allSatisfy(\.isGap))
+    }
+
+    /// The claim `init(from:)`'s doc-comment rests on — "one malformed row
+    /// must not cost the user the other nine" — asserted the only way it
+    /// can be: through the **real store**, on a **multi-row** file, with
+    /// the damage in the middle. The per-row sweep above decodes one row at
+    /// a time and so cannot see this: a decoder that let the bad row throw
+    /// would fail the whole array, and both good rows would vanish with it.
+    ///
+    /// The `.corrupt-` check is the half that makes it a data-loss test
+    /// rather than a parsing test — a thrown row renames the file, so the
+    /// user's next launch starts from empty.
+    func test_load_multiRowFileWithOneMalformedSequence_keepsTheOtherRows() async throws {
+        let json = """
+        [
+          {
+            "durationSeconds" : 3,
+            "failedChunkCount" : 0,
+            "id" : "1B9A1F3E-6C4D-4F0A-9B2E-7A5C81D3E0F1",
+            "sourceAppName" : "Slack",
+            "sourceBundleID" : "com.tinyspeck.slackmacgap",
+            "text" : "the first one",
+            "timestamp" : "2026-08-01T09:41:12Z"
+          },
+          {
+            "durationSeconds" : 4,
+            "failedChunkCount" : 1,
+            "id" : "4E2D4C61-9F70-4C3D-AE51-8D6F14061B3C",
+            "segments" : "this is not a sequence",
+            "sourceAppName" : "Mail",
+            "sourceBundleID" : "com.apple.mail",
+            "text" : "lost \(Self.marker) here",
+            "timestamp" : "2026-08-01T10:02:44Z"
+          },
+          {
+            "durationSeconds" : 5,
+            "failedChunkCount" : 0,
+            "id" : "5F3E5D72-A081-4D4E-BF62-9E70251721D4",
+            "sourceAppName" : "Notes",
+            "sourceBundleID" : "com.apple.Notes",
+            "text" : "the third one",
+            "timestamp" : "2026-08-01T11:15:03Z"
+          }
+        ]
+        """
+        try json.write(to: tempURL, atomically: true, encoding: .utf8)
+
+        let rows = await HistoryStore(url: tempURL).allEntries()
+        XCTAssertEqual(rows.map(\.text), ["the first one", "lost \(Self.marker) here", "the third one"],
+            "the rows either side of the damage survive it")
+        XCTAssertEqual(rows.map(\.isBroken), [false, true, false],
+            "and the damaged row still reconstructs from its legacy pair")
+
+        let siblings = try FileManager.default
+            .contentsOfDirectory(atPath: tempURL.deletingLastPathComponent().path)
+            .filter { $0.hasPrefix("history.json.corrupt-") }
+        XCTAssertTrue(siblings.isEmpty,
+            "an unusable sequence must never reach JSONFileStorage's rename path")
+    }
+
     /// KTD10's discriminator, proved by making the two answers *differ*:
     /// the stored sequence puts the gap first, the row's text puts the
     /// marker last. A decoder that re-parsed the text would hand back the
