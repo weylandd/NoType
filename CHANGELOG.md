@@ -10,6 +10,15 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
 
 ## [Unreleased]
 
+---
+
+## [0.1.13] — 2026-08-13
+
+The first published release since 0.1.12. It also carries everything from
+the `0.1.13-rc1` and `0.1.13-rc2` sections below — those were hand-off
+test builds that never went into the auto-update feed, so if you are
+coming from 0.1.12 you are getting all three rounds at once.
+
 ### Added
 - **A dictation that fails on a bad connection is no longer lost — you can
   retry it.** Previously, if the network dropped mid-dictation, the parts
@@ -30,6 +39,62 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
   retry. The text you already had pasted is never touched.
 
 ### Fixed
+- **A transcript is never pasted into an application you have left.** If
+  transcription finished while you had moved on, NoType pasted the text
+  wherever your cursor now was — editing a document you never meant to
+  touch. It now checks that the application about to receive the text is
+  the one you were in **when you stopped recording**; if it isn't,
+  nothing is pasted, the transcript is written to your history as usual,
+  and a notice tells you it's ready, names the application it was meant
+  for, and offers to copy it. Where you *started* doesn't enter into it —
+  so walking away mid-recording is still fine, and hands-free lock mode
+  delivers where you stopped. Two windows of the same application count
+  as the same place.
+- **Long dictations no longer come back with silent gaps in them.** Every
+  request to Gemini was given thirty seconds from start to finish.
+  Measuring the real request shapes showed a four-part batch legitimately
+  takes up to 27.16 s — so a five-part batch was already crossing that
+  line and being cut off mid-flight, turning speech you had actually
+  spoken into a `[…]` gap in text NoType had already pasted for you. Both
+  time limits are now sized by how many pieces of audio a request
+  carries, instead of one number covering every request shape.
+- **Waiting out a stalled connection costs about 24 seconds instead of
+  about 60.** An ordinary single-piece dictation now gets twelve seconds
+  per attempt and one retry, and that retry goes over a **fresh**
+  connection rather than the one that just failed — the stalls we
+  measured were a dead pooled connection, not a dead network: a request
+  that hung for a full thirty seconds succeeded in 1.7 s over a new
+  connection moments later. A large batch still gets proportionally
+  longer, deliberately, for the reason in the entry above.
+- **A replacement pair can no longer take away your ability to retry.**
+  Where a lost piece of a dictation sat was stored as the `[…]`
+  characters inside the transcript itself — so a dictionary pair on the
+  ellipsis (`…` → `...` is enough) quietly erased every marker in the
+  row, and the retry action along with them, while the audio sat there
+  unusable. A row now records where its gaps *are*, as positions kept
+  apart from its text, so no replacement pair can reach them. A row that
+  lost every piece and a row that lost one are stored the same way, too,
+  rather than in two different shapes.
+- **One unreadable line in your history no longer costs you all ten
+  transcripts.** `history.json` was read as a single block: one row with
+  a bad field failed the whole file, NoType renamed it aside and your
+  history came back empty. Only the unreadable row is dropped now — the
+  others load normally.
+- **The X on a notice works during a burst of errors.** When several
+  failures arrive within a fraction of a second — retrying a three-piece
+  dictation against a dead network produces three — each one tore down
+  the notice panel and stood up a replacement in the same spot. A click
+  that began on one panel finished on its replacement, which never saw it
+  begin, so the X did nothing while an identical-looking notice sat
+  there. A repeat of a notice already on screen now just restarts its
+  dismiss timer instead of rebuilding the panel. Separately, notices that
+  are up at the same time now stack in their own slots rather than
+  sitting directly on top of one another.
+- **Failure notices no longer show raw diagnostics or blame a connection
+  that is fine.** An unrecognised network failure surfaced its internal
+  code (`URLError code=…`, `HTTP 0`) in the text you read, and the
+  timed-out notice told you to check a connection that was working. Both
+  now say what actually happened.
 - **Dictating with no internet no longer leaves you waiting a minute for
   the error.** NoType used to sit on each attempt for the full 30-second
   network timeout, then try once more — so a single failed dictation could
@@ -55,11 +120,28 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
   a dictation to be skipped, because skipping it would save nothing and the
   gaps it leaves in text already pasted can't be repaired by a retry.
 
+### Changed
+- **Your dictionary replacements are applied when a transcript is shown,
+  not when it is saved.** History rows now keep the text exactly as
+  Gemini returned it, and your replacement pairs are applied on the way
+  to the screen and to the clipboard — so a row copies precisely what it
+  shows. The visible consequence: editing or deleting a pair now changes
+  how transcripts you *already have* read, and deleting one restores the
+  original wording in them. A piece recovered by a retry gets your
+  replacements too, which it did not before.
+
 ### Internal
+- History rows store the session's ordered response sequence — each part
+  carrying either the text the model returned or a gap — instead of one
+  flat string plus a count of what was lost. Rows already on disk are
+  migrated as they are read, reproducing exactly what they look like
+  today, and NoType keeps writing the old fields alongside the new ones
+  so an older build downgraded onto the same file still reads it.
 - **Found the actual cause of the macOS 26 crash** ([#82](https://github.com/weylandd/NoType/issues/82)), and corrected the documentation that named the wrong one. NoType raises an internal Objective-C error inside a background job; macOS absorbs it and keeps running, but the concurrency runtime is left corrupted and the app falls over shortly afterwards at an unrelated click. The three previous incidents — a timeline view, a hover handler, a button — were all innocent bystanders, which is why fixing each of them only moved the crash. The mechanism was reproduced locally rather than inferred.
 - Two things this retires: the start-up rework shipped in 0.1.13-rc1 was tested and **did not** fix the crash (it remains correct for its own reasons), and the README no longer suggests updating macOS as a workaround — the trigger is in NoType, not in the OS.
 - `docs/solutions/runtime-errors/` now records the proven mechanism, the diagnostic breadcrumb that identifies it in any crash report, and every hypothesis that was disproven along the way.
-- The code that came out of that — the exception watcher and the three raise-prone call sites it was written around — is listed under the **0.1.13-rc2** section below. It is on `main` and rolls into the next ordinary release; the rc section is where it is written up because that is the build the two affected users are testing.
+- The code that came out of that — the exception watcher and the three raise-prone call sites it was written around — is listed under the **0.1.13-rc2** section below and ships here. It is written up in the rc section because that is the build the two affected users were testing.
+- `CFBundleShortVersionString` `0.1.13-rc2` → `0.1.13`; `CFBundleVersion` 17 → 18. The two rc strings were never tagged or published; this is the first `0.1.13` in the auto-update feed.
 
 ---
 
