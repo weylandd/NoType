@@ -314,7 +314,26 @@ final class MicProbe: @unchecked Sendable {
     @MainActor
     private func installTapAndStart() throws {
         if let device = AudioDeviceManager.shared.effectiveDevice {
-            _ = AudioDeviceManager.apply(device, to: engine)
+            // **The outcome is logged, not discarded.** A pin that fails
+            // leaves the meter running on the previous microphone — which
+            // is visually identical to issue #86 itself, so without a
+            // record there is no way to tell a fix that works from one
+            // that is being refused. `apply` logs its own
+            // `AudioUnitSetProperty` failure; what it cannot log is the
+            // caller's view, which is the one that matters here: which
+            // device we asked for, and whether we got it.
+            //
+            // Device names are `.private` — they routinely carry the
+            // user's name via Continuity ("Alex's AirPods"), the same rule
+            // `AudioRecorder.resolveEffectiveDevice` follows.
+            let pinned = AudioDeviceManager.apply(device, to: engine)
+            if pinned {
+                Self.log.info("mic probe pinned input device \"\(device.name, privacy: .private)\"")
+            } else {
+                Self.log.error("mic probe could NOT pin input device \"\(device.name, privacy: .private)\" — meter will run on whatever the engine already had")
+            }
+        } else {
+            Self.log.info("mic probe has no effective input device to pin; using the engine default")
         }
 
         let input = engine.inputNode
