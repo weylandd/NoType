@@ -88,8 +88,10 @@ final class AppStateRetentionTests: XCTestCase {
         XCTAssertTrue(state.history[0].isBroken, "failedChunkCount > 0 is what makes it broken")
         XCTAssertTrue(
             state.history[0].text.isEmpty,
-            "an all-failed session recovered no text — the empty string is also how "
-            + "'lifetime stats never counted this session' is represented (R15/KTD7)"
+            "an all-failed session recovered no text, so the legacy mirror a pre-sequence "
+            + "build would decode is empty (KTD10). Nothing reads that emptiness: "
+            + "'lifetime stats never counted this session' is `isEntirelyLost`, off the "
+            + "sequence (R18 / KTD11)"
         )
         XCTAssertNotNil(store.peek(broken.id))
     }

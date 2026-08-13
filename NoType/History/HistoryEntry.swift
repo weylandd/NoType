@@ -113,7 +113,9 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
     /// **no display, copy or accounting reader consults this field any
     /// more** — they all go through `HistoryText.rendered`, which
     /// assembles the sequence and applies the user's *current* pairs
-    /// (R13). Exactly one reader is left:
+    /// (R13). Exactly one reader is left — `encode(to:)` below still
+    /// writes the mirror out, per the paragraph above, but nothing
+    /// downstream consumes what it wrote:
     ///
     /// - `init(from:)` below, for a legacy row that carries no sequence.
     ///   There the text is the only record of where the gaps were, which
@@ -500,8 +502,10 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
     /// otherwise throw on the whole array. They are write-only from this
     /// build's point of view: the stored count is ignored entirely whenever
     /// a sequence is present, and `text` is read only on the migration
-    /// path — see the field's own doc-comment for the two readers that
-    /// remain and why.
+    /// path — see the field's own doc-comment for the one reader that
+    /// remains and why. (The `encode` below is a read of the property in
+    /// the language's sense; it is the mirror write this paragraph
+    /// describes, not a consumer, and the field's count excludes it.)
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(id,              forKey: .id)

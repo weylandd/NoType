@@ -814,8 +814,8 @@ final class AppState {
     ///
     /// A seam, not a strategy — production has exactly one implementation
     /// (`sendRetryChunk`, below) and `retryChunkSender` stays `nil`. It
-    /// exists because everything U6 has to get right — the stats split of
-    /// KTD7, R16's stop-at-first-failure, R19's leave-everything-alone — is
+    /// exists because everything U6 has to get right — R18's stats split,
+    /// R16's stop-at-first-failure, R19's leave-everything-alone — is
     /// only observable across a *sequence* of per-chunk outcomes, and there
     /// is no other way to author that sequence without a live network. Test
     /// scenarios AE7 / AE8 / AE9 / R16 / R19 drive it.
@@ -1184,7 +1184,9 @@ final class AppState {
     }
 
     /// Fold a retry's spend into lifetime stats without counting a session
-    /// (R15 / KTD7). A `.zero` usage is a no-op inside `StatsStore`.
+    /// (R18) — the `else` half of the `isEntirelyLost` arm above, and the
+    /// arm every other exit takes. A `.zero` usage is a no-op inside
+    /// `StatsStore`.
     private func recordRetryTokens(
         _ tokens: TokenUsage,
         model: GeminiModel,

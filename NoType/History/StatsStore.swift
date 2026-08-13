@@ -616,23 +616,24 @@ actor StatsStore {
     /// Fold Gemini token usage into the day and day×app buckets **without**
     /// counting a session, words, or duration.
     ///
-    /// The retry half of KTD7. `record(_:tokens:model:)` is documented as
+    /// The retry half of R18. `record(_:tokens:model:)` is documented as
     /// non-idempotent (invariant 8) precisely because it increments
     /// `totalSessions`, so a retry that re-sends a row whose session was
     /// already counted when it pasted cannot go through it — the user would
     /// gain a phantom session and a second copy of the transcript's words
     /// every time they tapped retry (AE8). But the tokens are real spend on
-    /// the user's own key and R15 says every retry records them, so they need
-    /// a path of their own.
+    /// the user's own key and every retry records them whatever its outcome,
+    /// so they need a path of their own.
     ///
     /// Keyed off the row's `timestamp` and bundle id, not "now", so a retry
     /// tomorrow of a dictation from yesterday prices into yesterday's bucket
     /// alongside the session it belongs to.
     ///
     /// Deliberately does **not** touch `totalWords` / `totalSessions` /
-    /// `totalDuration*`: those are the once-per-entry half of KTD7 and are
+    /// `totalDuration*`: those are the once-per-entry half of R18 and are
     /// written by `record(_:tokens:model:)` on the first retry that recovers
-    /// text for a session lifetime stats never counted (AE9). A `.zero`
+    /// text for a session lifetime stats never counted — the rows for which
+    /// `HistoryEntry.isEntirelyLost` is true (AE9, KTD11). A `.zero`
     /// usage is a no-op, so a caller need not pre-check.
     @discardableResult
     func recordTokens(

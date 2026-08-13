@@ -6,7 +6,7 @@ import XCTest
 ///
 /// Every test drives `AppState.retryChunkSender`, the injected stand-in for
 /// the per-chunk Gemini call. That seam is the whole reason these
-/// properties are testable: each of them — KTD7's stats split, R16's
+/// properties are testable: each of them — R18's stats split, R16's
 /// stop-at-first-failure, R19's leave-everything-alone — is only observable
 /// across a *sequence* of per-chunk outcomes, and there is no way to author
 /// that sequence against a live network.
@@ -792,8 +792,10 @@ final class AppStateRetryTests: XCTestCase {
         ///   paste would have been — assembled, with the state's *current*
         ///   pairs applied — which is what `RecordingSession.makeHistoryEntry`
         ///   stores. Pass `""` for the all-failed row, which is exactly what
-        ///   `brokenHistoryEntry()` writes and what the never-counted-session
-        ///   signal reads.
+        ///   `brokenHistoryEntry()` writes. It is the mirror only (KTD10) —
+        ///   the never-counted-session signal is `isEntirelyLost`, read off
+        ///   `segments`, so what makes a row never-counted here is passing
+        ///   `nil` for every answer, not passing `""` for this.
         /// - Parameter retaining: the chunk indices whose audio is held.
         ///   Defaults to the gaps' own indices — the join a retry writes by
         ///   (R7). Override it only to build a payload deliberately out of

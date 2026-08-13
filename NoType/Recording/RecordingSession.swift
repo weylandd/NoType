@@ -1294,11 +1294,20 @@ final class RecordingSession {
     ///
     /// **What this factory owes that predicate is the session-side half
     /// of its argument, and it is `stop()`'s, not this method's:** a
-    /// session whose every response is a gap *throws*
-    /// (`responses.allSatisfy { $0.text == nil }`), so the success arm —
-    /// the one path that reaches `StatsStore.record` — can never produce
-    /// an all-gap sequence, and this factory is the only producer of one.
-    /// Keep those two in step. A change that let a fully-failed session
+    /// session that produced responses and lost every one of them
+    /// *throws* — `!responses.isEmpty && responses.allSatisfy { $0.text
+    /// == nil }`. Quote that guard in full when you check it: the
+    /// `!responses.isEmpty` term looks like a hole, because `allSatisfy`
+    /// is vacuously true over nothing, and it is not one — a session
+    /// with no responses at all stitches to `""` and throws `.noSpeech`
+    /// at the `guard !stitched.isEmpty` below it. So on either shape the
+    /// success arm — the one path that reaches `StatsStore.record` —
+    /// can never produce an all-gap sequence, and this factory is the
+    /// only producer of one. Keep those two in step, and note the
+    /// second one carries the empty case alone: a change that let an
+    /// empty-response session past it would need the
+    /// `HistoryEntry(segments:)` normalisation to keep
+    /// `isEntirelyLost` false. A change that let a fully-failed session
     /// reach the success arm, or that seeded this row with anything other
     /// than gaps, would silently make every recovered session
     /// double-count.
