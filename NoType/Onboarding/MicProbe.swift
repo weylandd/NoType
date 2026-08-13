@@ -156,7 +156,7 @@ final class MicProbe: @unchecked Sendable {
         }
 
         do {
-            try installTapAndStart()
+            try installTapAndStart(pinning: AudioDeviceManager.shared.effectiveDevice)
         } catch {
             // Deliberately not a teardown: the observers above stay armed
             // so the next config change or device pick retries.
@@ -309,11 +309,27 @@ final class MicProbe: @unchecked Sendable {
     /// the install **wait** for the switch — not to move the pin back, which
     /// restores the silent-wrong-device bug.
     ///
-    /// `@MainActor` because `AudioDeviceManager` is; both callers
-    /// (`start()`, `rebuild()`) already were, so no isolation changes.
-    @MainActor
-    private func installTapAndStart() throws {
-        if let device = AudioDeviceManager.shared.effectiveDevice {
+    /// **This method is `nonisolated`, and that is not an oversight — it is
+    /// the reason the class is `@unchecked Sendable` rather than
+    /// `@MainActor`.** An earlier revision marked it `@MainActor` so it could
+    /// read the main-actor-isolated `AudioDeviceManager.shared` directly. That
+    /// shipped a launch crash: the `installTap` closure is a literal *created
+    /// inside this body*, so under SE-0420 it inherited the method's
+    /// isolation, and `AVAudioEngine` calls that block on its realtime audio
+    /// thread — `dispatch_assert_queue` fails the moment audio starts flowing.
+    /// The crash is `BUG IN CLIENT OF LIBDISPATCH: Block was expected to
+    /// execute on queue [com.apple.main-thread]`, and it is the same defect
+    /// already written up in
+    /// `docs/solutions/runtime-errors/audio-ioproc-mainactor-inheritance-crash-2026-05-19.md`
+    /// — **not** the macOS 26 executor-identity family, which never reaches
+    /// libdispatch's queue check.
+    ///
+    /// So the effective device is resolved by the caller, both of which are
+    /// already `@MainActor`, and handed in. The `apply` call itself stays
+    /// here, which is what the issue-#86 guard pins and what actually stops a
+    /// rebuild from re-arming on the wrong microphone.
+    private func installTapAndStart(pinning device: AudioDeviceManager.Device?) throws {
+        if let device {
             // **The outcome is logged, not discarded.** A pin that fails
             // leaves the meter running on the previous microphone — which
             // is visually identical to issue #86 itself, so without a
@@ -400,7 +416,15 @@ final class MicProbe: @unchecked Sendable {
         self.outputFormat = outFmt
         self.converter = conv
 
-        input.installTap(onBus: 0, bufferSize: 1024, format: inFmt) { [weak self] buffer, _ in
+        // `@Sendable` strips any isolation this literal would otherwise
+        // inherit from the enclosing scope (SE-0420). Belt to the braces of
+        // this method being `nonisolated`: the block runs on `AVAudioEngine`'s
+        // realtime thread, so an inherited `@MainActor` turns the first buffer
+        // into a `dispatch_assert_queue` crash. Keeping the annotation means
+        // re-adding an actor annotation to this method fails to compile
+        // against `handleTap` instead of shipping a launch crash. Same shape
+        // as `dsOnHover` and `AudioRecorder`'s IOProc block.
+        input.installTap(onBus: 0, bufferSize: 1024, format: inFmt) { @Sendable [weak self] buffer, _ in
             self?.handleTap(buffer)
         }
         lock.lock(); tapInstalled = true; lock.unlock()
@@ -481,7 +505,7 @@ final class MicProbe: @unchecked Sendable {
         guard !isStopped else { return }
         engine.stop()
         do {
-            try installTapAndStart()
+            try installTapAndStart(pinning: AudioDeviceManager.shared.effectiveDevice)
             declineRetriesUsed = 0
         } catch {
             Self.log.error("mic probe rebuild failed: \(error.localizedDescription, privacy: .public)")
