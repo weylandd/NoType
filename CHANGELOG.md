@@ -12,6 +12,32 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
 
 ---
 
+## [0.1.14] — 2026-08-13
+
+### Fixed
+- **Picking a different microphone during setup now actually switches
+  it.** On the mic-check screen of the first-run wizard, choosing another
+  input from the dropdown restarted the audio meter — but on the
+  microphone you had just switched away from. The bar kept moving, so it
+  looked like it had worked, and you ended up confirming the wrong
+  device. NoType now re-selects your chosen microphone every time it
+  re-arms the meter, not only the first time. If the bar goes flat for a
+  moment right after you switch, that is the switch landing; it comes
+  back on its own.
+
+### Internal
+- Selecting the input device moved into the one function that installs
+  the audio tap, so no path can re-arm capture without it. The two
+  functions that each did half of that setup are what let the selection
+  fall off the picker's path; a source guard now fails if a second
+  selection site reappears. Re-selecting a device that is already current
+  is a no-op, which keeps the reconfiguration notification from feeding
+  itself.
+- `CFBundleShortVersionString` `0.1.13` → `0.1.14`; `CFBundleVersion`
+  18 → 19.
+
+---
+
 ## [0.1.13] — 2026-08-13
 
 The first published release since 0.1.12. It also carries everything from

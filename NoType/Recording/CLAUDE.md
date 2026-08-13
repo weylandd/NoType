@@ -6,7 +6,7 @@
 
 - `AudioRecorder.swift` — Core Audio HAL `AudioDeviceCreateIOProcIDWithBlock` capture path; async stream of VAD windows; wraps `PCMRingBuffer`. Bypasses `AVAudioEngine` deliberately — `engine.start()` implicitly opens an aggregate input+output device that stutters BT-headphone playback for ~1 s on every hotkey press; pure HAL captures input only.
 - `PCMRingBuffer.swift` — fixed-capacity wrap-around ring with absolute sample indexing. O(1) discard.
-- `AudioDeviceManager.swift` — Core Audio HAL wrapper for input-device discovery + HAL-property listeners. Owns `inputStreamFormat(for:)` and `avAudioFormat(from:)` — the helpers `AudioRecorder` uses to size its `AVAudioConverter` per session.
+- `AudioDeviceManager.swift` — Core Audio HAL wrapper for input-device discovery + HAL-property listeners. Owns `inputStreamFormat(for:)` and `avAudioFormat(from:)` — the helpers `AudioRecorder` uses to size its `AVAudioConverter` per session — plus `apply(_:to:)` / `currentDevice(of:)`, which pin an `AVAudioEngine`'s input node to a device and are used **only** by `MicProbe`. `apply` is idempotent by read-back: its caller now pins on every tap install, and one of the paths there is the `.AVAudioEngineConfigurationChange` observer, so re-asserting an unchanged device would make that a cycle whose termination depended on HAL behaviour nobody has pinned.
 - `SileroVAD.swift` — CoreML wrapper around the unified-256 ms Silero v6 model.
 - `PauseDetector.swift` — turns Silero frame probabilities into chunk boundaries.
 - `ChunkBuilder.swift` — encodes PCM slices to AAC-in-M4A blobs.

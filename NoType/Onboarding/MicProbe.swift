@@ -13,9 +13,12 @@ import OSLog
 /// is a stand-alone probe so the mic-check screen doesn't need (and
 /// can't accidentally trigger) the full transcription pipeline.
 ///
-/// Re-applies the user's pinned input device on `start()` and restarts
-/// the engine when `AudioDeviceManager.shared.selectedUID` changes mid-
-/// session, so the picker on the same screen feels live.
+/// Re-applies the user's pinned input device on **every** tap install
+/// (`installTapAndStart()`), and restarts the engine when
+/// `AudioDeviceManager.shared.selectedUID` changes mid-session, so the
+/// picker on the same screen feels live. The pin used to sit on the
+/// `start()` path alone, which is why the picker restarted the engine on
+/// the old microphone — issue #86.
 ///
 /// `@unchecked Sendable` (no `@MainActor`) by design — `AVAudioEngine`
 /// invokes the `installTap` callback on its own realtime thread; if the
@@ -86,23 +89,22 @@ final class MicProbe: @unchecked Sendable {
         guard !engine.isRunning else { return }
         lock.lock(); pcm = []; lock.unlock()
 
-        let device = AudioDeviceManager.shared.effectiveDevice
-        if let device {
-            _ = AudioDeviceManager.apply(device, to: engine)
-        }
-
         // **Both observers are installed BEFORE the tap goes in, and the
-        // ordering is load-bearing.** `AudioDeviceManager.apply` above is
-        // asynchronous, so the very first `installTapAndStart()` is the
-        // most likely moment for `MicProbeFormatGate` to reject — and
-        // `.AVAudioEngineConfigurationChange` is precisely the
-        // notification that fires when that switch finally lands. Wiring
-        // the observers only on the success path meant a rejected first
-        // install threw away its own recovery signal and left the user a
-        // dead spectrum meter for the rest of the screen, with even the
-        // device picker unable to revive it. Both are idempotent-guarded
-        // because a failed `start()` leaves the engine stopped, so a
-        // retry re-enters here.
+        // ordering is load-bearing.** The device pin inside
+        // `installTapAndStart()` is asynchronous, so the very first
+        // install is the most likely moment for `MicProbeFormatGate` to
+        // reject — and `.AVAudioEngineConfigurationChange` is precisely
+        // the notification that fires when that switch finally lands.
+        // Wiring the observers only on the success path meant a rejected
+        // first install threw away its own recovery signal and left the
+        // user a dead spectrum meter for the rest of the screen, with
+        // even the device picker unable to revive it. Both are
+        // idempotent-guarded because a failed `start()` leaves the engine
+        // stopped, so a retry re-enters here.
+        //
+        // Note the observers are now armed *ahead of* the first pin
+        // rather than after it, which strictly widens their coverage: the
+        // configuration change the pin itself provokes is observed too.
         if configChangeObserver == nil {
             configChangeObserver = NotificationCenter.default.addObserver(
                 forName: .AVAudioEngineConfigurationChange,
@@ -224,7 +226,18 @@ final class MicProbe: @unchecked Sendable {
 
     // MARK: - Internals
 
-    /// Build the converter, install the tap, start the engine.
+    /// Pin the selected input device, build the converter, install the
+    /// tap, start the engine.
+    ///
+    /// **The pin lives here, and that placement is the fix for issue
+    /// #86.** It used to sit in `start()` only, so `rebuild()` — the path
+    /// the device picker and the configuration-change observer both take
+    /// — tore the tap down and re-installed it against whatever device
+    /// the engine already had. The meter kept moving, so the switch
+    /// looked like it worked while the user watched the *previous*
+    /// microphone. Two functions each doing half of "set up capture" is
+    /// what let them drift; one function that cannot install a tap
+    /// without pinning first is what stops it recurring.
     ///
     /// **Statement order is load-bearing.** `AudioDeviceManager.apply`'s
     /// `AudioUnitSetProperty(CurrentDevice)` is asynchronous, so the node's
@@ -232,11 +245,30 @@ final class MicProbe: @unchecked Sendable {
     /// node no longer reports raises an Objective-C exception, and this
     /// method is reachable from two `Task { @MainActor }` bodies where such
     /// a raise corrupts the thread's executor identity (see
-    /// `MicProbeFormatGate`). So: everything device-independent is built
-    /// first, the node format is read **once**, both the converter and the
-    /// tap are derived from that one read, and the read is re-validated
-    /// against the live node immediately before the tap goes in.
+    /// `MicProbeFormatGate`). So: the pin goes first, everything
+    /// device-independent is built next — which doubles as settle time
+    /// the switch gets for free — the node format is read **once**, both
+    /// the converter and the tap are derived from that one read, and the
+    /// read is re-validated against the live node immediately before the
+    /// tap goes in.
+    ///
+    /// **Moving the pin here raises how often the gate is consulted right
+    /// after a switch, and that is the accepted trade.** Before, a picker
+    /// change never re-pinned, so it never raced — it also never switched
+    /// the microphone. The gate declines an unsafe install rather than
+    /// raising, and the `.AVAudioEngineConfigurationChange` observer
+    /// installed in `start()` retries once the switch lands, so a decline
+    /// costs a moment of flat meter, not a dead screen. Verify by hand
+    /// against a Bluetooth headset, where the switch is slowest.
+    ///
+    /// `@MainActor` because `AudioDeviceManager` is; both callers
+    /// (`start()`, `rebuild()`) already were, so no isolation changes.
+    @MainActor
     private func installTapAndStart() throws {
+        if let device = AudioDeviceManager.shared.effectiveDevice {
+            _ = AudioDeviceManager.apply(device, to: engine)
+        }
+
         let input = engine.inputNode
 
         // Device-independent — built before the node-format read so it
@@ -358,6 +390,15 @@ final class MicProbe: @unchecked Sendable {
         engine.inputNode.removeTap(onBus: 0)
     }
 
+    /// Stop and re-arm capture. Reached from the device-observation loop
+    /// (the picker) and from the `.AVAudioEngineConfigurationChange`
+    /// observer — so it is also the retry that recovers a rejected
+    /// install.
+    ///
+    /// It deliberately does **not** pin the device itself: that belongs
+    /// to `installTapAndStart()`, where no caller can forget it. This
+    /// method having its own half of the setup is the shape that
+    /// produced issue #86.
     @MainActor
     private func rebuild() {
         engine.stop()

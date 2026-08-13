@@ -642,8 +642,8 @@ final class HUDPanelGeometryTests: XCTestCase {
         XCTAssertEqual(
             unguarded.map(\.description), [],
             """
-            \(RaiseSiteScanner.micProbePath): an AVAudioEngine tap mutation is written outside \
-            its chokepoint.
+            \(RaiseSiteScanner.micProbePath): an AVAudioEngine tap mutation, or the input-device \
+            pin that must precede one, is written outside its chokepoint.
 
             `installTap` belongs in `installTapAndStart()` (behind MicProbeFormatGate) and \
             `removeTap` in `removeTapIfInstalled()` (behind the lock-guarded `tapInstalled` \
@@ -651,6 +651,12 @@ final class HUDPanelGeometryTests: XCTestCase {
             reachable from `Task { @MainActor }` bodies. The historical shape of this bug is a \
             bare `removeTap` in the `engine.start()` catch arm, safe only by local reasoning \
             about the two lines above it.
+
+            `AudioDeviceManager.apply` belongs in `installTapAndStart()` for a different \
+            reason — not a raise, a silent wrong answer. It used to sit in `start()`, so \
+            `rebuild()` (the picker, and the configuration-change retry) re-armed capture \
+            against whatever device the engine already had: the meter kept moving and the \
+            user watched the microphone they had just switched away from. See issue #86.
             """
         )
     }
@@ -1378,8 +1384,27 @@ enum RaiseSiteScanner {
             chokepoint: "installTapAndStart",
             mustValidate: [
                 "MicProbeFormatGate.positivityRejection (",
-                "MicProbeFormatGate.rejection ("
+                "MicProbeFormatGate.rejection (",
+                // Issue #86. Not a raise check — a *correctness* check, and
+                // it is here rather than in a rule of its own because what
+                // has to hold is per-body: the body that installs the tap is
+                // the body that must have pinned the device. `start()` and
+                // `rebuild()` each owning half of "set up capture" is what
+                // let the pin fall off the picker's path, so the picker
+                // restarted the engine on the previous microphone while the
+                // meter kept moving.
+                "AudioDeviceManager.apply ("
             ]
+        ),
+        // The other half of "exactly one pin site": the rule above proves a
+        // pin is *in* the chokepoint; this one proves there isn't a second
+        // one outside it. Re-adding the `start()`-local pin fails here —
+        // which is the drift itself, not merely a duplicate, because two
+        // pin sites is the state the two functions diverged from.
+        Rule(
+            mutator: "AudioDeviceManager.apply (",
+            chokepoint: "installTapAndStart",
+            mustValidate: []
         ),
         Rule(
             mutator: "removeTap (",
