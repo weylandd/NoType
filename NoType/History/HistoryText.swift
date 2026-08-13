@@ -25,10 +25,19 @@ import Foundation
 ///
 /// Pure and `nonisolated`, no I/O. It runs once per row per render rather
 /// than once per session, which is a real change in frequency and a
-/// deliberate one: both inputs are small by construction (ten rows of a
-/// few hundred characters, a hand-authored pair list) and the work is one
-/// fold over the segments plus one regex pass per pair. Nothing here is
-/// quadratic in either.
+/// deliberate one: the work is one fold over the segments plus **one or
+/// two** regex passes per pair — `TextReplacementEngine.applySingle`
+/// compiles a second `NSRegularExpression` whenever a pair's `from` starts
+/// lowercase, for the auto-capitalised variant, and nothing caches either.
+/// Linear in rows × pairs; nothing here is quadratic in either.
+///
+/// The rows are bounded at ten by the history cap. **The pair list is not
+/// bounded** — `DictionaryStore`'s 100-entry cap covers `entries`, not
+/// `replacements` — so "small" is a property of how the list is authored
+/// (by hand, in the Dictionary tab) rather than one the code enforces. If
+/// that ever stops holding, memoise the compiled patterns in
+/// `TextReplacementEngine` rather than moving this pass back to write
+/// time: write-time substitution is the defect this file exists to undo.
 enum HistoryText {
 
     /// The row's sequence as one string, each gap rendered as

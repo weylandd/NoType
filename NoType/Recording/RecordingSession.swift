@@ -386,9 +386,19 @@ final class RecordingSession {
         /// harvester wants the real one. See
         /// `RecordingSession.finalizedTranscript`.
         ///
-        /// `""` for a session that threw before the paste — the broken-row
-        /// path reads this summary too, and there is no transcript there
-        /// to describe.
+        /// `""` for a session that threw *before reaching the finalize
+        /// step* — a terminal Gemini error, an empty stitch, an encode
+        /// failure. The broken-row path reads this summary too, and there
+        /// is no transcript there to describe.
+        ///
+        /// **Not** `""` for a session cancelled in the narrow window
+        /// between finalizing and pasting: `stop()` records the string one
+        /// statement before its last cancellation re-check, so an Escape
+        /// landing there leaves a real transcript on the summary. Nothing
+        /// consumes it — `finalizeRecording`'s `catch is CancellationError`
+        /// arm neither harvests nor counts — and the alternative (record
+        /// after the re-check) would cost the withheld arm its transcript,
+        /// which is the case R15 exists for.
         ///
         /// **Never log it** — it is the user's speech, verbatim.
         let finalizedTranscript: String
@@ -1459,9 +1469,19 @@ final class RecordingSession {
         // Failed chunks contribute `failureMarker` ("[…]") in place
         // of their text — the user sees a visible gap surrounded by
         // intact transcription and can re-dictate just that piece.
-        let pieces = responses.map { $0.text ?? Self.failureMarker }
-        let stitched = TextInjector.stitchChunks(pieces)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        //
+        // Assembled through `HistoryText.assemble` over this session's own
+        // segments rather than by re-spelling the map/stitch/trim here.
+        // The two used to be independent copies of one rule feeding two
+        // user-visible surfaces — what gets pasted, and what the history
+        // row shows — so a change to the join or the trim in one of them
+        // would have surfaced as "the row I re-open doesn't match what was
+        // pasted", which is the class of bug this plan exists to remove.
+        // `historySegments(from:)` is the same conversion `makeHistoryEntry`
+        // uses below, and every `ChunkResponse` carries at least one index
+        // (`processBatch` returns early on an empty batch), so the
+        // `Segment` precondition this now reaches earlier cannot trip.
+        let stitched = HistoryText.assemble(Self.historySegments(from: responses))
         guard !stitched.isEmpty else {
             throw SessionError.noSpeech
         }

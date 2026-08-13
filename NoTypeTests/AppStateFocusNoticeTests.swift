@@ -265,10 +265,16 @@ final class AppStateFocusNoticeTests: XCTestCase {
         // and a bad thing to broadcast.
         let secret = "my account password is hunter2 and the wire clears friday"
         let entry = Self.entry(text: secret)
+        // The pair list rides this case since U6 and is user data on the
+        // same footing — whatever they typed into the Dictionary tab.
+        // Sampled here with its own distinctive words, and pinned as a
+        // property (independent of any needle) by
+        // `test_payloadReadsExactlyOneBitOffTheEntry_andItIsNotContent`.
+        let pairs = [DictionaryReplacement(from: "zephyrclient", to: "Zephyr Holdings")]
 
         for summary in [Self.summary(), Self.summary(failed: 1, dispatched: 3)] {
             let payload = NoTypeErrorKind
-                .pasteWithheld(entry: entry, summary: summary, replacements: [])
+                .pasteWithheld(entry: entry, summary: summary, replacements: pairs)
                 .payload
 
             XCTAssertFalse(payload.title.contains(secret), payload.title)
@@ -276,7 +282,7 @@ final class AppStateFocusNoticeTests: XCTestCase {
             // A preview or first-N-characters rendering is the realistic
             // regression, not the whole string, so pin the distinctive
             // words individually.
-            for word in ["password", "hunter2", "wire", "friday"] {
+            for word in ["password", "hunter2", "wire", "friday", "zephyrclient", "zephyr holdings"] {
                 XCTAssertFalse(
                     payload.title.lowercased().contains(word),
                     "Transcript content leaked into the notice title: \(payload.title)"
@@ -307,7 +313,18 @@ final class AppStateFocusNoticeTests: XCTestCase {
         // both sides of the bit — a pair that is copyable and a pair that
         // is not, since a gate that leaked content only on the no-copy arm
         // would otherwise sweep past.
-        let pairs: [(HistoryEntry, HistoryEntry)] = [
+        //
+        // **The pair list is swept on the same axis, because U6 made it a
+        // third associated value and it is user data too.** A replacement
+        // pair carries whatever the user typed into the Dictionary tab —
+        // a client's name, an internal codename — and the panel draws over
+        // whatever they moved to, so a payload that rendered "with your
+        // replacements applied: …" or named a pair in its description
+        // would publish it. `payload` binds the list as `_` today, which
+        // is what makes this hold; without varying it here, the property
+        // was pinned only for `entry` and the protection was structural
+        // rather than tested.
+        let entries: [(HistoryEntry, HistoryEntry)] = [
             (
                 Self.entry(text: "the wire clears friday", sourceApp: "Slack"),
                 Self.entry(text: "ship it monday", sourceApp: "Mail", failedChunkCount: 2)
@@ -317,13 +334,29 @@ final class AppStateFocusNoticeTests: XCTestCase {
                 Self.entry(text: "", sourceApp: "Mail", failedChunkCount: 2)
             ),
         ]
+        // Distinctive on both sides, and different from each other, so an
+        // equality failure names which channel leaked.
+        let pairsA = [DictionaryReplacement(from: "acme", to: "Acme Corporation")]
+        let pairsB = [
+            DictionaryReplacement(from: "hunter2", to: "the passphrase"),
+            DictionaryReplacement(from: "…", to: "..."),
+        ]
 
-        for (a, b) in pairs {
+        for (a, b) in entries {
             for summary in [Self.summary(), Self.summary(failed: 1, dispatched: 3)] {
                 XCTAssertEqual(
+                    NoTypeErrorKind.pasteWithheld(entry: a, summary: summary, replacements: pairsA).payload,
+                    NoTypeErrorKind.pasteWithheld(entry: b, summary: summary, replacements: pairsB).payload,
+                    "The notice's payload varies with the entry or the pair list beyond the copy bit, so something the user said — or something they typed into their dictionary — reaches the panel. R29 is a privacy property; this panel draws over whatever the user moved to."
+                )
+                // …and the pair list alone moves nothing, holding the
+                // entry fixed. Separated from the assertion above so a
+                // failure distinguishes "the entry leaked" from "the
+                // pairs leaked" instead of reporting one for the other.
+                XCTAssertEqual(
                     NoTypeErrorKind.pasteWithheld(entry: a, summary: summary, replacements: []).payload,
-                    NoTypeErrorKind.pasteWithheld(entry: b, summary: summary, replacements: []).payload,
-                    "The notice's payload varies with the entry beyond the copy bit, so something about the transcript reaches the panel. R29 is a privacy property — this panel draws over whatever the user moved to."
+                    NoTypeErrorKind.pasteWithheld(entry: a, summary: summary, replacements: pairsB).payload,
+                    "The notice's payload varies with the user's replacement pairs. Those are user data and must not reach a panel drawn over another application."
                 )
             }
         }
@@ -457,21 +490,48 @@ final class AppStateFocusNoticeTests: XCTestCase {
         )
     }
 
-    func test_copyAction_placesTheSameStringTheRowsOwnButtonWould() {
+    func test_copyAction_placesTheSameStringTheRowsOwnButtonWould() throws {
         // R30 as an agreement rather than a literal: whatever the notice
         // copies, the row's own copy button produces for the same entry
         // and the same pair list. Both go through one function, and this
         // is what fails if either grows a second derivation.
+        //
+        // **This compares the two producers, not one producer with
+        // itself.** The assertion here was `rendered(e, p) == rendered(e,
+        // p)` — true for every possible implementation, including one
+        // that returned `entry.text`, so it discriminated nothing. The
+        // notice's side has to come from the handler's actual clipboard
+        // write, which is the only place the notice's own derivation
+        // lives; the row's side comes from the property `HistoryRowView`
+        // renders and copies (pinned as one string by
+        // `HistoryRowActionsTests.test_theRowRendersAndCopiesTheSameProperty`).
         let pairs = [DictionaryReplacement(from: "kubernetes", to: "Kubernetes")]
         let entry = Self.rowWithGap(text: "kubernetes is fine")
+        let whatTheRowShows = HistoryText.rendered(entry, replacements: pairs)
+
+        XCTAssertTrue(
+            whatTheRowShows.contains("Kubernetes"),
+            "fixture check: the pair must actually reach the string, or neither side proves anything"
+        )
+        XCTAssertNotEqual(
+            whatTheRowShows, entry.text,
+            "fixture no longer diverges from the legacy mirror — a handler reading `entry.text` would pass"
+        )
+
+        let handler = try XCTUnwrap(
+            NoTypeErrorKind.pasteWithheld(
+                entry: entry, summary: Self.summary(), replacements: pairs
+            ).retryHandler
+        )
+        let saved = PasteboardSnapshot.capture(.general)
+        defer { saved.restore(to: .general) }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("something else entirely", forType: .string)
+        handler(nil)
 
         XCTAssertEqual(
-            HistoryText.rendered(entry, replacements: pairs),
-            HistoryText.rendered(entry, replacements: pairs)
-        )
-        XCTAssertTrue(
-            HistoryText.rendered(entry, replacements: pairs).contains("Kubernetes"),
-            "the pair reached the copied string at all"
+            NSPasteboard.general.string(forType: .string), whatTheRowShows,
+            "the notice's Copy and the row's own copy button disagree about the same entry (R30)"
         )
     }
 

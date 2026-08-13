@@ -436,6 +436,44 @@ final class AppStateRetryTests: XCTestCase {
         XCTAssertEqual(fx.row(row.id)?.text, "hello world goodbye")
     }
 
+    func test_retry_countsTheWordsTheRowShows_withTheUsersCurrentPairsApplied() async {
+        // R13 / R14 on the retry side, and the reason it needs its own
+        // case: every other test here runs with `dictionaryReplacements`
+        // empty, where `HistoryText.rendered(updated, replacements: [])`,
+        // `HistoryText.assemble(updated.segments)` and `updated.text` all
+        // produce the same word count. That fixture cannot express the
+        // failure — it is green for a `settleRetry` that dropped the live
+        // pair list, which is exactly the regression R14 exists to stop
+        // (the convention this repo wrote down in
+        // `solutions/conventions/testing-spm-and-git-2026-05-15.md`).
+        //
+        // A pair that *expands* is what makes the three readings diverge:
+        // the raw segment says two words, the rendered row says three.
+        let fx = Fixture(self)
+        let row = fx.appendBrokenRow(text: "", failedChunkCount: 1, chunkCount: 1)
+        fx.state.dictionaryReplacements = [
+            DictionaryReplacement(from: "ML", to: "machine learning")
+        ]
+        fx.state.retryChunkSender = fx.sender(["ML rocks"])
+
+        await fx.state.retryEntry(id: row.id)
+
+        XCTAssertEqual(
+            fx.row(row.id).map {
+                HistoryText.rendered($0, replacements: fx.state.dictionaryReplacements)
+            },
+            "machine learning rocks",
+            "fixture check — the pair must reach the rendered row, or the count below proves nothing"
+        )
+        let snap = await fx.stats.summary()
+        XCTAssertEqual(snap.totalSessions, 1)
+        XCTAssertEqual(
+            snap.totalWords, 3,
+            "lifetime words must be counted from the string the row shows, current pairs applied "
+            + "(R13 / R14 / KD6). Counting the raw segments or the legacy `text` mirror records 2."
+        )
+    }
+
     func test_retry_recordsTokensEvenWhenNothingRecovered() async {
         // R15 says every time. A chunk that answered with nothing still
         // cost the user a request.

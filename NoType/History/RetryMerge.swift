@@ -96,9 +96,21 @@ enum RetryMerge {
     // mitigation for a storage defect rather than a rule: a replacement
     // pair on the ellipsis erased every `[…]` from the stored string, and
     // hiding the retry button was how the shipped build coped. A gap is a
-    // position in `HistoryEntry.segments` now and a pair applied at render
-    // time cannot reach it, so the question has no answer worth asking and
-    // the predicate is gone (R8 / AE1). The gate is `isBroken && canRetry`.
+    // position in `HistoryEntry.segments` now, a pair applied at render
+    // time cannot reach it, and the gate is `isBroken && canRetry`
+    // (R8 / AE1).
+    //
+    // **"Offered" and "lands" are split across two units, and this file is
+    // the half that has not moved yet.** U6 removed the gate; the merge
+    // below still scans `existingText` for the marker, and `settleRetry`
+    // still passes it `HistoryEntry.text` — the post-replacement legacy
+    // mirror. So on exactly the row the ellipsis pair produces, the button
+    // is now offered, the run is billed, `placedCount` comes back 0, and
+    // R19's nothing-recovered exit surfaces a "no speech" HUD. No audio is
+    // lost (that exit re-`put`s the payload), but the recovery is
+    // unreachable until U7 moves this merge onto `segments` and off the
+    // mirror. Do not read the paragraph above as "the case is closed" —
+    // it is closed for *storage*, not yet for *recovery*.
 
     /// What one merge did: the row's new text, and which slots' recovered
     /// text actually reached it.

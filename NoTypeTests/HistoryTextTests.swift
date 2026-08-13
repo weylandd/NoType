@@ -293,6 +293,93 @@ final class HistoryTextTests: XCTestCase {
             recordAt.lowerBound, gateAt.lowerBound,
             "the transcript is recorded after the paste gate — a withheld session would harvest nothing"
         )
+        XCTAssertFalse(
+            body.contains("#if"),
+            "stop() grew a conditional-compilation block. The scan matches text, not the built "
+            + "configuration, so an assignment inside `#if DEBUG` reads as present here and is "
+            + "absent from the release binary. Re-derive this guard before adding one."
+        )
+    }
+
+    func test_finalizeRecording_countsTheWordsTheRowShows_notTheRawSegments() throws {
+        // R13 / R14 at the *production wiring*, which is otherwise
+        // unpinned in either direction. `finalizeRecording` cannot be
+        // driven in a test, and the only live-`AppState` test that reaches
+        // the other stats call site runs with an empty pair list — so a
+        // one-token regression to `replacements: []` here, or a slip back
+        // onto the no-`text:` shim, compiles clean and leaves the whole
+        // suite green while lifetime totals silently stop following the
+        // user's dictionary. Same shape and same limits as the R15 scan
+        // above.
+        let body = try XCTUnwrap(
+            Self.body(ofFuncNamed: "finalizeRecording", in: Self.source("NoType/AppState.swift")),
+            "Could not parse finalizeRecording() — the guard lost its anchor."
+        )
+        // **Scoped to the counting statement, not the whole body — the
+        // needle matches twice.** `finalizeRecording` also passes
+        // `replacements: self.dictionaryReplacements` to
+        // `noticeForFinishedSession` about forty lines earlier, so a
+        // whole-body `contains` is satisfied by the notice's use alone and
+        // stays green when the *counter* drops the live list. Measured,
+        // not reasoned about: mutating the counter's argument to `[]` left
+        // an earlier version of this test passing. So extract the region
+        // from the assignment to the store call and assert inside it.
+        let countedAt = try XCTUnwrap(
+            body.range(of: "let countedText"),
+            "finalizeRecording no longer computes a counted string — an absence-only scan would be green on a method that stopped counting altogether"
+        )
+        let recordAt = try XCTUnwrap(
+            body.range(of: "statsStore.record("),
+            "finalizeRecording no longer folds the session into lifetime stats at all"
+        )
+        XCTAssertLessThan(
+            countedAt.lowerBound, recordAt.lowerBound,
+            "the counted string is computed after the store call — it cannot be what was counted"
+        )
+        let countingStatement = String(body[countedAt.lowerBound..<recordAt.lowerBound])
+        XCTAssertTrue(
+            countingStatement.contains("HistoryText.rendered("),
+            "the counted string is not the assembled, replacement-applied row (R13 / R14)"
+        )
+        XCTAssertTrue(
+            countingStatement.contains("replacements: self.dictionaryReplacements"),
+            "the counted string is built from something other than the live pair mirror (R13 / R14). "
+            + "A frozen or empty list makes lifetime word counts stop following the user's dictionary."
+        )
+        // Presence is not destination: the render has to reach the store.
+        XCTAssertTrue(
+            body.contains("text: countedText"),
+            "the rendered string is computed and not handed to StatsStore — the counter is back on "
+            + "whatever `record` assembles for itself, which applies no replacement pairs"
+        )
+        XCTAssertFalse(
+            body.contains("record(entry, tokens:"),
+            "finalizeRecording calls the no-`text:` shim, which assembles with no pairs applied. "
+            + "That overload exists for the test surface; the production path must pass `text:`."
+        )
+    }
+
+    func test_noProductionCallerReachesTheNoReplacementsStatsOverloads() throws {
+        // `StatsStore.record(_:tokens:model:)` and `record(_:)` assemble
+        // the row themselves and count it with **no pairs applied**. Their
+        // own doc-comment says that is "right for a test surface that has
+        // none and wrong for production" — but Swift resolves overloads on
+        // the argument list alone, so a future call site that writes the
+        // shorter, older-looking form compiles and silently mis-counts.
+        // Nothing but this guard stands between the two.
+        for path in ["NoType/AppState.swift"] {
+            let source = Self.strippingComments(try Self.source(path))
+            XCTAssertTrue(
+                source.contains("statsStore.record("),
+                "\(path) no longer records stats at all — an absence-only scan is green on that"
+            )
+            XCTAssertFalse(
+                source.contains("statsStore.record(entry, tokens:")
+                    || source.contains("statsStore.record(updated, tokens:"),
+                "\(path) reaches a StatsStore.record overload that applies no replacement pairs. "
+                + "Lifetime word counts would stop following the user's dictionary with no test failure."
+            )
+        }
     }
 
     func test_finalizeRecording_feedsTheHarvesterThePastedString_notTheRow() throws {
@@ -343,6 +430,30 @@ final class HistoryTextTests: XCTestCase {
         )
     }
 
+    func test_commentStripping_hidesDisabledCodeAndProse() {
+        // The complement to the extractor fixture above: scoping the scan
+        // to one function is worth nothing if a commented-out line inside
+        // that function still satisfies it.
+        let stripped = Self.strippingComments("""
+        // finalizedTranscript = final
+        let kept = 1  /* transcript: entry.text */
+        let feed = "https://weylandd.github.io/NoType/appcast.xml"
+        """)
+        XCTAssertFalse(
+            stripped.contains("finalizedTranscript = final"),
+            "A commented-out assignment still matched — the R15 presence guard would pass on a stop() where the wiring was disabled."
+        )
+        XCTAssertFalse(
+            stripped.contains("transcript: entry.text"),
+            "A block comment survived. `finalizeRecording`'s own prose names `entry.text` while explaining why the harvester must not read it, so the absence assertion would fail on the comment rather than on a regression."
+        )
+        XCTAssertTrue(stripped.contains("let kept = 1"))
+        XCTAssertTrue(
+            stripped.contains("https://weylandd.github.io/NoType/appcast.xml"),
+            "A URL literal's `//` was read as a comment. Truncating a line is how an absence assertion passes for the wrong reason."
+        )
+    }
+
     // MARK: - Fixtures
 
     private static func row(
@@ -386,10 +497,47 @@ final class HistoryTextTests: XCTestCase {
         let repoRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        return try String(
-            contentsOf: repoRoot.appendingPathComponent(relativePath),
-            encoding: .utf8
+        return strippingComments(
+            try String(
+                contentsOf: repoRoot.appendingPathComponent(relativePath),
+                encoding: .utf8
+            )
         )
+    }
+
+    /// Comments removed before any needle runs, matching what
+    /// `AppStateFocusNoticeTests` and `RecordingSessionFocusGuardTests`
+    /// already do to the same two files.
+    ///
+    /// Without it every assertion here is decided by prose. The presence
+    /// needles would be satisfiable by a *commented-out* call — the exact
+    /// shape of a call disabled during debugging and never restored — and
+    /// the absence needles are worse: `finalizeRecording`'s own comments
+    /// name `entry.text` while explaining why the harvester must not read
+    /// it, so `XCTAssertFalse(body.contains("transcript: entry.text"))` was
+    /// one comment edit away from failing for a reason that is not a
+    /// regression. Duplicated rather than shared, per this file's
+    /// documented precedent: each guard owns its extractor and its own
+    /// fidelity fixture.
+    private static func strippingComments(_ source: String) -> String {
+        // The sentinel must not itself contain `//`, or the line pass
+        // below truncates every URL literal at the scheme.
+        let urlSchemeSentinel = "\u{1}"
+        var s = source.replacingOccurrences(of: "://", with: urlSchemeSentinel)
+
+        while let open = s.range(of: "/*"),
+              let close = s.range(of: "*/", range: open.upperBound..<s.endIndex) {
+            s.replaceSubrange(open.lowerBound..<close.upperBound, with: "")
+        }
+
+        return s
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line -> Substring in
+                guard let comment = line.range(of: "//") else { return line }
+                return line[line.startIndex..<comment.lowerBound]
+            }
+            .joined(separator: "\n")
+            .replacingOccurrences(of: urlSchemeSentinel, with: "://")
     }
 
     private static func body(ofFuncNamed name: String, in source: String) -> String? {
