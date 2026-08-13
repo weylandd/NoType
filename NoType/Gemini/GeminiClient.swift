@@ -78,10 +78,15 @@ actor GeminiClient {
         }
 
         /// Prefix of the `body` every wrapped `URLError` carries. Read by
-        /// `NetworkErrorTranslator.extractURLErrorCode` (which recovers the
-        /// numeric code for the HUD) and by the status-0 arm of
-        /// `errorDescription` above. Declared once so the producer
-        /// (`wrapURLError`) and the two consumers cannot drift.
+        /// `NetworkErrorTranslator.parse` (which recovers **both** the
+        /// numeric code and the OS sentence for the HUD) and by the
+        /// status-0 arm of `errorDescription` above. Declared once so the
+        /// producer (`wrapURLError`) and the two consumers cannot drift.
+        ///
+        /// Note that `parse` returns the code and the sentence *together*,
+        /// deliberately: a code-only accessor was deleted in U2 because a
+        /// caller taking the code and rendering the whole body is exactly
+        /// how `URLError code=…` reached a user's screen (R17).
         static let urlErrorBodyPrefix = "URLError code="
 
         /// The single place a `URLError` becomes a `GeminiError`.
@@ -94,7 +99,12 @@ actor GeminiClient {
         /// real `URLSession` failure in `performOnce` and the pre-flight
         /// short-circuit in `sendRequest` — go through here so a
         /// short-circuited request is byte-for-byte indistinguishable
-        /// downstream from the 30-second timeout it replaces.
+        /// downstream from the timed-out request it replaces.
+        ///
+        /// The body's second half is the OS's own sentence for the code.
+        /// That is not incidental: `AppState`'s HUD builder passes *it*,
+        /// never the whole body, so the two network paths render the same
+        /// copy and no `URLError code=…` diagnostic reaches a user.
         static func wrapURLError(_ urlError: URLError) -> GeminiError {
             .http(
                 status: 0,
@@ -104,7 +114,8 @@ actor GeminiClient {
 
         /// The error thrown when the pre-flight reachability check reports
         /// no network path. Shaped exactly like the `URLError`
-        /// `URLSession` would have produced 30 seconds later, so every
+        /// `URLSession` would have produced one inactivity budget later
+        /// (`requestInactivityBudget(audioPartCount:)`), so every
         /// downstream classifier — `isTerminal`, `shouldRetain`, the
         /// retention path, `payloadForURLErrorCode` — behaves identically.
         /// Introducing a distinct error case here instead would require

@@ -74,7 +74,16 @@ final class SplitRetryNetworkBoundTests: XCTestCase {
     /// abandon on the wrong evidence.
     func test_shouldAbandon_requiresAllFourTerms() {
         let slow = RecordingSession.abandonMinChunkFailureLatency
-        func decide(_ batch: Bool, _ offset: Int, _ chunk: Bool, _ latency: Duration = .seconds(30)) -> Bool {
+        // Default stands for "a real timeout": the budget of the request
+        // `splitRetry` actually issues, which is always single-part. Taken
+        // from the budget function rather than a literal so a future cut
+        // cannot leave this fixture describing a wait that no longer exists.
+        func decide(
+            _ batch: Bool,
+            _ offset: Int,
+            _ chunk: Bool,
+            _ latency: Duration = .seconds(GeminiClient.requestInactivityBudget(audioPartCount: 1))
+        ) -> Bool {
             RecordingSession.shouldAbandonSplitRetry(
                 batchFailureWasNetwork: batch,
                 chunkOffset: offset,
@@ -104,10 +113,98 @@ final class SplitRetryNetworkBoundTests: XCTestCase {
 
     /// The threshold has to separate the two shapes it exists to tell
     /// apart, or the term is decoration: a pre-check short-circuit is
-    /// sub-millisecond, a real `URLSession` timeout is 30 s.
+    /// sub-millisecond, a real `URLSession` timeout is one whole request
+    /// budget.
+    ///
+    /// **The upper bound is the property, not a literal** (plan KTD4).
+    /// It used to be `.seconds(30)`, which stopped being the timeout the
+    /// moment U1 made the budget a function of the request's audio-part
+    /// count — and a literal here would have stayed green while drifting
+    /// arbitrarily close to (or past) the real ceiling. The comparison is
+    /// against the **single-part** budget because that is the shape
+    /// `splitRetry` issues: it only ever re-sends one chunk per call, so
+    /// the request being timed always carries exactly one audio part.
     func test_abandonLatencyThreshold_sitsBetweenAShortCircuitAndATimeout() {
-        XCTAssertGreaterThan(RecordingSession.abandonMinChunkFailureLatency, .milliseconds(100))
-        XCTAssertLessThan(RecordingSession.abandonMinChunkFailureLatency, .seconds(30))
+        let singlePartBudget = Duration.seconds(
+            GeminiClient.requestInactivityBudget(audioPartCount: 1)
+        )
+        XCTAssertGreaterThan(
+            RecordingSession.abandonMinChunkFailureLatency, .milliseconds(100),
+            "Below this the threshold stops separating a real failure from a ~0 ms reachability short-circuit, which is the only reason the term exists."
+        )
+        XCTAssertLessThan(
+            RecordingSession.abandonMinChunkFailureLatency, singlePartBudget,
+            "A genuine timeout must always clear the threshold. At or above the budget, the case the bound was built for — a `.satisfied` path whose requests still time out — could never fire it."
+        )
+    }
+
+    /// The derivation itself, pinned separately from the range above.
+    ///
+    /// The range test alone is satisfiable by any literal between 100 ms
+    /// and 12 s, so it would stay green if someone replaced the derived
+    /// expression with a hard-coded `.seconds(2)` — losing exactly the
+    /// property KTD4 asked for, which is that the threshold *shrinks in
+    /// step* with the budget rather than drifting toward it. This pins the
+    /// ratio, so a change to either side has to be deliberate.
+    func test_abandonLatencyThreshold_isDerivedFromTheSinglePartBudget() {
+        XCTAssertEqual(
+            RecordingSession.abandonMinChunkFailureLatency,
+            .seconds(GeminiClient.requestInactivityBudget(audioPartCount: 1) / 6),
+            "The threshold is a fixed fraction of the budget of the request it times, not a number of its own."
+        )
+        // And the value that fraction currently produces is the one that
+        // shipped before the derivation replaced it — the derivation was
+        // meant to change how the number is *reached*, not the number.
+        XCTAssertEqual(
+            RecordingSession.abandonMinChunkFailureLatency, .seconds(2),
+            "U1's handoff computed 12 s / 6 = 2 s specifically so U2 carried zero behavioural risk. If this fails, the budget moved and the behaviour moved with it — which is intended, but should be a deliberate read."
+        )
+    }
+
+    /// The one mutation neither assertion above can see, and the only
+    /// reason a source guard earns its place here.
+    ///
+    /// Both are value comparisons, and the derived expression and the
+    /// literal `.seconds(2)` evaluate to the *same value today* — so
+    /// replacing the derivation with the literal (i.e. reverting to what
+    /// shipped before KTD4) leaves this file entirely green while
+    /// silently giving up the property KTD4 asked for: that the threshold
+    /// shrinks in step with the budget rather than drifting toward it.
+    /// Verified: that mutation passes every other assertion here.
+    ///
+    /// Scoped to the **single declaration statement**, not the file: a
+    /// file-wide search for the budget call would also match this test's
+    /// own prose or any future unrelated use.
+    ///
+    /// Limits, per `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`:
+    /// this matches literal spellings in one file. Renaming either symbol
+    /// fails it loudly, which is a review trigger rather than a false
+    /// negative. It proves the budget call is *in the initializer
+    /// expression*, not that the arithmetic around it is still `/ 6` —
+    /// that is what the ratio assertion above is for. The two are
+    /// complementary and neither alone is sufficient.
+    func test_abandonLatencyThreshold_isDerivedInSource_notRestatedAsALiteral() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()    // NoTypeTests/
+                .deletingLastPathComponent()    // repo root
+                .appendingPathComponent("NoType/Recording/RecordingSession.swift"),
+            encoding: .utf8
+        )
+        let declaration = "nonisolated static let abandonMinChunkFailureLatency: Duration ="
+        XCTAssertEqual(
+            source.components(separatedBy: declaration).count - 1, 1,
+            "Expected exactly one declaration of abandonMinChunkFailureLatency. Zero means it was renamed or removed and this guard lost its anchor; more than one means the needle no longer identifies a single statement."
+        )
+        let initializer = try XCTUnwrap(source.range(of: declaration))
+        // The statement runs to the end of the following line — the
+        // declaration wraps, so one line past the `=` is the expression.
+        let afterEquals = source[initializer.upperBound...]
+        let statement = afterEquals.prefix { $0 != ")" }
+        XCTAssertTrue(
+            statement.contains("GeminiClient.requestInactivityBudget(audioPartCount: 1"),
+            "The threshold must be derived from the budget of the request it times, not restated as a literal — that is the whole of KTD4. Got: \(statement)"
+        )
     }
 
     // MARK: - Accounting for chunks that are never dispatched

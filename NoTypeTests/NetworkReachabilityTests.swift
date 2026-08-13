@@ -4,8 +4,10 @@ import Network
 
 /// Pins the conservatism policy of the offline pre-check.
 ///
-/// The value of this feature is removing a 30-second-per-attempt wait when
-/// the machine is offline. Its risk is the exact opposite: a false
+/// The value of this feature is removing a whole-inactivity-budget wait
+/// per attempt when the machine is offline — `GeminiClient
+/// .requestInactivityBudget(audioPartCount:)`, doubled by the status-0
+/// retry. Its risk is the exact opposite: a false
 /// "offline" verdict breaks transcription outright for a user who is
 /// online. So the tests that matter here are the ones asserting the states
 /// that must **not** short-circuit — every one of them is a way the fix

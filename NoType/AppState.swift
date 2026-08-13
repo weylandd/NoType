@@ -877,7 +877,9 @@ final class AppState {
     ///    Stopping at the first failure (R16) bounds a *failing* run, but
     ///    one failure can itself cost two attempts —
     ///    `GeminiClient.retryDecision` re-issues network and 5xx classes
-    ///    once — against a 30 s `timeoutIntervalForResource`. And a run
+    ///    once — each capped by that request's own inactivity budget
+    ///    (`GeminiClient.requestInactivityBudget(audioPartCount:)`; a
+    ///    retry re-sends one chunk, so it is the single-part budget). And a run
     ///    whose chunks all answer, slowly, never breaks at all: it pays
     ///    every chunk's latency in turn. Since `canRetry` blocks every
     ///    row while any retry runs, that is also how long the other rows
@@ -2958,10 +2960,43 @@ enum NoTypeErrorKind {
         // so peel the code back out and route through the same
         // URLError-class HUDs as the native-URLError branch above.
         if let g = err as? GeminiClient.GeminiError, case let .http(0, body) = g,
-           let code = NetworkErrorTranslator.extractURLErrorCode(from: body) {
+           let wrapped = NetworkErrorTranslator.parse(body) {
             return payloadForURLErrorCode(
-                code,
-                fallbackDescription: body,
+                wrapped.code,
+                // **R17 is fixed here, at the seam that produces the
+                // string — not at the display** (plan KTD12). The
+                // `default:` arm below renders `fallbackDescription`
+                // verbatim, so handing it the whole wrapped body put
+                // `URLError code=-1003: …` on a user's screen for every
+                // network code without a branch of its own. The body's
+                // second half *is* the OS sentence `wrapURLError`
+                // embedded, so passing it needs no invented wording and
+                // makes this branch byte-identical to the native-URLError
+                // branch above for the same code — which is the property
+                // `ErrorCopyRetentionTests` pins, rather than the absence
+                // of one substring.
+                //
+                // The `?? ` arm covers a body carrying a code and nothing
+                // else (`"URLError code=-1009"`), which no current
+                // producer writes but the parser accepts. Re-deriving the
+                // sentence from the code keeps the guarantee above
+                // instead of falling back to the diagnostic.
+                //
+                // Know what that arm renders, because it is not what you
+                // would guess: a *synthesized* `URLError` carries no
+                // `NSLocalizedDescriptionKey`, so its
+                // `localizedDescription` is Foundation's generic "The
+                // operation couldn't be completed. (NSURLErrorDomain
+                // error -1003.)" — not the friendly sentence. The one
+                // `URLSession` actually throws does carry it (a real
+                // stall on this machine produced "A TLS error caused the
+                // secure connection to fail."), and that is the string
+                // `wrapURLError` embeds, so the reachable path renders
+                // real copy. This arm is the defensive floor, chosen
+                // because it is still better than the wrapped body and
+                // needs no wording we invented.
+                fallbackDescription: wrapped.message
+                    ?? URLError(URLError.Code(rawValue: wrapped.code)).localizedDescription,
                 retainedForRetry: retainedForRetry
             )
         }
@@ -3138,8 +3173,24 @@ enum NoTypeErrorKind {
                 title: "Couldn't reach Gemini",
                 description: describe(
                     "The transcription request timed out.",
-                    ifKept: "Check your connection.",
-                    ifLost: "Check your connection and try again.",
+                    // **No `ifKept:`, and the lost arm no longer names the
+                    // user's connection.** Both arms used to say "Check
+                    // your connection", which the 2026-08-11 measurement
+                    // showed is the wrong place to look: connection setup
+                    // to the API took 3 ms with TLS at ~200 ms, and a
+                    // request that stalled for a full budget succeeded on
+                    // a *fresh* connection 1.7 s later. The failure is a
+                    // dead pooled connection, not a dead link — so the
+                    // advice sent users to audit something that was
+                    // working, which is why R28 now issues the one retry
+                    // over a fresh connection instead.
+                    //
+                    // The kept arm needs no imperative of its own:
+                    // `retainedRecordingClause` already names the row and
+                    // the retry, which is the whole action. Anything more
+                    // here would be the stutter `describe`'s doc-comment
+                    // warns about, one indirection later.
+                    ifLost: "Try again in a moment.",
                     retainedForRetry: retainedForRetry
                 ),
                 code: "ERR_NET_TIMEOUT",
@@ -3167,14 +3218,35 @@ enum NoTypeErrorKind {
 
 }
 
-/// Pull the URLError code out of a `GeminiError.http(0, body)`
-/// body string of the form `"URLError code=-1009: not connected"`.
-/// Returns `nil` when the body isn't a wrapped URLError. Internal so
-/// `AppStateNetworkErrorRoutingTests` can pin the parser against
-/// `GeminiClient.performOnce`'s wrapping format — drift between the
-/// two would silently re-break the offline / timeout HUD routing.
+/// Take a `GeminiError.http(0, body)` body string of the form
+/// `"URLError code=-1009: not connected"` apart into the two facts the
+/// HUD needs from it. Returns `nil` when the body isn't a wrapped
+/// URLError. Internal so `AppStateNetworkErrorRoutingTests` can pin the
+/// parser against `GeminiClient.performOnce`'s wrapping format — drift
+/// between the two would silently re-break the offline / timeout HUD
+/// routing.
 enum NetworkErrorTranslator {
-    static func extractURLErrorCode(from body: String) -> Int? {
+
+    /// The two halves of a wrapped `URLError` body.
+    ///
+    /// Parsed together, in one pass, because the code and the sentence
+    /// are separated by the same colon: two independent parsers would be
+    /// free to disagree about where the split is, and the consequence of
+    /// that disagreement is the whole of R17 — a `message` that still
+    /// carries the `URLError code=…` prefix goes straight onto the
+    /// user's screen through `payloadForURLErrorCode`'s `default:` arm.
+    struct WrappedURLError: Equatable {
+        /// The numeric `URLError.Code` raw value.
+        let code: Int
+        /// The OS's own sentence for `code` — literally the
+        /// `urlError.localizedDescription` that `wrapURLError` embedded,
+        /// so it is byte-identical to what the native-`URLError` branch
+        /// of `payloadForSessionFailure` passes for the same failure.
+        /// `nil` when the body carried a code and nothing after it.
+        let message: String?
+    }
+
+    static func parse(_ body: String) -> WrappedURLError? {
         // The producer's own constant, not a second copy of the literal.
         // `GeminiError.urlErrorBodyPrefix`'s doc-comment claims it is
         // "declared once so the producer and the two consumers cannot
@@ -3185,8 +3257,12 @@ enum NetworkErrorTranslator {
         guard body.hasPrefix(prefix) else { return nil }
         let rest = body.dropFirst(prefix.count)
         guard let colon = rest.firstIndex(of: ":") else {
-            return Int(rest.trimmingCharacters(in: .whitespaces))
+            guard let code = Int(rest.trimmingCharacters(in: .whitespaces)) else { return nil }
+            return WrappedURLError(code: code, message: nil)
         }
-        return Int(rest[..<colon].trimmingCharacters(in: .whitespaces))
+        guard let code = Int(rest[..<colon].trimmingCharacters(in: .whitespaces)) else { return nil }
+        let sentence = rest[rest.index(after: colon)...]
+            .trimmingCharacters(in: .whitespaces)
+        return WrappedURLError(code: code, message: sentence.isEmpty ? nil : sentence)
     }
 }

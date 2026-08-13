@@ -7,7 +7,7 @@ import XCTest
 ///
 /// Shape matters because the whole design premise is that a
 /// short-circuited request is indistinguishable downstream from the
-/// 30-second timeout it replaces — same `GeminiError` case, same status,
+/// timed-out request it replaces — same `GeminiError` case, same status,
 /// same recoverable classification, same retention decision, same HUD. Any
 /// drift there silently changes which sessions abort and which keep their
 /// audio.
@@ -40,7 +40,7 @@ final class GeminiClientOfflineShortCircuitTests: XCTestCase {
             return XCTFail("expected .http")
         }
         XCTAssertEqual(
-            NetworkErrorTranslator.extractURLErrorCode(from: body),
+            NetworkErrorTranslator.parse(body)?.code,
             URLError.Code.notConnectedToInternet.rawValue
         )
     }
@@ -62,7 +62,7 @@ final class GeminiClientOfflineShortCircuitTests: XCTestCase {
                 return XCTFail("expected .http")
             }
             XCTAssertEqual(
-                NetworkErrorTranslator.extractURLErrorCode(from: body),
+                NetworkErrorTranslator.parse(body)?.code,
                 code.rawValue,
                 "wrapURLError must not hard-code one code."
             )
@@ -163,7 +163,7 @@ final class GeminiClientOfflineShortCircuitTests: XCTestCase {
         // real check has moved somewhere harmful.
         XCTAssertEqual(
             source.components(separatedBy: probeCall).count - 1, 1,
-            "Expected exactly one offline pre-check in GeminiClient.swift. Zero means it was deleted (restoring the 30 s-per-attempt wait); more than one means a copy was added somewhere this guard does not reason about."
+            "Expected exactly one offline pre-check in GeminiClient.swift. Zero means it was deleted (restoring a full-inactivity-budget wait per attempt); more than one means a copy was added somewhere this guard does not reason about."
         )
 
         let sendRequest = try XCTUnwrap(
@@ -203,7 +203,7 @@ final class GeminiClientOfflineShortCircuitTests: XCTestCase {
         // and uniqueness both stay satisfied by `_ = await
         // reachabilityProbe().isDefinitelyOffline()` — a probe that runs,
         // is correctly placed, and throws nothing, silently restoring the
-        // 30 s-per-attempt wait this feature removes. Verified: that
+        // full-budget-per-attempt wait this feature removes. Verified: that
         // mutation passed every other assertion in this file.
         let throwIdx = try XCTUnwrap(
             sendRequest.range(of: "throw offline"),

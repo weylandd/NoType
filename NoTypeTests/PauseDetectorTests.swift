@@ -275,8 +275,8 @@ final class PauseDetectorTests: XCTestCase {
 
     func test_adaptiveThreshold_doesNotCutShortChunkOnShortPause() {
         var d = PauseDetector()
-        // Speak for 2 frames (≈ 512 ms — well under 30 s), then 2 unvoiced
-        // frames (512 ms). Threshold for a <30 s chunk is still 1 s = no
+        // Speak for 2 frames (≈ 512 ms — well under 20 s), then 2 unvoiced
+        // frames (512 ms). Threshold for a <20 s chunk is still 1 s = no
         // emit. This is the regression guard — adaptive must not affect
         // short chunks.
         let flags = [true, true, false, false]

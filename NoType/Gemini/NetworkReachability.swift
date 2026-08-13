@@ -5,14 +5,20 @@ import Network
 /// deliberately narrow question: *does this machine currently have no
 /// network path at all?*
 ///
-/// **Why this exists.** `GeminiClient`'s `URLSession` runs with
-/// `timeoutIntervalForRequest = 30` and `waitsForConnectivity = false`, so
-/// a request issued with the Wi-Fi off does not fail fast — it parks for
-/// the full 30 s before `URLSession` gives up. `sendRequest`'s retry policy
-/// then grants a wrapped `URLError` one retry, so a single Gemini call
-/// offline costs ~60.5 s, and a session that splits into N single-chunk
-/// calls multiplies that. Asking the system whether a path exists before
-/// issuing the request removes that wait entirely.
+/// **Why this exists.** `GeminiClient` issues every request with
+/// `waitsForConnectivity = false` and an inactivity budget of its own
+/// (`GeminiClient.requestInactivityBudget(audioPartCount:)`), so a request
+/// issued with the Wi-Fi off does not fail fast — it parks for that whole
+/// budget before `URLSession` gives up. `sendRequest`'s retry policy then
+/// grants a wrapped `URLError` one retry, so a single Gemini call offline
+/// costs twice the budget plus the backoff, and a session that splits into
+/// N single-chunk calls multiplies that. Asking the system whether a path
+/// exists before issuing the request removes that wait entirely.
+///
+/// The budget shrank in U1 of the delivery-reliability plan (a stalled
+/// single-chunk dictation now costs 24.5 s across both attempts rather
+/// than ~60.5 s), which changes the *size* of what this removes and
+/// nothing about why it is worth removing.
 ///
 /// **Conservatism is the whole design.** A false "offline" verdict would
 /// break transcription outright for a user who is in fact online — a much

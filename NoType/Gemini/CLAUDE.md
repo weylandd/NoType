@@ -103,9 +103,16 @@ Four things about the wiring are load-bearing:
   5-part batch was already exceeding it — killing a legitimate request and
   producing a silent `[…]` in text the user had already had pasted.
 
-`PauseDetector`'s adaptive-ladder prose still cites a 30 s
-`timeoutIntervalForResource` by name and is stale; correcting it belongs to
-U2 of the plan below.
+**What the part-count finding means for the pause ladder.** `PauseDetector`'s
+adaptive threshold used to be justified partly as a network-budget device —
+"keep each chunk short so its request fits inside the 30 s ceiling". That
+reasoning is retired along with the flat ceiling: latency tracks *parts*, so a
+shorter chunk does not buy a shorter request, and what actually costs time is
+batching several chunks into one call. The ladder's shape is unchanged and
+still right on its own merits (chunk quality — no mid-sentence force-cuts), but
+prose anywhere that derives it from a fixed network timeout is wrong. Corrected
+in `PauseDetector.swift`, `NoType/Recording/CLAUDE.md` invariants 4–5 and
+`docs/solutions/design-patterns/adaptive-pause-threshold-2026-05-16.md`.
 
 ### Retry policy
 

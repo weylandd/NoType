@@ -577,9 +577,10 @@ final class RecordingSession {
     ///
     /// **This term exists because the reachability pre-check took the cost
     /// out of the case the bound was measuring.** The bound was designed
-    /// when a network-class failure meant a 30 s `URLSession` timeout, so
-    /// two of them was ~60 s of evidence that the transport was down and
-    /// every remaining chunk was another 30 s. `GeminiClient`'s pre-flight
+    /// when a network-class failure meant a full `URLSession` timeout, so
+    /// two of them was two timeouts' worth of evidence that the transport
+    /// was down and every remaining chunk was another one.
+    /// `GeminiClient`'s pre-flight
     /// check now fails an `.unsatisfied`-path request in ~0 ms — so on a
     /// genuinely offline machine the batched call and the first split chunk
     /// both fail *instantly*, and "two independent observations" collapses
@@ -592,11 +593,40 @@ final class RecordingSession {
     /// after the first — permanently, because a retry rewrites the history
     /// row and never the text already pasted into the user's document.
     ///
-    /// 2 s sits far above a short-circuit (~0 ms) and far below the 30 s
-    /// timeout the bound is actually for, so the predicate fires on exactly
-    /// the case that motivated it: a `.satisfied` path whose requests still
-    /// time out — captive portal, dead router, DNS blackhole.
-    nonisolated static let abandonMinChunkFailureLatency: Duration = .seconds(2)
+    /// **Derived from the budget of the request it times, not restated as
+    /// a literal** (plan KTD4). The threshold has to sit far above a
+    /// pre-check short-circuit (~0 ms) and comfortably below the timeout
+    /// it must be clearable by, so that *every* genuine timeout counts as
+    /// evidence — which makes it a fraction of that timeout rather than a
+    /// number of its own, and means it shrinks in step with any future cut
+    /// instead of quietly drifting toward the ceiling it is measured
+    /// against.
+    ///
+    /// **The anchor is the *single-part* budget, and that is a fact about
+    /// the caller rather than a pick from the family.** `splitRetry` is
+    /// the only site that consults this, and it only ever issues
+    /// single-chunk `transcribe` calls — so the request whose latency is
+    /// being measured always carries exactly one audio part, and the
+    /// budget's variability collapses.
+    /// `GeminiClient.requestInactivityBudget(audioPartCount: 1)` is 12 s,
+    /// so `/ 6` evaluates to **2 s** — the value that shipped before this
+    /// derivation replaced it, unchanged.
+    ///
+    /// **Caveat to carry forward:** if a future change ever made
+    /// `splitRetry` re-issue *batches* instead of single chunks, the
+    /// anchor moves with it — the fraction would then be measured against
+    /// a budget four or more times larger than the request it is timing.
+    ///
+    /// At 1/6 both clearances hold. Far above a short-circuit, which is a
+    /// cached path-status read answering in microseconds. Comfortably
+    /// below 12 s, so a real timeout always clears it. And a *fast* real
+    /// failure — connection refused, DNS NXDOMAIN — still fails to clear
+    /// 2 s and so still dispatches every remaining chunk, which is the
+    /// conservative direction: the predicate fires on exactly the case
+    /// that motivated it, a `.satisfied` path whose requests still time
+    /// out (captive portal, dead router, DNS blackhole).
+    nonisolated static let abandonMinChunkFailureLatency: Duration =
+        .seconds(GeminiClient.requestInactivityBudget(audioPartCount: 1) / 6)
 
     /// What an abandoned split-retry owes the chunks it will never
     /// dispatch.
@@ -2046,9 +2076,9 @@ final class RecordingSession {
             // Re-query priors each iteration so a chunk that just
             // succeeded becomes context for the next one.
             let priors = currentPriors()
-            // Timed so the abandon arm can tell a 30 s timeout from a
-            // ~0 ms reachability short-circuit — see
-            // `abandonMinChunkFailureLatency`.
+            // Timed so the abandon arm can tell a real timeout — one
+            // single-part inactivity budget — from a ~0 ms reachability
+            // short-circuit. See `abandonMinChunkFailureLatency`.
             let dispatchedAt = ContinuousClock.now
             do {
                 let result = try await gemini.transcribeWithUsage(
@@ -2090,8 +2120,8 @@ final class RecordingSession {
                 // of it — the batched call and this standalone one — and
                 // this one cost real time rather than being answered from
                 // the reachability cache. Every remaining chunk is a
-                // guaranteed 30 s round-trip ending in the same error,
-                // 250 ms apart, so account for them here instead of
+                // guaranteed full-budget round-trip ending in the same
+                // error, 250 ms apart, so account for them here instead of
                 // spending minutes proving it. Each still gets its marker
                 // AND its audio retained, which is what keeps an
                 // undispatched chunk indistinguishable from this one — see

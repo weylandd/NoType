@@ -42,11 +42,15 @@ final class ErrorCopyRetentionTests: XCTestCase {
     /// `URLError`, is the shape the offline HUD is reached through in
     /// production. Built from the producer's own constant so a rename
     /// cannot leave these tests exercising a branch nothing hits.
-    private func wrappedURLError(_ code: URLError.Code, _ text: String = "offline") -> Error {
-        GeminiClient.GeminiError.http(
-            status: 0,
-            body: "\(GeminiClient.GeminiError.urlErrorBodyPrefix)\(code.rawValue): \(text)"
-        )
+    /// Built by calling the **producer itself** rather than re-spelling its
+    /// format. Re-spelling it was already one drift risk (the body's shape
+    /// is what `NetworkErrorTranslator` parses); it became a correctness
+    /// problem for R17, whose whole claim is that the sentence embedded in
+    /// the body *is* the one the native-`URLError` branch renders. A stub
+    /// like `"offline"` cannot demonstrate that — only the real
+    /// `localizedDescription` the producer embeds can.
+    private func wrappedURLError(_ code: URLError.Code) -> Error {
+        GeminiClient.GeminiError.wrapURLError(URLError(code))
     }
 
     /// One representative error per recoverable branch of
@@ -57,9 +61,9 @@ final class ErrorCopyRetentionTests: XCTestCase {
     private var recoverableErrors: [(label: String, error: Error)] {
         [
             ("offline (wrapped)",   wrappedURLError(.notConnectedToInternet)),
-            ("connection lost",     wrappedURLError(.networkConnectionLost, "lost")),
-            ("timed out",           wrappedURLError(.timedOut, "timed out")),
-            ("dns failed",          wrappedURLError(.cannotFindHost, "no such host")),
+            ("connection lost",     wrappedURLError(.networkConnectionLost)),
+            ("timed out",           wrappedURLError(.timedOut)),
+            ("dns failed",          wrappedURLError(.cannotFindHost)),
             ("rate limited",        GeminiClient.GeminiError.http(status: 429, body: "")),
             ("server error",        GeminiClient.GeminiError.http(status: 503, body: "")),
             ("region blocked",      GeminiClient.GeminiError.http(status: 400, body: "User location is not supported")),
@@ -241,7 +245,12 @@ final class ErrorCopyRetentionTests: XCTestCase {
         // contained the phrase the old test looked for.
         let expected: [(label: String, copy: String)] = [
             ("offline (wrapped)", "NoType needs internet to transcribe. Reconnect and try again — your audio wasn't saved."),
-            ("timed out",         "The transcription request timed out. Check your connection and try again."),
+            // Reworked by U2. The old copy was "Check your connection and
+            // try again", which the 2026-08-11 measurement showed points
+            // at the wrong thing: the stall is a dead pooled connection,
+            // not a dead link (3 ms connect, ~200 ms TLS, and the same
+            // payload succeeding on a fresh connection 1.7 s later).
+            ("timed out",         "The transcription request timed out. Try again in a moment."),
             ("rate limited",      "Gemini throttled the request. Wait a moment and try again."),
             ("server error",      "The service returned a server error. Wait a moment and try again."),
             ("region blocked",    "The Gemini API is restricted in your country. Connect through a VPN and try again."),
@@ -259,6 +268,162 @@ final class ErrorCopyRetentionTests: XCTestCase {
                 copy,
                 "\(label): the nothing-retained arm must render the pre-retention sentence verbatim."
             )
+        }
+    }
+
+    /// The retained arm's complement, and the reason "no branch renders
+    /// its imperative twice" is checkable at all.
+    ///
+    /// The lost arm has been pinned verbatim since the stutter defect; the
+    /// kept arm was only ever pinned by *suffix*, which is satisfied by
+    /// any prefix at all — including one that has quietly grown a second
+    /// imperative, or lost its diagnosis. Both arms verbatim means the
+    /// only way copy changes is a fixture diff a human reads, which is the
+    /// same discipline `test_rejectedKey_copy_isUnchanged` applies to the
+    /// terminal messages.
+    ///
+    /// The clause is referenced rather than re-spelled, per this file's
+    /// convention: the wording lives in
+    /// `test_retainedClauses_nameTheHistory_andClaimNoLoss` once.
+    func test_recoverableKinds_whenRetained_renderTheirCopyVerbatim() {
+        let clause = NoTypeErrorKind.retainedRecordingClause
+        let expected: [(label: String, copy: String)] = [
+            ("offline (wrapped)", "NoType needs internet to transcribe. Reconnect first. \(clause)"),
+            // No advice sentence of its own: the clause already names the
+            // row and the retry, and the failure is not something the user
+            // can act on beforehand (U2 — the old "Check your connection."
+            // sent them to audit a link that was working).
+            ("timed out",         "The transcription request timed out. \(clause)"),
+            ("rate limited",      "Gemini throttled the request. Wait a moment. \(clause)"),
+            ("server error",      "The service returned a server error. \(clause)"),
+            ("region blocked",    "The Gemini API is restricted in your country. Connect through a VPN first. \(clause)"),
+            ("empty response",    "Gemini returned an empty response. \(clause)"),
+            ("decode failure",    "Gemini returned an unexpected format. If it keeps happening, open an issue on GitHub. \(clause)"),
+            ("truncated",         "Gemini stopped before finishing. \(clause)")
+        ]
+        for (label, copy) in expected {
+            guard let error = recoverableErrors.first(where: { $0.label == label })?.error else {
+                XCTFail("No recoverable fixture labelled '\(label)'.")
+                continue
+            }
+            XCTAssertEqual(
+                NoTypeErrorKind.sessionFailure(error, retainedForRetry: true).payload.description,
+                copy,
+                "\(label): the retained arm's copy changed. If that was deliberate, update the fixture; if not, this is the stutter or a lost diagnosis."
+            )
+        }
+    }
+
+    /// The mechanical half of "no branch renders its imperative twice".
+    ///
+    /// **Know what it covers.** It catches a *whole repeated sentence* —
+    /// which is what you get when the exact `ifLost` advice is also folded
+    /// into `cause`. It does **not** catch the near-repeat that actually
+    /// shipped ("Reconnect first. Reconnect and try again — …"): no exact
+    /// check sees that, and no heuristic sees it without false-positiving
+    /// on legitimate copy (two sentences opening "The …" are ordinary).
+    /// That case is covered by the two verbatim fixture tests instead,
+    /// where a human reads the diff. This test is the cheap,
+    /// zero-false-positive floor beneath them, swept over both arms of
+    /// every recoverable kind rather than the fixture subset.
+    ///
+    /// The trailing-period strip is load-bearing and was found by
+    /// mutation, not by reasoning: a repeated sentence is terminal in one
+    /// position and mid-string in the other, so it renders as
+    /// `"Try again in a moment"` and `"Try again in a moment."` — unequal
+    /// as strings. Without the strip this test was green under the exact
+    /// mutation it exists to catch.
+    func test_noBranch_rendersTheSameSentenceTwice() {
+        for (label, error) in recoverableErrors {
+            for retained in [true, false] {
+                let description = NoTypeErrorKind
+                    .sessionFailure(error, retainedForRetry: retained)
+                    .payload
+                    .description
+                let sentences = description
+                    .components(separatedBy: ". ")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .map { $0.hasSuffix(".") ? String($0.dropLast()) : $0 }
+                    .filter { !$0.isEmpty }
+                XCTAssertEqual(
+                    Set(sentences).count, sentences.count,
+                    "\(label) (retained: \(retained)): a sentence is rendered twice — advice folded into `cause` reaches both arms. Got: \(description)"
+                )
+            }
+        }
+    }
+
+    // MARK: - R17 — no internal diagnostic reaches the user
+
+    /// The defect: `payloadForURLErrorCode`'s `default:` arm renders
+    /// `fallbackDescription` verbatim, and the wrapped branch used to hand
+    /// it the **whole** `GeminiError` body — so any network code without a
+    /// branch of its own put `URLError code=-1003: …` on screen.
+    ///
+    /// Swept over the code space rather than asserted for one code,
+    /// because the point is that no code can produce it, and the codes
+    /// that reach the `default:` arm are exactly the ones nobody
+    /// enumerated.
+    func test_noNetworkPayload_leaksTheURLErrorDiagnostic() {
+        let prefix = GeminiClient.GeminiError.urlErrorBodyPrefix
+        let codes: [URLError.Code] = [
+            .notConnectedToInternet, .networkConnectionLost, .timedOut,
+            .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed,
+            .secureConnectionFailed, .badServerResponse, .resourceUnavailable
+        ]
+        for code in codes {
+            for retained in [true, false] {
+                let description = NoTypeErrorKind
+                    .sessionFailure(
+                        GeminiClient.GeminiError.wrapURLError(URLError(code)),
+                        retainedForRetry: retained
+                    )
+                    .payload
+                    .description
+                XCTAssertFalse(
+                    description.contains(prefix),
+                    "URLError \(code.rawValue) (retained: \(retained)): an internal diagnostic reached the HUD. Got: \(description)"
+                )
+            }
+        }
+    }
+
+    /// The property behind the fix, and the one worth pinning: after R17
+    /// the two ways a network failure reaches the HUD render the **same**
+    /// sentence.
+    ///
+    /// A bare `URLError` arrives from the legacy / defensive branch; the
+    /// wrapped `GeminiError.http(0, …)` is what production actually
+    /// rethrows out of `RecordingSession.stop()`. They meet in
+    /// `payloadForURLErrorCode`, and before this change the wrapped path
+    /// arrived carrying a different string. Equality is stronger than
+    /// "contains no prefix": it fails a fix that strips the prefix by
+    /// inventing new wording, which KTD12 explicitly did not want.
+    ///
+    /// `retainedForRetry: false` for both, because that is the only value
+    /// the bare-`URLError` call site can pass — see
+    /// `test_bareURLError_isTerminal_andKeepsThePreRetentionCopy`.
+    func test_bothNetworkPaths_renderIdenticalCopy_forTheSameCode() {
+        let codes: [URLError.Code] = [
+            .notConnectedToInternet, .networkConnectionLost, .timedOut,
+            .cannotFindHost, .cannotConnectToHost, .secureConnectionFailed
+        ]
+        for code in codes {
+            let native = NoTypeErrorKind
+                .sessionFailure(URLError(code), retainedForRetry: false)
+                .payload
+            let wrapped = NoTypeErrorKind
+                .sessionFailure(
+                    GeminiClient.GeminiError.wrapURLError(URLError(code)),
+                    retainedForRetry: false
+                )
+                .payload
+            XCTAssertEqual(
+                wrapped.description, native.description,
+                "URLError \(code.rawValue): the wrapped and native paths disagree. The wrapped body embeds the same `localizedDescription` the native path reads, so any difference means the body itself is being rendered."
+            )
+            XCTAssertEqual(wrapped.title, native.title, "URLError \(code.rawValue)")
+            XCTAssertEqual(wrapped.code, native.code, "URLError \(code.rawValue)")
         }
     }
 

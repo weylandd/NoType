@@ -27,9 +27,17 @@ import Foundation
 ///   | ≥ 40 s              | 500 ms    | Any breath (floor)         |
 ///
 ///   The early step-down keeps chunks small enough that each Gemini
-///   request fits inside the 30 s `timeoutIntervalForResource` budget
-///   set in `GeminiClient` — a typical chunk after 20 s lands in the
-///   20–40 s wall-clock range, well under the network ceiling. 500 ms
+///   request fits inside its network budget — a typical chunk after
+///   20 s lands in the 20–40 s wall-clock range. Note what that budget
+///   *is* since U1 of the delivery-reliability plan: latency at Gemini
+///   tracks the **number of audio parts** in a request, not the audio's
+///   duration or its byte size (a 4-part batch measured ~4× a
+///   single-part 180 s force-cut), so both
+///   `GeminiClient.requestInactivityBudget(audioPartCount:)` and the
+///   whole-transfer ceiling scale on that axis. This ladder's job is
+///   therefore chunk *quality* first; the network headroom it buys is a
+///   real but secondary effect, and it is bought by keeping a batch
+///   small rather than by keeping any one chunk short. 500 ms
 ///   is the floor on purpose — at ~300 ms we'd start catching stop-
 ///   consonant closures ("t", "p", "k" ~80–150 ms) and inter-phrase
 ///   micropauses, which would shred normal speech mid-sentence.
@@ -73,7 +81,7 @@ struct PauseDetector {
 
     let voicedFrameThreshold: Float
     let minVoicedRunForChunkStart: Int
-    /// Base (max) pause threshold — applied to chunks under 30 s. The
+    /// Base (max) pause threshold — applied to chunks under 20 s. The
     /// effective threshold steps down as the chunk grows; see
     /// `pauseThresholdSamples(forChunkLength:)` for the ladder.
     let pauseThresholdSamples: Int

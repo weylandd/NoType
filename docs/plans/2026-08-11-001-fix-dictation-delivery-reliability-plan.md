@@ -603,7 +603,7 @@ Phase A and Phase B are independent of each other and may land in either order. 
   - A retry that recovers nothing records its spend and counts no session.
   - A partially-broken row from the success arm is never treated as never-counted.
   - **A success-arm row whose sequence is one gate-filtered empty-text segment beside one gap is never treated as never-counted** — recovering its gap records tokens only. This is the case a "no segment carries text" reading would double-count.
-- **Verification.** Totals after a recovered session match a directly-successful session of the same content.
+- **Verification.** ~~Totals after a recovered session match a directly-successful session of the same content.~~ **Corrected 2026-08-13 (U8's review, folded in by U2) — that overstates what R18 promises and what the code does.** It does not hold for a **two-stage** recovery: the word count is frozen at the *first* recovery's rendering, which still contains `[…]` for the gaps then open, and later recoveries add none. That is R18's "counted exactly once" working exactly as specified, and it is pinned by the AE9 test. What the unit can actually promise: **a recovered session contributes exactly one session and one word count across any number of retries, and every retry run's token spend is recorded.**
 
 ### U9. Amend the documentation the chunk model invalidates
 
