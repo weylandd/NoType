@@ -113,18 +113,25 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
     /// **no display, copy or accounting reader consults this field any
     /// more** — they all go through `HistoryText.rendered`, which
     /// assembles the sequence and applies the user's *current* pairs
-    /// (R13). Two readers are left, both deliberate and both temporary:
+    /// (R13). Two readers are left:
     ///
     /// - `init(from:)` below, for a legacy row that carries no sequence.
     ///   There the text is the only record of where the gaps were, which
-    ///   is exactly what R12's migration reads it for.
-    /// - `AppState.settleRetry`, which still merges a retry's results by
-    ///   scanning this string for markers and still reads
-    ///   `isBroken && text.isEmpty` as its never-counted signal. U7 and
-    ///   U8 replace those with an index write and a segment-derived
-    ///   predicate respectively; until they land, keeping the merge on
-    ///   the mirror is what stops the sequence and the text disagreeing
-    ///   about where the remaining gaps are.
+    ///   is exactly what R12's migration reads it for. Permanent.
+    /// - `AppState.settleRetry`, which reads `isBroken && text.isEmpty` as
+    ///   its "lifetime stats never counted this session" signal. Temporary
+    ///   — U8 replaces it with the segment-derived form ("every segment is
+    ///   a gap"), which says the same thing without depending on the
+    ///   emptiness of a string that boundary normalisation and replacement
+    ///   pairs both run over.
+    ///
+    /// A **retry no longer reads this field at all.** It used to merge its
+    /// results by scanning this string for markers, which failed outright
+    /// on a row whose `[…]` a replacement pair had rewritten, and — worse —
+    /// rebuilt the row's sequence from the merged post-replacement string,
+    /// destroying the raw text on disk. `RetryMerge` writes by chunk index
+    /// now and `settleRetry` uses the `segments:` initializer below, so
+    /// this stays a mirror on every path that produces a row.
     let text: String
 
     let sourceAppName: String
@@ -228,10 +235,13 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
     /// derived by R12's migration rule.
     ///
     /// This is the *legacy* shape, kept because it is exactly what a row
-    /// read off disk without a sequence knows about itself, and because a
-    /// retry that rewrites a row's text and count still describes its
-    /// result that way until the merge writes by index. A producer holding
-    /// real per-response data must use the `segments:` initializer instead.
+    /// read off disk without a sequence knows about itself. **No in-process
+    /// producer uses it any more** — `settleRetry` was the last one and
+    /// moved to the `segments:` initializer when the merge started writing
+    /// by index. A producer holding real per-response data must keep using
+    /// that one: the positions this initializer derives are ordinals of a
+    /// marker parse, and its segment text would be post-replacement,
+    /// violating R2.
     init(
         id: UUID,
         text: String,
@@ -280,20 +290,20 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
     /// stands for an unknown number of original chunks and its index is
     /// just its place in the sequence.
     ///
-    /// **Nothing may depend on these positions, and the reason is narrower
-    /// than "no migrated row can be retried" — that sentence is false.** It
-    /// holds on the *decode* path: a row read off disk without a sequence
+    /// **Nothing may depend on these positions, and decode is now the only
+    /// path that can produce them.** A row read off disk without a sequence
     /// outlived the process whose memory held its audio, so `canRetry` is
-    /// already false for it. But decoding is not the only producer.
-    /// `AppState.settleRetry` rebuilds a retried row through the
-    /// `failedChunkCount:` initializer below, in-process, and re-`put`s the
-    /// audio for whatever did not land — so a **live, retryable** row can
-    /// carry these fabricated ordinals, and a second retry on it would be
-    /// indexing against positions no chunk ever had. Today nothing does:
-    /// `RetryMerge` still substitutes markers positionally in `text`, which
-    /// this reconstruction keeps in step by construction. The index write
-    /// that would break is the next unit's, and converting `settleRetry` to
-    /// the `segments:` initializer is that unit's first job.
+    /// already false for it and no index write can reach it.
+    ///
+    /// That was not always true, and the exception is worth keeping in
+    /// view: `AppState.settleRetry` used to rebuild a retried row through
+    /// the `failedChunkCount:` initializer below, in-process, re-`put`ting
+    /// the audio for whatever did not land — so a **live, retryable** row
+    /// carried these fabricated ordinals, and the moment the merge started
+    /// writing by index a second retry would have landed text in the wrong
+    /// slot. Converting that call site to the `segments:` initializer is
+    /// what closed it. A future in-process producer reaching for this
+    /// initializer re-opens it.
     ///
     /// **`maxMigratedGaps` bounds the tail.** `failedChunkCount` is read
     /// straight off disk, and the loop below turns it into that many

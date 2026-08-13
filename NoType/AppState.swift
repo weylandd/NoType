@@ -921,12 +921,18 @@ final class AppState {
                 Self.log.info("retry abandoned — its row was removed mid-run")
                 break
             }
-            // KTD6: the row's surviving text, markers filtered out, plus
-            // whatever this run has recovered so far — so a chunk that just
-            // came back becomes context for the next one, exactly as
+            // R10: the row's text-carrying chunks, raw, plus whatever this
+            // run has recovered so far — so a chunk that just came back
+            // becomes context for the next one, exactly as
             // `RecordingSession.splitRetry` re-queries `currentPriors()`.
+            // A gap contributes nothing, so no marker reaches Gemini, and
+            // no replacement pair can move the seam the way splitting the
+            // row's rendered text on `[…]` could.
             let priors = RetryMerge.priors(
-                from: RetryMerge.merge(existingText: row.text, recovered: recovered)
+                from: RetryMerge.merge(
+                    into: row.segments,
+                    outcomes: Self.retryOutcomes(chunks: payload.chunks, recovered: recovered)
+                ).segments
             )
             do {
                 let result = try await send(chunk, payload.context, priors, payload.model)
@@ -954,8 +960,8 @@ final class AppState {
         }
 
         // One slot per retained chunk, so a run that stopped early still
-        // describes every chunk. `RetryMerge.merge`'s empty-text branch and
-        // the remaining-chunk derivation below both zip against the payload.
+        // describes every chunk. `retryOutcomes` and the remaining-chunk
+        // derivation in `settleRetry` both zip against the payload.
         while recovered.count < payload.chunks.count { recovered.append(nil) }
 
         await settleRetry(
@@ -1002,6 +1008,24 @@ final class AppState {
         )
     }
 
+    /// Pair each retained chunk with what this run got back for it — the
+    /// shape `RetryMerge` writes by (R7).
+    ///
+    /// The chunk supplies the index and the run supplies the text, which is
+    /// the only place those two facts meet: `RetainedRecording.Chunk.idx`
+    /// is the position the session recorded the audio under, and it is
+    /// the same number the row's gap segment carries. `zip` truncates on
+    /// purpose — mid-run the answers are shorter than the chunk list, and
+    /// the priors call wants exactly the chunks answered so far.
+    private nonisolated static func retryOutcomes(
+        chunks: [RetainedRecording.Chunk],
+        recovered: [String?]
+    ) -> [RetryMerge.ChunkOutcome] {
+        zip(chunks, recovered).map {
+            RetryMerge.ChunkOutcome(chunkIndex: $0.0.idx, text: $0.1)
+        }
+    }
+
     /// Land one retry run's outcome: rewrite the row, decide what stays
     /// held, and account for the spend.
     ///
@@ -1022,10 +1046,17 @@ final class AppState {
         tokens: TokenUsage,
         failure: Error?
     ) async {
+        // Each recovery is written into the gap covering its own chunk
+        // index (R7) — no scan over the row's text, so a replacement pair
+        // that restyled the `[…]` cannot cost the user their recovery (R8).
+        //
         // Placement, not recovery, is what licenses a release: a chunk
-        // whose text the merge could not land keeps its marker slot AND
-        // its audio. See `RetryMerge.Merged.placed`.
-        let merged = RetryMerge.mergeDetailed(existingText: row.text, recovered: recovered)
+        // whose text the merge could not land keeps its gap AND its audio.
+        // See `RetryMerge.Merged.placed`.
+        let merged = RetryMerge.merge(
+            into: row.segments,
+            outcomes: Self.retryOutcomes(chunks: payload.chunks, recovered: recovered)
+        )
         let placedCount = merged.placedCount
 
         // Exit 1: the row was deleted while the run was in flight. R13 keeps
@@ -1069,39 +1100,47 @@ final class AppState {
             return
         }
 
-        // Exit 3: something landed. The recovered text replaces its gap
-        // markers in the row (R12) — the text already pasted into the target
-        // app is not touched and cannot be, which is the whole of KD5.
-        let mergedText = merged.text
+        // Exit 3: something landed. The recovered text now occupies the gap
+        // it was re-sent for — the text already pasted into the target app
+        // is not touched and cannot be, which is the whole of KD5.
+        //
         // Whatever did not land stays held, so the next retry re-pays for
-        // those chunks only (R16). Re-putting the reduced payload — rather
-        // than releasing chunk by chunk — is what keeps `RetainedAudioStore`
-        // a whole-entry API.
+        // those chunks only. Re-putting the reduced payload — rather than
+        // releasing chunk by chunk — is what keeps `RetainedAudioStore` a
+        // whole-entry API.
         let remaining = zip(payload.chunks, merged.placed)
             .filter { !$0.1 }
             .map(\.0)
-        // The reconstruction initializer: this merge still describes its
-        // result the pre-sequence way — a flat string plus a count — so the
-        // row's response sequence is rebuilt from that pair by the same
-        // rule a legacy row on disk goes through. It reproduces exactly
-        // what the row renders. Replacing the marker scan with a write
-        // keyed on the chunk's own index is the next unit's job; until
-        // then, deriving here keeps the sequence and the text from
-        // disagreeing about where the remaining gaps are.
+        // The **producing** initializer, not the `failedChunkCount:`
+        // reconstruction one, and this is the load-bearing half of the
+        // unit. Two things follow from it:
+        //
+        // - **The positions are real.** Reconstruction derives a sequence
+        //   by parsing markers out of a string, so its indices are ordinals
+        //   of that parse rather than the chunk index any audio was
+        //   recorded under. A second retry on such a row would index
+        //   against positions no chunk ever had.
+        // - **The stored text stays raw** (R2, R9). Rebuilding from the
+        //   merged *post-replacement* string used to bake a substitution
+        //   into `segments` and persist it, after which the raw text was
+        //   gone from disk and `HistoryText.rendered` re-applied the
+        //   current pairs on top of the old one — a pair whose `to`
+        //   contains its `from` double-applied, and deleting the pair no
+        //   longer changed how the row read (R5 / AE7 / R31).
+        //
+        // `failedChunkCount` is derived from the sequence, so the remaining
+        // gaps are read from the per-chunk results rather than by
+        // decrementing a count (R11). `text` is written only as the legacy
+        // mirror an older build decodes (KTD10) — the rendered string, so
+        // it stays what that build would have shown.
         let updated = HistoryEntry(
             id: row.id,
-            text: mergedText,
+            text: HistoryText.rendered(merged.segments, replacements: dictionaryReplacements),
             sourceAppName: row.sourceAppName,
             sourceBundleID: row.sourceBundleID,
             timestamp: row.timestamp,
             durationSeconds: row.durationSeconds,
-            // Subtracted rather than set to `remaining.count`, so the count
-            // stays equal to the number of markers actually left in the
-            // text — which is the predicate U7 renders and the merge's
-            // next run indexes against. The subtrahend is `placedCount`
-            // for the same reason `remaining` is: a marker that is still
-            // in the text must still be counted.
-            failedChunkCount: max(0, row.failedChunkCount - placedCount)
+            segments: merged.segments
         )
         if let idx = history.firstIndex(where: { $0.id == entryID }) {
             history[idx] = updated

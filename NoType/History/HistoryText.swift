@@ -83,8 +83,23 @@ enum HistoryText {
         _ entry: HistoryEntry,
         replacements: [DictionaryReplacement]
     ) -> String {
+        rendered(entry.segments, replacements: replacements)
+    }
+
+    /// The same string, for a caller holding a sequence that is not yet a
+    /// row — `AppState.settleRetry`, which needs the legacy `text` mirror
+    /// (KTD10) for the sequence it is about to store and cannot ask an
+    /// entry that does not exist yet.
+    ///
+    /// A delegation rather than a second body: the entry overload above is
+    /// this one, so R6's "display and copy cannot disagree" extends to the
+    /// mirror a retried row is written with.
+    static func rendered(
+        _ segments: [HistoryEntry.Segment],
+        replacements: [DictionaryReplacement]
+    ) -> String {
         TextReplacementEngine.apply(
-            assemble(entry.segments),
+            assemble(segments),
             replacements: replacements
         )
     }

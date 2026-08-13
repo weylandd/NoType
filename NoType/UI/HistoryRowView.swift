@@ -243,15 +243,15 @@ struct HistoryRowView: View {
     ///   reach it, so the term has nothing left to protect against and is
     ///   gone (AE1).
     ///
-    ///   **The button now outruns the merge, and that is temporary.**
-    ///   `AppState.settleRetry` still merges by scanning
-    ///   `HistoryEntry.text` — the post-replacement mirror — for the
-    ///   marker, so on the ellipsis-pair row this term used to hide, the
-    ///   retry is offered, billed, and settles onto R19's
-    ///   nothing-recovered exit every time. The audio survives; the
-    ///   recovery does not. U7 moves the merge onto `segments` and closes
-    ///   it. Restoring a text-shaped gate here is not the fix — it would
-    ///   re-hide the user's recovery, which is what AE1 rejects.
+    ///   **The merge has since caught up with the button.** For one unit
+    ///   it did not: `AppState.settleRetry` still merged by scanning
+    ///   `HistoryEntry.text` for the marker, so on the ellipsis-pair row
+    ///   this term used to hide, the retry was offered, billed, and settled
+    ///   onto the nothing-recovered exit every time. `RetryMerge` writes
+    ///   into the gap at the chunk's own index now (R7), so "offered" and
+    ///   "lands" are one fact again. Should they ever diverge, the fix is
+    ///   never a text-shaped gate here — that re-hides the user's
+    ///   recovery, which is what AE1 rejects.
     /// - `copy` asks whether anything but gaps survived, via
     ///   `hasCopyableText` below — hoisted out of this body because the
     ///   withheld-paste notice asks the same question about the same row
