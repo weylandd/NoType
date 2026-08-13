@@ -2625,6 +2625,20 @@ enum NoTypeErrorKind {
     static let retainedGapClause =
         "The recording is kept in your history, where a retry can fill the gaps."
 
+    /// Diagnosis for a transport failure we can name only as "the
+    /// connection did not work", declared once because two branches need
+    /// exactly the same sentence and neither may invent its own.
+    ///
+    /// Both are places where the alternative was a raw number on a user's
+    /// screen: `payloadForURLErrorCode`'s `.badServerResponse` arm (the
+    /// no-`HTTPURLResponse` guard, which used to render "Unexpected
+    /// response (HTTP 0)") and the `?? ` floor in
+    /// `payloadForSessionFailure`'s wrapped branch (which used to render
+    /// Foundation's "(NSURLErrorDomain error -N.)"). A pure diagnosis, no
+    /// imperative — `describe`'s contract, see its doc-comment.
+    private static let unexpectedConnectionFailureCause =
+        "The connection failed unexpectedly."
+
     /// Join a cause sentence to the right consequence clause.
     ///
     /// `ifLost` is the pre-retention copy, kept **verbatim** for the case
@@ -2978,25 +2992,46 @@ enum NoTypeErrorKind {
                 //
                 // The `?? ` arm covers a body carrying a code and nothing
                 // else (`"URLError code=-1009"`), which no current
-                // producer writes but the parser accepts. Re-deriving the
-                // sentence from the code keeps the guarantee above
-                // instead of falling back to the diagnostic.
+                // producer writes but the parser accepts — `wrapURLError`
+                // always appends `": \(localizedDescription)"`, and a real
+                // `URLError`'s is never empty. It is a defensive floor.
                 //
-                // Know what that arm renders, because it is not what you
-                // would guess: a *synthesized* `URLError` carries no
+                // It re-derived the sentence from the code at first, and
+                // that was wrong in the one way this branch must never be
+                // wrong: a *synthesized* `URLError` carries no
                 // `NSLocalizedDescriptionKey`, so its
                 // `localizedDescription` is Foundation's generic "The
-                // operation couldn't be completed. (NSURLErrorDomain
-                // error -1003.)" — not the friendly sentence. The one
-                // `URLSession` actually throws does carry it (a real
-                // stall on this machine produced "A TLS error caused the
-                // secure connection to fail."), and that is the string
-                // `wrapURLError` embeds, so the reachable path renders
-                // real copy. This arm is the defensive floor, chosen
-                // because it is still better than the wrapped body and
-                // needs no wording we invented.
-                fallbackDescription: wrapped.message
-                    ?? URLError(URLError.Code(rawValue: wrapped.code)).localizedDescription,
+                // operation couldn't be completed. (NSURLErrorDomain error
+                // -1003.)" — an internal diagnostic with a raw error number
+                // in it, which is the exact shape R17 removes. (The
+                // `URLError` `URLSession` actually throws *does* carry a
+                // real sentence — a stall on this machine produced "A TLS
+                // error caused the secure connection to fail." — and that
+                // is what `wrapURLError` embeds, which is why the reachable
+                // path was never affected.) So the floor is the same ruled
+                // sentence `payloadForURLErrorCode` gives a
+                // `.badServerResponse`: no wording invented here either,
+                // and no number to leak.
+                fallbackDescription: wrapped.message ?? Self.unexpectedConnectionFailureCause,
+                retainedForRetry: retainedForRetry
+            )
+        }
+        // **A floor, not the fix.** R17's fix is the seam above plus
+        // `GeminiClient.performOnce` throwing its no-`HTTPURLResponse` guard
+        // through `wrapURLError`, which is what actually makes that failure
+        // parseable and network-classed (KTD12: fix where the string is
+        // produced). This catches a status 0 whose body is *not* parseable
+        // — no producer on the transcription path writes one today, and the
+        // point is that a future one cannot silently reintroduce "Gemini
+        // rejected the request / Unexpected response (HTTP 0)" by adding a
+        // bare `throw`. Status 0 means the request never reached Gemini, so
+        // the generic HTTP arm below is the wrong arm for it by
+        // construction: both halves of its sentence are false and the
+        // number it interpolates is not a status.
+        if let g = err as? GeminiClient.GeminiError, case .http(0, _) = g {
+            return payloadForURLErrorCode(
+                URLError.Code.badServerResponse.rawValue,
+                fallbackDescription: Self.unexpectedConnectionFailureCause,
                 retainedForRetry: retainedForRetry
             )
         }
@@ -3197,6 +3232,41 @@ enum NoTypeErrorKind {
                 severity: .danger,
                 iconSymbol: "exclamationmark.triangle.fill"
             )
+        case .badServerResponse:
+            // The transport answered with something that was not an
+            // `HTTPURLResponse` at all — `GeminiClient.performOnce`'s guard,
+            // which now throws through `wrapURLError` so it lands here
+            // instead of in the generic HTTP arm, where it rendered as
+            // **"Gemini rejected the request / Unexpected response (HTTP
+            // 0)"**. Status 0 is this project's "never reached Gemini"
+            // marker, so both halves of that sentence were false and the
+            // one number in it was not a status.
+            //
+            // It needs a branch of its own rather than the `default:` arm
+            // below, and the reason is specific: `wrapURLError` embeds
+            // `URLError.localizedDescription`, and the `URLError` *we*
+            // synthesize here carries no `NSLocalizedDescriptionKey`, so
+            // that sentence is Foundation's "The operation couldn't be
+            // completed. (NSURLErrorDomain error -1011.)" — the same class
+            // of internal diagnostic, with the same raw number, that R17
+            // exists to keep off the screen. A code `URLSession` itself
+            // raises does carry a real sentence and the `default:` arm
+            // serves those correctly; this one is ours.
+            return ErrorPayload(
+                title: "Couldn't reach Gemini",
+                description: describe(
+                    Self.unexpectedConnectionFailureCause,
+                    // No `ifKept:`, for the same reason `.timedOut` has
+                    // none: the retained clause already names the row and
+                    // the retry, and there is nothing for the user to do
+                    // *first*. An imperative here would render beside it.
+                    ifLost: "Try again in a moment.",
+                    retainedForRetry: retainedForRetry
+                ),
+                code: "ERR_NET_BAD_RESPONSE",
+                severity: .danger,
+                iconSymbol: "exclamationmark.triangle.fill"
+            )
         default:
             // `fallbackDescription` is the OS's own sentence for this
             // URLError code (or the wrapped body) — a cause with no
@@ -3221,8 +3291,8 @@ enum NoTypeErrorKind {
 /// Take a `GeminiError.http(0, body)` body string of the form
 /// `"URLError code=-1009: not connected"` apart into the two facts the
 /// HUD needs from it. Returns `nil` when the body isn't a wrapped
-/// URLError. Internal so `AppStateNetworkErrorRoutingTests` can pin the
-/// parser against `GeminiClient.performOnce`'s wrapping format — drift
+/// URLError. Internal so `NetworkErrorTranslatorTests` can pin the
+/// parser against `GeminiClient.GeminiError.wrapURLError`'s format — drift
 /// between the two would silently re-break the offline / timeout HUD
 /// routing.
 enum NetworkErrorTranslator {

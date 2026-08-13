@@ -219,6 +219,58 @@ final class GeminiClientOfflineShortCircuitTests: XCTestCase {
         )
     }
 
+    // MARK: - No transcription failure escapes as a bare status 0 (R17)
+
+    /// A source guard, because **no value test can see this**. The bare
+    /// `GeminiError.http(status: 0, body: "no HTTPURLResponse")` is still a
+    /// perfectly constructible error — `validateKey` and `classifyApp`
+    /// legitimately throw it, and `test_statusZeroDescription_isLogOnly`
+    /// above asserts what it renders. So reverting `performOnce`'s
+    /// no-`HTTPURLResponse` guard to that bare form changes no value any
+    /// test can reach, and silently restores the HUD photographed on
+    /// 0.1.13-rc2: **"Gemini rejected the request / Unexpected response
+    /// (HTTP 0) / ERR_GEMINI · 0"**.
+    ///
+    /// The two halves are complementary, per
+    /// `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`
+    /// — absence alone is green on a file where the guard was deleted
+    /// outright, which would be a different bug with the same symptom:
+    ///
+    /// - **Absence:** `performOnce` raises no `status: 0` of its own.
+    /// - **Presence:** it still refuses a non-`HTTPURLResponse`, through
+    ///   the wrapper that makes the failure parseable downstream.
+    ///
+    /// Limits: this matches literal spellings in one function of one file.
+    /// Renaming `wrapURLError` or changing the argument label fails it
+    /// loudly — a review trigger, not a false negative. It proves the
+    /// wrapper is *in* `performOnce`'s body, not that this particular
+    /// `guard` is what calls it; the sibling scans in this file rely on the
+    /// same bound.
+    func test_performOnce_throwsNoBareStatusZero() throws {
+        let source = Self.strippingComments(try String(
+            contentsOf: Self.repoRoot()
+                .appendingPathComponent("NoType/Gemini/GeminiClient.swift"),
+            encoding: .utf8
+        ))
+        let performOnce = try XCTUnwrap(
+            Self.body(ofFuncNamed: "performOnce", in: source),
+            "Could not parse performOnce — the guard lost its anchor."
+        )
+
+        XCTAssertFalse(
+            performOnce.contains("status: 0"),
+            "performOnce raises a bare status-0 GeminiError. Its body carries no `URLError code=` prefix, so `NetworkErrorTranslator.parse` returns nil, the network branch of `payloadForSessionFailure` is skipped, and the user is told 'Gemini rejected the request — Unexpected response (HTTP 0)' about a request that never reached Gemini. Throw it through `GeminiError.wrapURLError` instead."
+        )
+        XCTAssertTrue(
+            performOnce.contains("response as? HTTPURLResponse"),
+            "performOnce no longer checks the response type at all — the absence assertion above is now green for the wrong reason."
+        )
+        XCTAssertTrue(
+            performOnce.contains("wrapURLError(URLError(.badServerResponse))"),
+            "performOnce checks the response type but no longer wraps the failure, so whatever it throws instead is unparseable downstream."
+        )
+    }
+
     // MARK: - Position of the fresh-connection drop (R28 / KTD13)
 
     /// A source guard in the same shape as the one above, for the same

@@ -26,18 +26,19 @@ import Foundation
 ///   | 20 – 40 s           | 700 ms    | End-of-sentence pauses     |
 ///   | ≥ 40 s              | 500 ms    | Any breath (floor)         |
 ///
-///   The early step-down keeps chunks small enough that each Gemini
-///   request fits inside its network budget — a typical chunk after
-///   20 s lands in the 20–40 s wall-clock range. Note what that budget
-///   *is* since U1 of the delivery-reliability plan: latency at Gemini
-///   tracks the **number of audio parts** in a request, not the audio's
-///   duration or its byte size (a 4-part batch measured ~4× a
-///   single-part 180 s force-cut), so both
-///   `GeminiClient.requestInactivityBudget(audioPartCount:)` and the
-///   whole-transfer ceiling scale on that axis. This ladder's job is
-///   therefore chunk *quality* first; the network headroom it buys is a
-///   real but secondary effect, and it is bought by keeping a batch
-///   small rather than by keeping any one chunk short. 500 ms
+///   The early step-down keeps chunks at a size that transcribes
+///   cleanly — a typical chunk after 20 s lands in the 20–40 s
+///   wall-clock range. **It buys no network headroom, and used to claim
+///   it did.** Since U1 of the delivery-reliability plan, latency at
+///   Gemini is known to track the **number of audio parts** in a
+///   request rather than the audio's duration or its byte size: a
+///   4-part batch measured 26.85 s idle against 7.62 s for a
+///   single-part 180 s force-cut that carried *more* audio and *more*
+///   bytes. So a shorter chunk does not shorten its request;
+///   `GeminiClient.requestInactivityBudget(audioPartCount:)` scales on
+///   the part axis instead, and what actually costs time is how many
+///   chunks the sender batches into one call. This ladder is a chunk-
+///   *quality* decision and nothing else. 500 ms
 ///   is the floor on purpose — at ~300 ms we'd start catching stop-
 ///   consonant closures ("t", "p", "k" ~80–150 ms) and inter-phrase
 ///   micropauses, which would shred normal speech mid-sentence.

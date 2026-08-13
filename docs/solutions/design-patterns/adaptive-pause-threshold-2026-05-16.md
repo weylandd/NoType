@@ -9,7 +9,7 @@ severity: medium
 applies_when:
   - Slicing a continuous audio stream into chunks for a network transcription API
   - Designing a VAD-driven pause detector that must balance accuracy against network latency
-  - Tuning chunk size against an upstream HTTP timeout budget
+  - Believing chunk size is what a request's timeout budget scales with (see the 2026-08-13 correction below — it was the part count)
   - Choosing between "fixed pause threshold + hard force-cut" and "adaptive threshold"
 tags: [vad, silero, pause-detection, chunking, transcription, gemini, adaptive, threshold]
 ---
@@ -22,7 +22,7 @@ NoType records push-to-talk audio and sends chunked AAC blobs to Gemini for tran
 
 ~~Underneath, there's also a network-budget constraint: Gemini's `URLSessionConfiguration.timeoutIntervalForResource` caps the whole request. Past a chunk size of ~40 s of audio, the upload + Gemini wall-clock starts pressing on a 30 s timeout. Long chunks aren't just an artefact problem; they're a network reliability problem too.~~
 
-**Superseded 2026-08-13 — the second constraint was real but mis-attributed.** A controlled measurement against the live API found that request latency tracks the **number of audio parts** in the request, not the audio's duration and not its byte size: a 4-part batch (159 s of audio, 653 KB) took ~4× a single-part 180 s force-cut (735 KB) — 26.85 s against 7.62 s idle. So a *longer chunk* is not what presses on the budget; a *batch of chunks in one call* is. Both budgets now scale on that axis (`GeminiClient.requestInactivityBudget(audioPartCount:)` and `resourceCeiling`), and the flat 30 s ceiling this paragraph reasoned against is retired — it had in fact been silently killing legitimate 5-part batches. The ladder below survives on its audio-quality merits alone.
+**Superseded 2026-08-13 — the second constraint was real but mis-attributed.** A controlled measurement against the live API found that request latency tracks the **number of audio parts** in the request, not the audio's duration and not its byte size: a 4-part batch (159 s of audio, 653 KB) took ~4× a single-part 180 s force-cut (735 KB) — 26.85 s against 7.62 s idle. So a *longer chunk* is not what presses on the budget; a *batch of chunks in one call* is. The per-request inactivity budget now scales on that axis (`GeminiClient.requestInactivityBudget(audioPartCount:)`), while the whole-transfer `resourceCeiling` stays a single flat value sized for the largest request that budget will ever serve — it moved, but it does not scale. The flat 30 s ceiling this paragraph reasoned against is retired — it had in fact been silently killing legitimate 5-part batches. The ladder below survives on its audio-quality merits alone.
 
 The naive fix — drop the pause threshold globally — destroys short-utterance behaviour. A 500 ms threshold catches normal inter-phrase pauses ("так… значит…") and cuts mid-sentence. Different chunk lengths need different sensitivity.
 
@@ -57,7 +57,7 @@ Three rungs, three constants. The ladder is intentionally coarse (not a continuo
 
 ## When to Apply
 
-- VAD-driven chunked transcription with a network timeout ceiling on each request — the network budget anchors the ladder's upper rungs.
+- VAD-driven chunked transcription where **chunk quality** is what the rungs are tuned for. (This bullet used to read "…with a network timeout ceiling on each request — the network budget anchors the ladder's upper rungs", which is the claim the 2026-08-13 measurement retired two sections above. Measure before you anchor a ladder to a network budget: here the budget turned out to track the *number of parts per request*, not the length of any one chunk, so it anchors the sender's batching instead.)
 - Any pause-detection scheme where short-utterance and long-utterance regimes need different sensitivity. (Spoken-form streaming, voice memos, lecture transcription.)
 - **Reconsider** if the transcription model's processing time scales non-linearly with audio length — the ladder assumes roughly linear processing per second of audio. A model with worst-case 10× slowdown on long inputs needs more aggressive cutting earlier.
 - **Don't apply** to live-streaming pipelines where the consumer must see partial transcripts as they happen — that's a different design (sub-chunk streaming, server-side VAD). The ladder only makes sense when chunks are atomic units shipped at boundaries.

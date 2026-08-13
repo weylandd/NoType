@@ -170,7 +170,13 @@ final class SplitRetryNetworkBoundTests: XCTestCase {
     /// shipped before KTD4) leaves this file entirely green while
     /// silently giving up the property KTD4 asked for: that the threshold
     /// shrinks in step with the budget rather than drifting toward it.
-    /// Verified: that mutation passes every other assertion here.
+    ///
+    /// **Verified by running it**, not by reasoning: replacing the
+    /// declaration with `nonisolated static let
+    /// abandonMinChunkFailureLatency: Duration = .seconds(2)` and running
+    /// this class leaves 16 of 17 tests green — including both value
+    /// assertions above — and fails only this one. That asymmetry is the
+    /// entire justification for a source guard here.
     ///
     /// Scoped to the **single declaration statement**, not the file: a
     /// file-wide search for the budget call would also match this test's

@@ -156,6 +156,24 @@ Three things about it are load-bearing:
   internet" HUD. A distinct case would require updating `isTerminal` /
   `shouldRetain` in lockstep — a stop condition in the retry plan.
 
+**Every status-0 error a transcription call can throw goes through
+`wrapURLError`.** All three producers — the `URLError` catch in
+`performOnce`, its no-`HTTPURLResponse` guard, and `sendRequest`'s pre-flight
+short-circuit — so the body always carries `urlErrorBodyPrefix` and
+`AppState`'s `NetworkErrorTranslator.parse` never fails on one. This is not
+tidiness: the no-response guard used to throw a bare
+`http(status: 0, body: "no HTTPURLResponse")`, which the parser rejected, and
+the failure fell past the network branch into the generic HTTP arm and
+rendered as **"Gemini rejected the request / Unexpected response (HTTP 0)"** —
+a status number that is not a status, about a request that never reached
+Gemini. Pinned by
+`GeminiClientOfflineShortCircuitTests.test_performOnce_throwsNoBareStatusZero`
+(a source guard, because the bare form is still a constructible `GeminiError`
+and no value test can see the revert). `classifyApp` and `validateKey` keep
+their bare status-0 guards deliberately — they sit off the transcription path
+and `validateKey`'s renders through `errorDescription` on the API-key surface,
+where "Gemini error 0." is pinned by that same file.
+
 The monitor is created on the first Gemini request and never at launch —
 `GeminiClient` is constructed inside `NoTypeApp.init()`, which runs before
 `NSApplicationMain`. See `NoType/UI/CLAUDE.md` "Launch ordering".

@@ -40,8 +40,8 @@ final class ErrorCopyRetentionTests: XCTestCase {
     /// `http(0, "URLError code=N: …")`, and that wrapped form is what
     /// `RecordingSession.stop()` actually rethrows — so it, not a bare
     /// `URLError`, is the shape the offline HUD is reached through in
-    /// production. Built from the producer's own constant so a rename
-    /// cannot leave these tests exercising a branch nothing hits.
+    /// production.
+    ///
     /// Built by calling the **producer itself** rather than re-spelling its
     /// format. Re-spelling it was already one drift risk (the body's shape
     /// is what `NetworkErrorTranslator` parses); it became a correctness
@@ -64,6 +64,13 @@ final class ErrorCopyRetentionTests: XCTestCase {
             ("connection lost",     wrappedURLError(.networkConnectionLost)),
             ("timed out",           wrappedURLError(.timedOut)),
             ("dns failed",          wrappedURLError(.cannotFindHost)),
+            // The shape `performOnce`'s no-`HTTPURLResponse` guard throws
+            // since the R17 follow-up. In the fixture list so it is swept
+            // by the retention, no-loss-claim, no-diagnostic and
+            // no-repeated-sentence properties like every other recoverable
+            // branch; its copy is pinned verbatim in
+            // `test_noHTTPURLResponse_rendersConnectionCopy_notARawStatusNumber`.
+            ("no response",         wrappedURLError(.badServerResponse)),
             ("rate limited",        GeminiClient.GeminiError.http(status: 429, body: "")),
             ("server error",        GeminiClient.GeminiError.http(status: 503, body: "")),
             ("region blocked",      GeminiClient.GeminiError.http(status: 400, body: "User location is not supported")),
@@ -116,6 +123,23 @@ final class ErrorCopyRetentionTests: XCTestCase {
         // The one place the literal copy is asserted. Every other test
         // in this file references the constant, so the wording lives
         // here once instead of being re-spelled per kind.
+        //
+        // That convention only holds if the wording is actually pinned
+        // *here*. It wasn't: the checks below are a `contains` and a set
+        // of negative phrases, both of which survive appending a second
+        // imperative to the clause — which would reach every retained
+        // recoverable HUD, and would be invisible to the verbatim tests
+        // that interpolate this same constant into their fixtures.
+        XCTAssertEqual(
+            NoTypeErrorKind.retainedRecordingClause,
+            "The recording is kept in your history, where you can retry it.",
+            "The whole-session consequence clause changed. Deliberate? Update this fixture. Otherwise it just changed under every HUD that interpolates it."
+        )
+        XCTAssertEqual(
+            NoTypeErrorKind.retainedGapClause,
+            "The recording is kept in your history, where a retry can fill the gaps.",
+            "The gap-filling consequence clause changed. Same reasoning as above."
+        )
         for clause in [
             NoTypeErrorKind.retainedRecordingClause,
             NoTypeErrorKind.retainedGapClause
@@ -388,9 +412,63 @@ final class ErrorCopyRetentionTests: XCTestCase {
         }
     }
 
+    /// The half `test_bothNetworkPaths_renderIdenticalCopy_forTheSameCode`
+    /// structurally cannot see, and the only assertion in this file that
+    /// pins R17's actual claim.
+    ///
+    /// Every other fixture here builds `URLError(code)` with no `userInfo`,
+    /// whose `localizedDescription` is Foundation's generic "The operation
+    /// couldn't be completed. (NSURLErrorDomain error -N.)". That string is
+    /// **re-derivable from the code alone** — so for every swept fixture,
+    /// the sentence `wrapURLError` embedded and the sentence a synthesized
+    /// `URLError(code)` would produce are byte-identical, and a mutation
+    /// that ignores `wrapped.message` and always re-synthesizes passes the
+    /// entire suite while shipping `(NSURLErrorDomain error -1200.)` to a
+    /// user.
+    ///
+    /// The `userInfo` here is what a **real** `URLSession` failure carries
+    /// and a test cannot otherwise obtain: the sentence below is the one a
+    /// live TLS stall produced on this machine. It is unreachable from the
+    /// code, so this assertion is red under that mutation, red under a
+    /// revert to `fallbackDescription: body`, and red under any invented
+    /// wording.
+    func test_wrappedBody_rendersTheEmbeddedSentence_notOneReDerivedFromTheCode() {
+        let sentence = "A TLS error caused the secure connection to fail."
+        let live = URLError(
+            .secureConnectionFailed,
+            userInfo: [NSLocalizedDescriptionKey: sentence]
+        )
+        XCTAssertNotEqual(
+            live.localizedDescription,
+            URLError(.secureConnectionFailed).localizedDescription,
+            "This fixture is only meaningful while the two differ — if Foundation starts giving synthesized URLErrors real sentences, re-derive a different discriminator."
+        )
+        for retained in [true, false] {
+            let description = NoTypeErrorKind
+                .sessionFailure(GeminiClient.GeminiError.wrapURLError(live), retainedForRetry: retained)
+                .payload
+                .description
+            XCTAssertTrue(
+                description.hasPrefix(sentence),
+                "retained: \(retained): the HUD must render the sentence the producer embedded, not one re-derived from the code. Got: \(description)"
+            )
+        }
+    }
+
     /// The property behind the fix, and the one worth pinning: after R17
     /// the two ways a network failure reaches the HUD render the **same**
     /// sentence.
+    ///
+    /// **Know what it cannot see.** Both sides build a *synthesized*
+    /// `URLError(code)`, so both sentences come from the same place and a
+    /// mutation that always re-synthesizes keeps them equal. That direction
+    /// is pinned by
+    /// `test_wrappedBody_rendersTheEmbeddedSentence_notOneReDerivedFromTheCode`
+    /// above; the two are complementary. Note also that three of the codes
+    /// swept below (`.notConnectedToInternet`, `.networkConnectionLost`,
+    /// `.timedOut`) have branches of their own that never read
+    /// `fallbackDescription` at all — only the `default:`-arm codes
+    /// exercise the wiring.
     ///
     /// A bare `URLError` arrives from the legacy / defensive branch; the
     /// wrapped `GeminiError.http(0, …)` is what production actually
@@ -424,6 +502,145 @@ final class ErrorCopyRetentionTests: XCTestCase {
             )
             XCTAssertEqual(wrapped.title, native.title, "URLError \(code.rawValue)")
             XCTAssertEqual(wrapped.code, native.code, "URLError \(code.rawValue)")
+        }
+    }
+
+    /// The field-photographed defect (0.1.13-rc2): a dictation whose
+    /// response was not an `HTTPURLResponse` surfaced as **"Gemini rejected
+    /// the request / Unexpected response (HTTP 0) / ERR_GEMINI · 0"**.
+    /// Every clause of that is false — status 0 is this project's "the
+    /// request never reached Gemini" marker, so Gemini rejected nothing,
+    /// and 0 is not an HTTP status.
+    ///
+    /// R17's fix was at the seam, so what this pins is the copy the
+    /// reclassified error renders. **The seam itself is not reachable from
+    /// a value test** — the bare `http(status: 0, body: "no
+    /// HTTPURLResponse")` is still a constructible `GeminiError`, so
+    /// reverting `performOnce` to throw it leaves every assertion here
+    /// green. That is what
+    /// `GeminiClientOfflineShortCircuitTests.test_performOnce_throwsNoBareStatusZero`
+    /// exists for; the two are complementary and neither alone is enough.
+    func test_noHTTPURLResponse_rendersConnectionCopy_notARawStatusNumber() {
+        let error = GeminiClient.GeminiError.wrapURLError(URLError(.badServerResponse))
+        let kept = NoTypeErrorKind.sessionFailure(error, retainedForRetry: true).payload
+        let lost = NoTypeErrorKind.sessionFailure(error, retainedForRetry: false).payload
+
+        XCTAssertEqual(kept.title, "Couldn't reach Gemini")
+        XCTAssertEqual(lost.title, kept.title, "The title does not vary with retention; only the consequence clause does.")
+        XCTAssertEqual(
+            kept.description,
+            "The connection failed unexpectedly. \(NoTypeErrorKind.retainedRecordingClause)",
+            "The retained arm carries the diagnosis and the clause, and nothing between them — there is no action to take first."
+        )
+        XCTAssertEqual(
+            lost.description,
+            "The connection failed unexpectedly. Try again in a moment.",
+            "The nothing-retained arm carries the diagnosis and its own imperative."
+        )
+    }
+
+    /// The display floor beneath the seam: a status-0 `GeminiError` whose
+    /// body is **not** a wrapped `URLError` must still not reach the
+    /// generic HTTP arm.
+    ///
+    /// No producer on the transcription path writes one today — that is
+    /// exactly what the seam fix achieved — so this asserts the property
+    /// survives someone adding one. Without the floor, a single bare
+    /// `throw GeminiError.http(status: 0, …)` anywhere in `GeminiClient`
+    /// silently restores the photographed HUD.
+    func test_unparseableStatusZero_stillNeverRendersHTTP0() {
+        for body in ["no HTTPURLResponse", "", "{\"error\":{}}", "URLError code=abc: bad"] {
+            for retained in [true, false] {
+                let payload = NoTypeErrorKind
+                    .sessionFailure(
+                        GeminiClient.GeminiError.http(status: 0, body: body),
+                        retainedForRetry: retained
+                    )
+                    .payload
+                XCTAssertEqual(
+                    payload.title, "Couldn't reach Gemini",
+                    "body '\(body)' (retained: \(retained)): a status-0 failure never reached Gemini, so 'Gemini rejected the request' is a false statement."
+                )
+                XCTAssertFalse(
+                    payload.description.contains("HTTP 0"),
+                    "body '\(body)' (retained: \(retained)): the HUD names a status number that is not a status. Got: \(payload.description)"
+                )
+            }
+        }
+    }
+
+    /// Sweep: no failure a *transcription* can produce puts `HTTP 0` in
+    /// front of the user — the number the photographed HUD showed, and the
+    /// one number in this error model that is not a status at all.
+    ///
+    /// **Scoped deliberately.** A real HTTP status still renders as "HTTP
+    /// 404" through the generic arm, and that is out of scope here: it
+    /// names a real protocol fact rather than a marker our own error model
+    /// invented. Widening this to every status is a copy decision, not a
+    /// test decision.
+    func test_noTranscriptionPayload_namesHTTP0() {
+        var errors: [(String, Error)] = recoverableErrors + terminalErrors
+        for code in [
+            URLError.Code.notConnectedToInternet, .networkConnectionLost, .timedOut,
+            .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed,
+            .secureConnectionFailed, .badServerResponse, .cannotParseResponse,
+            .resourceUnavailable, .init(rawValue: -4242)
+        ] {
+            errors.append(("wrapped \(code.rawValue)", GeminiClient.GeminiError.wrapURLError(URLError(code))))
+        }
+        errors.append(("bare status 0", GeminiClient.GeminiError.http(status: 0, body: "no HTTPURLResponse")))
+
+        for (label, error) in errors {
+            for retained in [true, false] {
+                let description = NoTypeErrorKind
+                    .sessionFailure(error, retainedForRetry: retained)
+                    .payload
+                    .description
+                XCTAssertFalse(
+                    description.contains("HTTP 0"),
+                    "\(label) (retained: \(retained)): the HUD names a status number that is not a status. Got: \(description)"
+                )
+            }
+        }
+    }
+
+    /// The `?? ` floor in the wrapped-`URLError` branch, which is the one
+    /// place an `NSError` domain-and-code string could reach a user.
+    ///
+    /// `parse` accepts a body carrying a code and no sentence
+    /// (`"URLError code=-4242"`). No producer writes one — `wrapURLError`
+    /// always appends `": \(localizedDescription)"` — so this is a
+    /// defensive arm, and its first version re-derived the sentence by
+    /// synthesizing a `URLError` from the code. That is precisely what must
+    /// not happen: a synthesized `URLError` carries no
+    /// `NSLocalizedDescriptionKey`, so `localizedDescription` is
+    /// Foundation's "The operation couldn't be completed. (NSURLErrorDomain
+    /// error -4242.)" — an internal diagnostic with a raw number, the shape
+    /// R17 removes.
+    ///
+    /// **Note what this cannot assert.** A *wrapped* body built in a test
+    /// always embeds that same synthesized string, because only a real
+    /// `URLSession` failure carries a real sentence. So the sweep above
+    /// deliberately does not check for `NSURLErrorDomain` over wrapped
+    /// fixtures — it would be measuring the fixture, not the code. This
+    /// test targets the one arm where the synthesis was ours.
+    func test_wrappedBodyWithNoSentence_doesNotSynthesizeAnNSErrorDiagnostic() {
+        for retained in [true, false] {
+            let description = NoTypeErrorKind
+                .sessionFailure(
+                    GeminiClient.GeminiError.http(status: 0, body: "URLError code=-4242"),
+                    retainedForRetry: retained
+                )
+                .payload
+                .description
+            XCTAssertFalse(
+                description.contains("NSURLErrorDomain"),
+                "retained: \(retained): the floor synthesized a URLError and rendered its generic description. Got: \(description)"
+            )
+            XCTAssertTrue(
+                description.hasPrefix("The connection failed unexpectedly."),
+                "retained: \(retained): the floor must reuse the ruled sentence rather than invent copy. Got: \(description)"
+            )
         }
     }
 

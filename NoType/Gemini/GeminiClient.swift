@@ -61,11 +61,17 @@ actor GeminiClient {
             // offline, timeout and DNS indistinguishable in Console.
             //
             // Deliberately gated on the `URLError code=` prefix rather than
-            // on `s == 0` alone, so it is provably log-only: the only other
-            // producer of a status-0 error is `validateKey`'s
-            // "no HTTPURLResponse" body, which has no prefix, keeps the
-            // generic rendering, and is the one status-0 shape that reaches
-            // a user-facing surface (`GeminiKeyRow.errorMessage`).
+            // on `s == 0` alone, so it is provably log-only. The remaining
+            // producers of a *prefix-less* status-0 error are the two
+            // no-`HTTPURLResponse` guards that sit off the transcription
+            // path — `classifyApp`'s (fire-and-forget, log-only) and
+            // `validateKey`'s, which is the one status-0 shape that reaches
+            // a user-facing surface (`GeminiKeyRow.errorMessage`,
+            // `OnboardingAPIKeyStep`). `performOnce`'s guard used to be a
+            // third and is not any more: it throws through `wrapURLError`,
+            // so every status-0 error a *transcription* call can produce
+            // carries the prefix and is parseable by
+            // `NetworkErrorTranslator.parse`.
             case .http(let s, let body) where s == 0 && body.hasPrefix(Self.urlErrorBodyPrefix):
                 "Gemini network failure — \(body)"
             case .http(let s, let body):
@@ -95,11 +101,15 @@ actor GeminiClient {
         /// `RecordingSession.isTerminal` calls it recoverable,
         /// `RecordingSession.shouldRetain` retains its audio, and
         /// `AppState.payloadForSessionFailure` peels the code back out of
-        /// the body for the offline / timed-out HUDs. Both producers — the
-        /// real `URLSession` failure in `performOnce` and the pre-flight
-        /// short-circuit in `sendRequest` — go through here so a
+        /// the body for the offline / timed-out HUDs. All three producers
+        /// on the transcription path — the real `URLSession` failure in
+        /// `performOnce`, its no-`HTTPURLResponse` guard, and the pre-flight
+        /// short-circuit in `sendRequest` — go through here, so a
         /// short-circuited request is byte-for-byte indistinguishable
-        /// downstream from the timed-out request it replaces.
+        /// downstream from the timed-out request it replaces **and** no
+        /// transcription failure can reach the HUD as a bare `status: 0`
+        /// the body parser cannot read. That third one used to bypass this
+        /// function and rendered as "Unexpected response (HTTP 0)".
         ///
         /// The body's second half is the OS's own sentence for the code.
         /// That is not incidental: `AppState`'s HUD builder passes *it*,
@@ -1155,7 +1165,33 @@ actor GeminiClient {
         let networkMs = Int(Date().timeIntervalSince(networkStart) * 1000)
 
         guard let http = response as? HTTPURLResponse else {
-            throw GeminiError.http(status: 0, body: "no HTTPURLResponse")
+            // Wrapped like every other transport failure on this path rather
+            // than raised as a bare `http(status: 0, body: "no
+            // HTTPURLResponse")`, which is what it used to be. That bare form
+            // carried no `urlErrorBodyPrefix`, so
+            // `AppState.payloadForSessionFailure` could not parse it, it fell
+            // past the network branch into the generic HTTP arm, and the user
+            // got **"Gemini rejected the request / Unexpected response (HTTP
+            // 0)"** — a status number that is not a status, for a request that
+            // never reached Gemini at all. Photographed in the field on
+            // 0.1.13-rc2.
+            //
+            // Wrapping converges the two status-0 producers *on this path*:
+            // after this, every status-0 error a transcription call can throw
+            // carries the prefix, so `NetworkErrorTranslator.parse` never
+            // fails on one and the HUD is always chosen by URLError code. That
+            // is the same seam-level fix KTD12 chose for R17 rather than a
+            // branch at the display.
+            //
+            // `.badServerResponse` is the code because that is exactly what
+            // happened — a response arrived and was not the shape the protocol
+            // requires. Nothing downstream shifts: the case is still
+            // `.http(status: 0, …)`, so `isTerminal` still calls it
+            // recoverable, `shouldRetain` still keeps its audio, and
+            // `isNetworkClass` still admits it. Only the body changes, and
+            // `payloadForURLErrorCode` gives the code its own branch so it
+            // never reaches the `default:` arm's synthesized sentence.
+            throw GeminiError.wrapURLError(URLError(.badServerResponse))
         }
 
         if http.statusCode != 200 {
