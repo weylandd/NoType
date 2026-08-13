@@ -4,7 +4,7 @@ date: 2026-08-13
 last_updated: 2026-08-13
 category: documentation-gaps
 module: Recording
-problem_type: known_gap
+problem_type: documentation_gap
 component: audio
 severity: low
 applies_when:
@@ -13,7 +13,6 @@ applies_when:
   - "Auditing whether a device-selection change reaches every consumer"
 symptoms:
   - "A device pinned mid-session keeps recording from the previous microphone until the session ends"
-root_cause: design_decision
 tags: [audio, device-selection, techdebt, mid-session]
 related_components: [Recording, UI]
 ---

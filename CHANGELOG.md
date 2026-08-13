@@ -23,16 +23,31 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
   device. NoType now re-selects your chosen microphone every time it
   re-arms the meter, not only the first time. If the bar goes flat for a
   moment right after you switch, that is the switch landing; it comes
-  back on its own.
+  back on its own, within about a second and a half even on a Bluetooth
+  headset.
+- **The mic-check meter no longer stays dead if it catches your device
+  mid-switch.** Switching microphones can leave the audio hardware
+  briefly disagreeing with itself, and NoType declines to start the meter
+  rather than risk taking the app down. Until now nothing brought it
+  back: you would have watched a flat bar until you picked a device
+  again. It now looks again a few times over the next second and a half,
+  and picks up as soon as the switch settles.
 
 ### Internal
 - Selecting the input device moved into the one function that installs
   the audio tap, so no path can re-arm capture without it. The two
   functions that each did half of that setup are what let the selection
   fall off the picker's path; a source guard now fails if a second
-  selection site reappears. Re-selecting a device that is already current
-  is a no-op, which keeps the reconfiguration notification from feeding
+  selection site reappears, **or if the selection stops coming first** —
+  a selection issued after the tap is installed selects a device the tap
+  will never read, which is the same bug with the call still sitting in
+  the right function. Re-selecting a device that is already current is a
+  no-op, which keeps the reconfiguration notification from feeding
   itself.
+- The mic-check probe refuses to re-arm after it has been stopped. It is
+  woken from three separate background jobs, and one already queued when
+  the user left the step would otherwise re-open the microphone on a
+  screen nobody is looking at.
 - `CFBundleShortVersionString` `0.1.13` → `0.1.14`; `CFBundleVersion`
   18 → 19.
 

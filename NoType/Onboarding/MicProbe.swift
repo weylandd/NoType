@@ -79,6 +79,22 @@ final class MicProbe: @unchecked Sendable {
     private var tapInstalled = false
     private var deviceObservationTask: Task<Void, Never>?
     private var configChangeObserver: NSObjectProtocol?
+    /// Set by `stop()`, cleared by `start()`. **Main-actor only** — like
+    /// `deviceObservationTask` and `configChangeObserver`, it is touched from
+    /// `@MainActor` methods and never from the realtime tap thread.
+    ///
+    /// `rebuild()` is reached from three `Task { @MainActor }` bodies, and a
+    /// task already enqueued when the user leaves the mic-check step still
+    /// runs after `stop()` — re-opening the microphone on a screen nobody is
+    /// looking at, and (because `start()` early-returns on a running engine)
+    /// leaving a probe whose observers were torn down and cannot be re-armed.
+    /// The observation loop already had `Task.isCancelled` for this; the
+    /// notification path had nothing, and the decline retry below would have
+    /// widened the window. One latch closes all three.
+    private var isStopped = false
+    /// Bounded recovery for a declined install. See `scheduleDeclineRetry`.
+    private var declineRetryTask: Task<Void, Never>?
+    private var declineRetriesUsed = 0
 
     /// Begin capture. Idempotent: calling on an already-running probe is
     /// a no-op. Failures are logged and swallowed — the spectrum meter
@@ -87,6 +103,8 @@ final class MicProbe: @unchecked Sendable {
     @MainActor
     func start() {
         guard !engine.isRunning else { return }
+        isStopped = false
+        declineRetriesUsed = 0
         lock.lock(); pcm = []; lock.unlock()
 
         // **Both observers are installed BEFORE the tap goes in, and the
@@ -149,6 +167,9 @@ final class MicProbe: @unchecked Sendable {
 
     @MainActor
     func stop() {
+        isStopped = true
+        declineRetryTask?.cancel()
+        declineRetryTask = nil
         deviceObservationTask?.cancel()
         deviceObservationTask = nil
         if let observer = configChangeObserver {
@@ -206,6 +227,7 @@ final class MicProbe: @unchecked Sendable {
     /// `withTaskCancellationHandler` would need.
     deinit {
         deviceObservationTask?.cancel()
+        declineRetryTask?.cancel()
         if let observer = configChangeObserver {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -267,13 +289,25 @@ final class MicProbe: @unchecked Sendable {
     ///
     /// The residual is the few instructions between the gate's `live` read
     /// and `installTap`; a switch landing anywhere earlier makes the gate
-    /// *decline*, and the config-change observer retries once it lands —
-    /// a moment of flat meter, not a dead screen. Verify by hand against a
-    /// Bluetooth headset, where the switch is slowest. If a reporter's
-    /// `OBJC THROW` ever names `com.apple.coreaudio.avfaudio` on a build
-    /// ≥ 0.1.14, the fix is to make the install **wait** for the switch —
-    /// not to move the pin back, which restores the silent-wrong-device
-    /// bug.
+    /// *decline* instead — a moment of flat meter, not a dead screen.
+    ///
+    /// **What makes that second half true is `scheduleDeclineRetry`, and it
+    /// is worth knowing why the obvious answer was wrong.** An earlier
+    /// revision of this comment credited the recovery to the
+    /// `.AVAudioEngineConfigurationChange` observer. That was false on the
+    /// path that matters: `rebuild()` stops the engine *before* calling in, a
+    /// declined install throws before `engine.start()`, and a stopped engine
+    /// posts no further configuration change — so the promised signal was
+    /// precisely the one that could not arrive, and a single unlucky picker
+    /// switch left a dead meter for the rest of the screen. The observer still
+    /// covers `start()`'s own first install, where the engine is not stopped
+    /// by us; the ladder covers the rebuild path.
+    ///
+    /// Verify by hand against a Bluetooth headset, where the switch is
+    /// slowest. If a reporter's `OBJC THROW` ever names
+    /// `com.apple.coreaudio.avfaudio` on a build ≥ 0.1.14, the fix is to make
+    /// the install **wait** for the switch — not to move the pin back, which
+    /// restores the silent-wrong-device bug.
     ///
     /// `@MainActor` because `AudioDeviceManager` is; both callers
     /// (`start()`, `rebuild()`) already were, so no isolation changes.
@@ -405,23 +439,76 @@ final class MicProbe: @unchecked Sendable {
     }
 
     /// Stop and re-arm capture. Reached from the device-observation loop
-    /// (the picker) and from the `.AVAudioEngineConfigurationChange`
-    /// observer — so it is also the retry that recovers a rejected
-    /// install.
+    /// (the picker), from the `.AVAudioEngineConfigurationChange` observer,
+    /// and from the decline retry below.
     ///
     /// It deliberately does **not** pin the device itself: that belongs
     /// to `installTapAndStart()`, where no caller can forget it. This
     /// method having its own half of the setup is the shape that
     /// produced issue #86.
+    ///
+    /// **It stops the engine before it re-installs, and that is what makes a
+    /// decline terminal without the retry below.** A declined install throws
+    /// before `engine.start()`, so this method's own `engine.stop()` is the
+    /// last thing that ran — and a stopped engine posts no further
+    /// `.AVAudioEngineConfigurationChange` (see `installTapAndStart`), so the
+    /// notification that would have re-armed it is exactly the one that
+    /// cannot arrive. Nothing else is watching: the observation loop only
+    /// wakes on the *next* `selectedUID` change, which means a user who
+    /// switched microphone once would sit in front of a dead meter until they
+    /// switched again.
     @MainActor
     private func rebuild() {
+        guard !isStopped else { return }
         engine.stop()
         do {
             try installTapAndStart()
+            declineRetriesUsed = 0
         } catch {
             Self.log.error("mic probe rebuild failed: \(error.localizedDescription, privacy: .public)")
+            scheduleDeclineRetry(after: error)
         }
     }
+
+    /// Re-attempt an install the format gate declined, on a short bounded
+    /// ladder. **The recovery for this path, because the notification is not.**
+    ///
+    /// A decline means the node's format changed between the gate's two reads
+    /// — i.e. the device switch this install provoked is still landing. That is
+    /// a wait, not a failure, so the answer is to look again shortly rather
+    /// than to surface anything to the user.
+    ///
+    /// **The ladder is bounded and the delays are chosen, not arbitrary.**
+    /// Three attempts at 150 / 400 / 900 ms: the first covers a built-in or USB
+    /// switch, the last covers a Bluetooth headset, which is the slowest switch
+    /// this screen sees and the one the hand-verification protocol names. It
+    /// gives up after that rather than retrying forever — a switch still not
+    /// landed after ~1.5 s is a different problem, and the user can always pick
+    /// again, which re-enters through the observation loop with a fresh budget.
+    /// The counter resets on any successful install and on `start()`.
+    ///
+    /// Only `.inputFormatNotInstallable` retries. An engine-start failure or a
+    /// converter failure will not fix itself by waiting, and spinning on one
+    /// would be the retry storm this bound exists to avoid.
+    @MainActor
+    private func scheduleDeclineRetry(after error: Swift.Error) {
+        guard case MicProbe.Error.inputFormatNotInstallable = error else { return }
+        guard !isStopped, declineRetriesUsed < Self.declineRetryDelaysMs.count else { return }
+        let delay = Self.declineRetryDelaysMs[declineRetriesUsed]
+        declineRetriesUsed += 1
+
+        declineRetryTask?.cancel()
+        declineRetryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(delay))
+            guard let self, !Task.isCancelled, !self.isStopped else { return }
+            self.declineRetryTask = nil
+            self.rebuild()
+        }
+    }
+
+    /// Backoff for `scheduleDeclineRetry`, in milliseconds. Length is the
+    /// attempt budget.
+    private static let declineRetryDelaysMs = [150, 400, 900]
 
     private func handleTap(_ inBuffer: AVAudioPCMBuffer) {
         guard let converter, let outputFormat else { return }
