@@ -18,6 +18,8 @@ tags: [vad, silero, pause-detection, chunking, transcription, gemini, adaptive, 
 
 ## Context
 
+*(This section describes the state before PR #38, which is the problem this decision was made against. The force-cut is 180 s today.)*
+
 NoType records push-to-talk audio and sends chunked AAC blobs to Gemini for transcription. Where a chunk ends is decided by VAD-driven pause detection: when Silero reports ≥N consecutive unvoiced frames, emit a chunk boundary. A fixed pause threshold of 1.0 s catches end-of-thought pauses cleanly for short utterances, but loses gracefully on long monologues — a user dictating an email for two minutes typically pauses ~300–700 ms to inhale, never the full 1 s, so the detector holds the chunk open until a 30 s hard force-cut chops it mid-sentence. The mid-sentence cut shows up as a duplicated word at the seam (300 ms pre-roll overlap) and an awkward space when the model can't tell whether the chunk-internal silence was end-of-clause or breath.
 
 ~~Underneath, there's also a network-budget constraint: Gemini's `URLSessionConfiguration.timeoutIntervalForResource` caps the whole request. Past a chunk size of ~40 s of audio, the upload + Gemini wall-clock starts pressing on a 30 s timeout. Long chunks aren't just an artefact problem; they're a network reliability problem too.~~

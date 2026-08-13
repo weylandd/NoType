@@ -19,7 +19,7 @@ related_components: [Gemini, Recording, AppState]
 
 ## Context
 
-`GeminiClient` drops `URLSession`'s pooled connections before a network-class retry (R28 / KTD13 of `docs/plans/2026-08-11-001-fix-dictation-delivery-reliability-plan.md`). The failure that motivated it presented as a dead pooled *connection* rather than a dead network — a request stalled for the full 30 s budget while the same payload answered in 1.7 s on a new connection moments later — so re-issuing over the same socket re-inherits the fault and merely doubles the wait. `flushPooledConnections()` therefore runs mid-session, inside `sendRequest`'s retry loop, while other work may be in flight. Whether that is safe needs an argument. The shipped one was:
+`GeminiClient` drops `URLSession`'s pooled connections before a network-class retry (R28 / KTD13 of `docs/plans/2026-08-11-001-fix-dictation-delivery-reliability-plan.md`). The failure that motivated it presented as a dead pooled *connection* rather than a dead network — a request stalled for the whole request budget — a flat 30 s at the time it was measured, since replaced by a per-request function of the audio-part count — while the same payload answered in 1.7 s on a new connection moments later — so re-issuing over the same socket re-inherits the fault and merely doubles the wait. `flushPooledConnections()` therefore runs mid-session, inside `sendRequest`'s retry loop, while other work may be in flight. Whether that is safe needs an argument. The shipped one was:
 
 ```swift
 /// Safe to call mid-session because of invariant I1 — at most one

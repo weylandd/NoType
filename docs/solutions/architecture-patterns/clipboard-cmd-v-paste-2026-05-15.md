@@ -18,13 +18,15 @@ tags: [paste, clipboard, accessibility, cgevent, electron, ime]
 
 ## Context
 
-NoType needs to insert the final transcript at the user's cursor in whatever app is focused at release time. Three candidates were considered:
+NoType needs to insert the final transcript at the user's cursor in the app the transcript belongs to. Three candidates were considered:
 
 1. **AX text injection** — write the value via `AXValue` on the focused element.
 2. **Per-character synthetic key events** — type each character via `CGEvent.keyboardEventSource`.
 3. **Pasteboard + ⌘V** — copy to `NSPasteboard.general`, post a synthetic ⌘V, restore the prior clipboard contents after a short delay.
 
 ## Guidance
+
+**"Whatever app is focused" is no longer the destination rule, and that matters here specifically.** ⌘V is unaddressed by construction — it goes to whichever process is frontmost when the event is posted, which is the property that makes this approach universal *and* the property that makes it dangerous after a slow transcription. So the destination is decided one layer up, before the event is posted: the paste is withheld unless the frontmost process still matches the one the user was in when they **stopped** recording. Nothing about the mechanism below changes; there is simply a gate in front of it, and a withheld transcript goes to history with a notice instead. See `NoType/Recording/CLAUDE.md` "Destination guard".
 
 **Use the pasteboard path** (`NoType/Injection/TextInjector.swift`):
 

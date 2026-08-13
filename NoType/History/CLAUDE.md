@@ -8,14 +8,15 @@ Two siblings: the rolling **last-10** transcript window (`HistoryStore`) and the
 - `HistoryEntry.swift` — `Codable` model shared by both stores.
 - `StatsStore.swift` — `actor` for `stats.json`: totals + per-day + per-app aggregates.
 - `RetainedAudioStore.swift` — `@MainActor` in-memory holder for a broken row's failed-chunk audio, keyed by `HistoryEntry.id`. Never serialized; eviction mirrors the ten-entry cap via `retain(only:)`.
-- `RetryMerge.swift` — pure gap-slot merge: how a retry's per-chunk results land back in the row they were re-sent from. Consumed by `AppState.retryEntry(id:)` / `settleRetry`.
+- `HistoryText.swift` — the row's one string: `assemble(_:)` renders the stored sequence (each gap as `[…]`) through `TextInjector.stitchChunks`, and `rendered(_:replacements:)` applies the user's *current* dictionary pairs on top. Display, copy and word-count all call it, which is what makes them agree by construction.
+- `RetryMerge.swift` — pure gap-slot merge: how a retry's per-chunk results land back in the row they were re-sent from, **written into the gap segment covering each chunk's own index**. Consumed by `AppState.retryEntry(id:)` / `settleRetry`.
 
 ## Invariants
 
 1. **`HistoryStore` cap = 10.** Append at the cap drops the oldest.
 2. **`allEntries()` returns oldest-first**; popover and `HomeView` sort newest-first for display. **It decodes the array row-by-row: a row that cannot be decoded is dropped and the rest load.** `history.json` is a bare top-level array, so decoding it as `[HistoryEntry]` meant one unreadable row threw for the whole file, `JSONFileStorage` renamed it aside, and the user's history came back empty — ten transcripts lost to one bad field. Per-row tolerance was the maintainer's product ruling, made knowing the trade: the renamed file was a complete, hand-recoverable copy, and **a dropped row has no copy anywhere**. Two boundaries hold it in place — damage that can't be split into rows at all (truncated write, non-JSON, top-level object) still takes the whole-file rename path, and nothing is defaulted into existence, so a row missing its `id` or `timestamp` is dropped rather than fabricated. A drop is logged at `.error` (persisted; count and positions only, never the transcript) — the only trace it leaves.
-3. **`remove(id:)` is a no-op if the id isn't present.** Drives the popover's per-row trash button through `AppState.deleteHistoryEntry(id:)`: optimistic in-memory update + fire-and-forget disk write. **`update(_:)` shares that contract** — it replaces the row with the matching id **in place** and no-ops when absent. In place, not remove-then-append: a retry rewrites a broken row's text and failure count without changing what the row *is*, and re-appending would reorder the last-10 list and move the trim onto a different victim.
-4. **Nothing audio-shaped is ever persisted** (architecture invariant I4). `history.json` stores `text` and `failedChunkCount` — never audio. The one carve-out is `RetainedAudioStore`, which holds a broken row's failed-chunk audio **in memory only, for the lifetime of the process**, keyed by that row's id. It is never serialized: not into `history.json` beside the entry, not into a side-car, not into a crash-recovery cache. That is why a row whose process died comes back **dead** (rendered as broken, minus the retry action) — the audio being gone is the designed outcome, not a gap to fill. Adding `Codable` to `RetainedRecording`, or persisting the holder, is a scope violation rather than a refactor; `RetainedRecordingTests.test_retainedRecording_isNotSerializable` is the mechanical half of that guard. Release triggers and the single eviction point (`retain(only:)`) are documented on `RetainedAudioStore` itself.
+3. **`remove(id:)` is a no-op if the id isn't present.** Drives the popover's per-row trash button through `AppState.deleteHistoryEntry(id:)`: optimistic in-memory update + fire-and-forget disk write. **`update(_:)` shares that contract** — it replaces the row with the matching id **in place** and no-ops when absent. In place, not remove-then-append: a retry rewrites a broken row's response sequence — writing recovered text into the gaps that recovered — without changing what the row *is*, and re-appending would reorder the last-10 list and move the trim onto a different victim. (The failure count is not rewritten; it is derived from the sequence, so it falls out of the same write.)
+4. **Nothing audio-shaped is ever persisted** (architecture invariant I4). `history.json` stores a row's **response sequence** — per segment, the chunk positions it covered and either the model's raw text or a gap — plus the two legacy mirrors `text` and `failedChunkCount` (KTD10, see Schema). Never audio, and the sequence is the field a future change is most likely to reach for: a segment carries the *positions* a re-send would need, deliberately not the bytes. The one carve-out is `RetainedAudioStore`, which holds a broken row's failed-chunk audio **in memory only, for the lifetime of the process**, keyed by that row's id. It is never serialized: not into `history.json` beside the entry, not into a side-car, not into a crash-recovery cache. That is why a row whose process died comes back **dead** (rendered as broken, minus the retry action) — the audio being gone is the designed outcome, not a gap to fill. Adding `Codable` to `RetainedRecording`, or persisting the holder, is a scope violation rather than a refactor; `RetainedRecordingTests.test_retainedRecording_isNotSerializable` is the mechanical half of that guard. Release triggers and the single eviction point (`retain(only:)`) are documented on `RetainedAudioStore` itself.
 5. **`StatsStore` keeps derived counts only — no transcripts.** Honours the nothing-audio-on-disk + history-cap=10 privacy posture; a user who clears history doesn't have transcripts hiding in stats either.
 6. **Local-TZ day keys** (`Calendar.autoupdatingCurrent`) — a session at 23:45 May 11 local lands in the May 11 bucket, not May 12 UTC.
 7. **Last-seen display name wins** in `appBuckets[bundleID].name`. App renames pick up without manual reconciliation.
@@ -37,24 +38,74 @@ Two siblings: the rolling **last-10** transcript window (`HistoryStore`) and the
 
 ```swift
 struct HistoryEntry: Codable, Identifiable, Sendable {
+    struct Segment: Codable, Sendable, Equatable {
+        let chunkIndices: [Int]    // the positions this one Gemini answer covered; never empty
+        let text: String?          // raw, pre-replacement; `nil` IS the gap
+        var isGap: Bool { text == nil }
+    }
+
     let id: UUID
-    let text: String
+    let text: String               // legacy mirror (KTD10): the string that was pasted
     let sourceAppName: String      // "Slack"
     let sourceBundleID: String     // "com.tinyspeck.slackmacgap"
     let timestamp: Date
     let durationSeconds: Double    // press → release; 0 for pre-duration rows (tolerant decode)
-    let failedChunkCount: Int      // chunks pasted as "[…]"; 0 for pre-retry rows (tolerant decode)
-    var isBroken: Bool { failedChunkCount > 0 }   // computed — never encoded
+    let segments: [Segment]        // the row's source of truth; absence on disk = migrate (R12)
+
+    var failedChunkCount: Int      // derived; also encoded as the second legacy mirror
+    var isBroken: Bool             // segments.contains(where: \.isGap)   — computed, never encoded
+    var isEntirelyLost: Bool       // segments.allSatisfy(\.isGap)        — the never-counted signal
 }
 ```
 
-`failedChunkCount` mirrors `SessionSummary.failedChunkCount`. **Only the count is
-persisted** — the audio those chunks would need for a re-send lives in memory
-(`NoType/Recording/RetainedRecording.swift`) and is deliberately not part of the
-entry. `isBroken` is the single predicate for "this row is broken"; call sites
-read it rather than re-deriving `failedChunkCount > 0`.
+**A gap is a position, not a character (R1).** The row's structure lives in
+`segments`; a lost chunk is a segment whose `text` is `nil`, and the `[…]` the
+user sees is produced at render time by `HistoryText.assemble`. The
+distinction that costs the most to get wrong is `nil` vs `""`: a segment
+holding the empty string is **text** (R27) — that is the hallucination gate
+saying *Gemini answered and we filtered the answer* — so it makes no row
+broken and keeps `isEntirelyLost` honest. Same three-state table as
+`NoType/Recording/CLAUDE.md` "Post-response hallucination gate", carried onto
+disk unchanged.
+
+**Segment text is stored raw, before any dictionary replacement pair (R2).**
+The pairs are applied on the *assembled* string at display and copy time
+(`HistoryText.rendered`, KD2), which is what lets editing a pair change how
+rows already on disk read (R5 / AE7) and what lets a pair whose phrase spans a
+chunk seam still match. It also means `history.json` holds pre-replacement
+text (R31) — presentation-only substitution removes nothing from disk, and the
+file is unencrypted.
+
+**`text` and `failedChunkCount` are write-only legacy mirrors (KTD10).** They
+are still emitted on every row this build writes, because a rollback to a
+pre-sequence build decodes `text` non-optionally and would otherwise throw on
+the whole array — costing the user all ten transcripts rather than one field.
+Nothing in this build reads them back except `init(from:)`'s migration arm,
+where a row carrying no sequence is reconstructed from exactly that pair.
+`failedChunkCount` is *derived* from the sequence here and still mirrors
+`SessionSummary.failedChunkCount` by construction. `isBroken` remains the
+single predicate for "this row is broken"; call sites read it rather than
+re-deriving anything.
+
+The audio a gap would need for a re-send is **not** in the entry — it lives in
+memory (`NoType/Recording/RetainedRecording.swift`, `RetainedAudioStore`) and
+dies with the process, which is why a row read off disk comes back dead.
 
 Storage: `~/Library/Application Support/NoType/history.json`, top-level array of `HistoryEntry`.
+
+**Migration (R12 / KTD10):** the file is a bare top-level array with no version
+envelope, so **absence of `segments`** is the discriminator — the precedent
+`durationSeconds` and `failedChunkCount` already set. A legacy row is
+reconstructed by `migratedSegments(text:failedChunkCount:)`, and its one rule
+is that **the stored count decides brokenness while the text only supplies
+positions**: count zero → one text segment holding the text verbatim (a `[…]`
+the user *dictated* must not turn the row broken); count non-zero → split on
+whatever markers survive and append gaps until the gap count equals the count
+(a replacement pair may have erased some — that row must stay broken). Those
+positions are **ordinal, not recovered**, and nothing may depend on them; a
+row read off disk outlived the process that held its audio, so no retry can
+reach it. A row this build wrote carries a sequence, which makes the marker
+parser structurally unreachable for it.
 
 **`StatsSnapshot` (v5):**
 
@@ -95,7 +146,15 @@ struct StatsSnapshot: Codable, Sendable, Equatable {
 
 `HomeView` reads `statsSummary` (windowed by `HomeRange`: 7D / 30D / 90D / All); only the bottom "Recent transcripts" list reads `history`. The popover reads `history` for the last-10 list.
 
-**Broken rows and retry.** A session that lost chunks in the recoverable class writes a broken row (`failedChunkCount > 0`) rather than being discarded, and `AppState` stores that session's `SessionSummary.retained` payload in `RetainedAudioStore` under the new row's id. `AppState.retryEntry(id:)` re-sends the payload's chunks one at a time and `settleRetry` lands the results through `RetryMerge`; `retryingEntryID` is the single in-flight slot both the popover and the Home tab read, so a retry started in either surface shows as busy in both. Two rules the mirror imposes on this module:
+**Broken rows and retry.** A session that lost chunks in the recoverable class writes a broken row (a sequence carrying at least one gap segment — `isBroken`) rather than being discarded, and `AppState` stores that session's `SessionSummary.retained` payload in `RetainedAudioStore` under the new row's id. `AppState.retryEntry(id:)` re-sends the payload's chunks one at a time and `settleRetry` lands the results through `RetryMerge`; `retryingEntryID` is the single in-flight slot both the popover and the Home tab read, so a retry started in either surface shows as busy in both.
+
+**The merge writes by index; it does not scan.** `RetryMerge.merge(into:outcomes:)` joins `HistoryEntry.Segment.chunkIndices` against `RetainedRecording.Chunk.idx` — the same number, recorded from one `ChunkResponse` — and writes each recovery into the gap covering **that chunk's own position** (R7). A gap spanning several indices splits when only some of them recover; the unrecovered positions on either side stay grouped, because `HistoryText.assemble` emits one `[…]` per gap *segment* and splitting a run that did not recover would multiply the markers the user sees. Remaining gaps are therefore read from the per-chunk results, never by decrementing a count (R11), and the priors sent back to Gemini are the row's text-carrying segments — raw, with a gap contributing nothing (R10).
+
+That replaced a left-to-right scan for the *i*-th `[…]` in `HistoryEntry.text`, and both reasons are worth keeping in view because they are the shape of the bug rather than one instance of it. The mirror is *post-replacement*, so a user pair as ordinary as `…` → `...` left a row that was still broken and still held audio but carried no marker to substitute into — every retry on it billed and recovered nothing. And rebuilding the row from the merged string baked that substitution into storage, after which the raw text was gone from disk and the *current* pairs were re-applied on top of an old one. `settleRetry` uses the `segments:` producing initializer for exactly that reason; the `failedChunkCount:` reconstruction initializer is a migration rule and no in-process producer may reach for it.
+
+**Placement is still reported, never re-derived.** `Merged.placed` says which outcomes' text actually reached the row, and that — not "did Gemini return text" — is what licenses releasing a chunk's audio. Writing by index makes a mismatch rare rather than impossible: a recovery aimed at an index no gap covers (a second run against a row a first already recovered) is reported unplaced and keeps its audio.
+
+Two rules the mirror imposes on this module:
 
 - **The optimistic mirror is part of the eviction input.** `refreshHistory` calls `retainedAudio.retain(only: liveHistoryIDs.union(mirrored))` — reloading from disk alone would evict the audio of a row appended into the mirror whose persist `Task` hasn't run yet, leaving a retry button with nothing behind it.
 - **`RetainedAudioStore.take` hands out the only copy.** Every exit from a retry must re-put what it did not recover, including the recovered-nothing exit. Nothing else holds a reference and no test can observe the loss.
@@ -105,7 +164,8 @@ struct StatsSnapshot: Codable, Sendable, Equatable {
 - `NoTypeTests/HistoryStoreTests` — round-trip, FIFO eviction at the 10-entry boundary, corruption recovery (garbage JSON → renamed → empty list), plus `update(_:)`'s in-place / no-op-when-absent contract and `failedChunkCount`'s tolerant decode. **Per-row tolerance** is pinned against the corpus a full-depth review of U5 measured as file-destroying: each shape as row 2 of 3, plus bad-row-first / last / middle (the first-row case is what proves the element cursor advances past a failure at all), two bad rows, every row bad, an empty array, non-object elements, and the truncated file still taking the whole-file path. Every per-row case also asserts **no `history.json.corrupt-*` sibling appears** — without that half it is a parsing test, not a data-loss test.
 - `NoTypeTests/StatsStoreTests` — empty-state, single record, accumulation across sessions / days / apps, last-seen-name wins, empty-bundle skip, disk persistence round-trip, corruption recovery, day-key format. Per-test temp directory — no shared state.
 - `NoTypeTests/RetainedAudioStoreTests` — put / peek / take / remove, `retain(only:)` as the single eviction path, and the non-serializability guard behind invariant 4.
-- `NoTypeTests/RetryMergeTests` — the pure gap-slot merge: positional marker substitution, what counts as a recovery (`nil` and whitespace-only do not), the `placed` flags the release path reads, and the degrade-safely branches.
+- `NoTypeTests/RetryMergeTests` — the pure gap-slot merge: the index write (including a gap segment splitting when only some of its positions recover, and order-independence of the outcomes array), what counts as a recovery (`nil` and whitespace-only do not), the `placed` flags the release path reads, `priors(from:)`, and the degrade-safely branches.
+- `NoTypeTests/HistoryTextTests` — `assemble` (gap → `[…]`, the `stitchChunks` seam rule, end-trimming) and `rendered` (current pairs applied *after* assembly, so a pair on the ellipsis restyles a gap without moving it), plus display ≡ copy.
 - `NoTypeTests/AppStateRetentionTests` / `AppStateRetryTests` — broken-row recording, mirror-union eviction, the `canRetry` predicate, and the retry run's settle arms.
 - No integration test against the real filesystem — use a temp directory.
 

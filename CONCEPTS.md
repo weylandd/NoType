@@ -31,10 +31,12 @@ A slice of a recording session's audio, cut at a natural speech pause, that is t
 
 Chunks are transcribed in order and at most one transcription request is outstanding per recording session, so chunks that pile up during a slow request are sent together as one batch. Each request returns only its own chunk's text — the full transcript is joined locally, never re-emitted by the model.
 
-### Gap marker
-The placeholder that stands in a delivered transcript where a chunk's transcription failed in a way that could plausibly succeed on a retry. It marks a hole in otherwise-usable text rather than discarding the whole dictation.
+### Gap
+A position in a transcript where a chunk's transcription failed in a way that could plausibly succeed on a retry. It marks a hole in otherwise-usable text rather than discarding the whole dictation.
 
-A gap marker is what makes partial delivery possible: the surviving chunks are still pasted, and the transcript's row is recorded as broken so the lost audio — which is held in memory, never written to disk — can be re-sent. A failure that no retry could fix produces no marker; it ends the session instead.
+A gap is what makes partial delivery possible: the surviving chunks are delivered, and the transcript's row is recorded as broken so the lost audio — which is held in memory, never written to disk — can be re-sent into exactly that position. A failure that no retry could fix produces no gap; it ends the session instead. Delivery is the usual case but not the guaranteed one: a dictation whose destination changed while it was transcribing is withheld rather than pasted, and then the surviving chunks reach the user through the history row instead.
+
+**A gap is a position; the *gap marker* is only how one looks.** The marker — `[…]` — is drawn wherever a gap sits when a transcript is rendered, and the user's dictionary replacement pairs may restyle it like any other text. Nothing structural is read back out of those characters: whether a row is broken, how many chunks it lost, and where a recovery belongs are all answered from the stored positions. This distinction was learned by shipping the other one, where the marker *was* the storage and an ordinary replacement pair on the ellipsis silently erased the user's ability to recover.
 
 ### Network class
 The failure class meaning *the transport itself did not answer* — nothing came back from the server, as opposed to the server answering with a refusal or an error. It is distinguished from every other failure because it is the only one where the connection itself is suspect, so it is the only one whose retry is issued over a fresh connection rather than the one that just went silent.
