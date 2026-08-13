@@ -982,6 +982,202 @@ final class HUDPanelGeometryTests: XCTestCase {
         XCTAssertEqual(RaiseSiteScanner.presenceFailures(inSource: source, rules: Self.fixtureRules), [])
     }
 
+    // MARK: - The error HUD's repeat: coalesce rather than rebuild
+
+    // Failures arrive in bursts — `settleRetry` surfaces one notice per chunk
+    // — and every `showErrorHUD` used to `close()` the live NSPanel and stand
+    // a fresh one up in the same place. A click landing in that window dies
+    // with the panel it started on (SwiftUI needs mouse-down and mouse-up on
+    // one live button), so the user sees an identical card still sitting
+    // there and reports that the X does nothing. Measured on the reporter's
+    // machine 2026-08-13: five rebuilds in 244 ms, no intervening hide, four
+    // sharing one payload.
+
+    private static func payload(
+        title: String = "Gemini rejected the request",
+        description: String = "Unexpected response (HTTP 0).",
+        code: String? = "ERR_GEMINI · 0",
+        retryLabel: String? = nil,
+        secondaryLabel: String? = nil
+    ) -> ErrorPayload {
+        ErrorPayload(
+            title: title,
+            description: description,
+            code: code,
+            retryLabel: retryLabel,
+            secondaryLabel: secondaryLabel
+        )
+    }
+
+    func test_coalesce_repeatOfTheVisibleActionlessNotice_isTreatedAsARepeat() {
+        // The reporter's exact card: a session-failure notice carrying
+        // `GeminiError.http(status: 0, …)` and no action button.
+        XCTAssertTrue(
+            HUDController.shouldCoalesceError(showing: Self.payload(), incoming: Self.payload()),
+            "The burst case. Rebuilding here is what swallows the click."
+        )
+    }
+
+    func test_coalesce_refusesWhenNoErrorHUDIsUp() {
+        XCTAssertFalse(
+            HUDController.shouldCoalesceError(showing: nil, incoming: Self.payload()),
+            "With nothing on screen there is nothing to coalesce into — the first show must build a panel."
+        )
+    }
+
+    func test_coalesce_refusesADifferentNotice() {
+        // The 503 that arrived beside the HTTP-0s in the same burst. Dropping
+        // it would leave the user reading a stale cause, which is the failure
+        // mode `NoType/UI/CLAUDE.md` protects when it insists the five
+        // recoverable causes stay five distinct sentences.
+        let differsInDescription = Self.payload(description: "Gemini is having trouble (HTTP 503).")
+        XCTAssertFalse(
+            HUDController.shouldCoalesceError(showing: Self.payload(), incoming: differsInDescription)
+        )
+        XCTAssertFalse(
+            HUDController.shouldCoalesceError(
+                showing: Self.payload(), incoming: Self.payload(title: "No internet connection")
+            )
+        )
+        XCTAssertFalse(
+            HUDController.shouldCoalesceError(
+                showing: Self.payload(), incoming: Self.payload(code: "ERR_GEMINI · 503")
+            )
+        )
+    }
+
+    /// The term that is *not* about equality. Handlers are closures and are
+    /// not comparable, so an equal payload does not imply an equal panel —
+    /// coalescing an actionable notice would leave a button running the
+    /// **first** call's handler while the caller believes it installed the
+    /// second's. Swept on both label limbs and on both together.
+    func test_coalesce_refusesAnActionableNotice_evenWhenThePayloadIsEqual() {
+        for (retry, secondary) in [
+            ("Retry", String?.none), (nil, "Open Settings"), ("Retry", "Open Settings")
+        ] as [(String?, String?)] {
+            let actionable = Self.payload(retryLabel: retry, secondaryLabel: secondary)
+            XCTAssertFalse(
+                HUDController.shouldCoalesceError(showing: actionable, incoming: actionable),
+                "retryLabel=\(retry ?? "nil") secondaryLabel=\(secondary ?? "nil"): an equal payload is not an equal panel once a button renders."
+            )
+        }
+    }
+
+    func test_coalesce_isReachedOnlyThroughEqualityOfTheWholePayload() {
+        // Guards against the predicate decaying into a title/code comparison:
+        // two notices agreeing on everything the user reads but differing in
+        // severity or glyph are still different panels.
+        var tinted = Self.payload()
+        tinted.severity = .warning
+        XCTAssertFalse(HUDController.shouldCoalesceError(showing: Self.payload(), incoming: tinted))
+
+        var reglyphed = Self.payload()
+        reglyphed.iconSymbol = "wifi.slash"
+        XCTAssertFalse(HUDController.shouldCoalesceError(showing: Self.payload(), incoming: reglyphed))
+    }
+
+    // MARK: - Which process is painting
+
+    // `HUDPanelGeometry.column` deconflicts panels within one process and can
+    // have no wider scope. Two *processes* each holding a correct column still
+    // superimpose their slot-0 panels exactly, because every HUDPanel is
+    // `.statusBar` level and anchored to the same corner of the same screen —
+    // the identical failure mode `Slot` removed, one level up. A test host is
+    // a full NoType.app that builds `HUDController` directly, so a run of
+    // `AppStateRetryTests` paints real panels over the developer's desktop.
+
+    func test_testHost_isRecognisedByEitherSignalAlone() {
+        XCTAssertTrue(
+            HUDHostEnvironment.isTestHost(environment: [:], xctestLinked: true),
+            "XCTest linked into the process is sufficient — the env key is absent when a bundle is injected."
+        )
+        XCTAssertTrue(
+            HUDHostEnvironment.isTestHost(
+                environment: ["XCTestConfigurationFilePath": "/tmp/x.xctestconfiguration"],
+                xctestLinked: false
+            ),
+            "The configured host is sufficient — the class is absent before the framework loads."
+        )
+    }
+
+    func test_shippingApp_isNotMistakenForATestHost() {
+        // The direction that must never be wrong: a false positive silences
+        // every HUD in the notarized build. Neither signal exists there.
+        XCTAssertFalse(HUDHostEnvironment.isTestHost(environment: [:], xctestLinked: false))
+        XCTAssertFalse(
+            HUDHostEnvironment.isTestHost(
+                environment: ["HOME": "/Users/x", "XCTestConfigurationFilePathXX": "decoy"],
+                xctestLinked: false
+            ),
+            "The key is matched exactly, not by prefix."
+        )
+    }
+
+    func test_thisSuiteIsItselfRunningInARecognisedTestHost() {
+        // The live complement to the pure table above. If this fails, the
+        // predicate is looking for a signal that does not exist in practice
+        // and the suppression is dead code — the silent-pass shape that
+        // `source-scan-guard-fidelity-2026-07-25.md` warns about.
+        XCTAssertTrue(HUDHostEnvironment.isTestHostProcess)
+    }
+
+    // MARK: - Presence guards for the two fixes above
+
+    // Both fixes are one-line consultations inside a body no unit test can
+    // drive (`showErrorHUD` builds an NSPanel; `show()` calls AppKit). Per
+    // `docs/solutions/conventions/source-scan-guard-fidelity-2026-07-25.md`
+    // these assert *presence* at the site, not merely absence elsewhere, and
+    // each pins the destination too — a gate whose guarded action was deleted
+    // is as broken as a missing gate, and an absence-only scan is green on
+    // both.
+
+    func test_presenceGuard_showErrorHUD_stillAsksWhetherThisIsARepeat() throws {
+        let source = try Self.appSource(RaiseSiteScanner.hudControllerPath)
+        let code = LaunchPathScanner.strippingCommentsAndStrings(source)
+        let body = try XCTUnwrap(
+            LaunchPathScanner.functionBodies(in: code).first(where: { $0.name == "showErrorHUD" })?.body,
+            "HUDController.showErrorHUD is no longer declared — the scan lost its subject."
+        )
+        XCTAssertTrue(
+            LaunchPathScanner.line(body, contains: "shouldCoalesceError ("),
+            """
+            HUDController.showErrorHUD no longer consults `shouldCoalesceError`. Every call \
+            then closes the live NSPanel and stands up a replacement, and a click landing in \
+            that window is destroyed with the button it started on — which the user reports, \
+            correctly, as an X that does nothing.
+            """
+        )
+        // The destination: the predicate is only worth consulting if the
+        // rebuild it skips is still what the other branch does.
+        XCTAssertTrue(
+            LaunchPathScanner.line(body, contains: "errorPanel?.close ("),
+            "showErrorHUD no longer rebuilds on the non-repeat path — the coalesce guards nothing."
+        )
+    }
+
+    func test_presenceGuard_hudPanelShow_stillWithholdsPaintingFromATestHost() throws {
+        let source = try Self.appSource(RaiseSiteScanner.hudPanelPath)
+        let code = LaunchPathScanner.strippingCommentsAndStrings(source)
+        let body = try XCTUnwrap(
+            LaunchPathScanner.functionBodies(in: code).first(where: { $0.name == "show" })?.body,
+            "HUDPanel.show is no longer declared — the scan lost its subject."
+        )
+        XCTAssertTrue(
+            LaunchPathScanner.line(body, contains: "HUDHostEnvironment.isTestHostProcess"),
+            """
+            HUDPanel.show no longer gates on HUDHostEnvironment. A test host is a full \
+            NoType.app process, so every NoTypeTests run that builds a HUDController paints \
+            real .statusBar panels over the user's desktop, at the same top-right coordinates \
+            as the installed app's — a cross-process superposition HUDPanelGeometry.column \
+            cannot reach.
+            """
+        )
+        XCTAssertTrue(
+            LaunchPathScanner.line(body, contains: "orderFrontRegardless ("),
+            "HUDPanel.show no longer orders the panel front — the shipping app shows no HUDs at all."
+        )
+    }
+
     // MARK: - Fixture helpers
 
     private static let fixtureRules = [

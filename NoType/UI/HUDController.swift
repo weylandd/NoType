@@ -42,6 +42,10 @@ final class HUDController {
     /// when a new error replaces the current one or the panel is hidden
     /// manually.
     private var errorAutoDismiss: Task<Void, Never>?
+    /// What the live `errorPanel` is currently showing, so a repeat of the
+    /// same notice can be recognised as a repeat. `nil` exactly when
+    /// `errorPanel` is — the two are set and cleared together.
+    private var errorPayload: ErrorPayload?
 
     private let topInset:    CGFloat = 38
     private let rightInset:  CGFloat = 16
@@ -270,15 +274,51 @@ final class HUDController {
     /// previously-visible error HUD — we only ever show the most recent.
     /// Auto-dismisses after `autoDismissAfter` seconds; pass `nil` to
     /// keep the panel up until the user closes it.
+    ///
+    /// **A repeat of the notice already on screen restarts its timer instead
+    /// of rebuilding it**, and that is a correctness fix rather than an
+    /// optimisation. Failures arrive in bursts — `settleRetry` surfaces one
+    /// per chunk, so a three-chunk retry against a dead network produces
+    /// three `surfaceError` calls inside ~30 ms — and each call used to
+    /// `close()` the live `NSPanel` and stand a fresh one up in the same
+    /// place. A click that lands in that window is destroyed with the panel
+    /// it started on: SwiftUI needs the mouse-down and mouse-up on one live
+    /// button, so the mouse-up arrives at a *replacement* button that never
+    /// saw a mouse-down and therefore never fires. The user sees an
+    /// identical card still sitting there and reports, correctly, that the
+    /// X does nothing. Measured on 2026-08-13: five rebuilds in 244 ms with
+    /// no intervening hide, four of them carrying the same payload.
+    ///
+    /// The coalesce is gated on the notice carrying **no actions**, which is
+    /// what makes it provably safe rather than merely cheap. `ErrorPayload`
+    /// is `Equatable`, but the handlers are closures and are not comparable
+    /// — so an equal payload does not imply an equal panel *unless* the
+    /// panel renders no buttons to run them. `ErrorHUD.body` renders its
+    /// actions row only when a label is non-`nil`, so with both labels
+    /// absent the sole interactive element is the X, wired to
+    /// `hideErrorHUD()` on `self` and independent of the payload. The live
+    /// panel is then behaviourally identical to the one this call would
+    /// build, and rebuilding it can only lose a click.
     func showErrorHUD(
         payload: ErrorPayload,
         autoDismissAfter: TimeInterval? = 8,
         onRetry:     (@MainActor () -> Void)? = nil,
         onSecondary: (@MainActor () -> Void)? = nil
     ) {
+        if Self.shouldCoalesceError(showing: errorPayload, incoming: payload) {
+            // No panel-set change and no content change, so the column is
+            // unchanged and `relayout()` would be a no-op that re-orders a
+            // live panel front for nothing. Slot names only, never payload
+            // text — same rule as the layout breadcrumb.
+            Self.log.notice("HUD column: error repeat coalesced")
+            armErrorAutoDismiss(after: autoDismissAfter)
+            return
+        }
+
         errorPanel?.hide()
         errorPanel?.close()
         errorPanel = nil
+        errorPayload = nil
         errorAutoDismiss?.cancel()
 
         let view = ErrorHUD(
@@ -298,14 +338,58 @@ final class HUDController {
             }
         )
         errorPanel = HUDPanel(rootView: view)
+        errorPayload = payload
         relayout()
 
-        if let delay = autoDismissAfter {
-            errorAutoDismiss = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .seconds(delay))
-                guard let self, !Task.isCancelled else { return }
-                self.hideErrorHUD()
-            }
+        armErrorAutoDismiss(after: autoDismissAfter)
+    }
+
+    /// Whether an incoming notice is a repeat of the one already on screen,
+    /// and therefore should restart that panel's timer rather than replace
+    /// the panel.
+    ///
+    /// Pure so the rule is reachable from a test: `showErrorHUD` builds an
+    /// `NSPanel`, and the thing worth pinning here is the decision, not the
+    /// window. `showing` is `nil` when no error HUD is up, which is the same
+    /// bit as `errorPanel == nil` — the two fields are set and cleared
+    /// together, and reading the payload rather than the panel is what keeps
+    /// this callable without AppKit.
+    ///
+    /// Both terms are load-bearing and each removal is a distinct bug:
+    ///
+    /// - **Equal payload.** A *different* notice must replace the panel;
+    ///   coalescing on "an error HUD is up" would silently drop the new
+    ///   cause and leave the user reading a stale one.
+    /// - **No actions.** Handlers are closures and are not comparable, so an
+    ///   equal payload does not imply an equal panel — unless no button is
+    ///   rendered to run them. Coalescing an actionable notice would leave a
+    ///   button wired to the *first* call's handler while the caller
+    ///   believes it installed the second's.
+    nonisolated static func shouldCoalesceError(
+        showing: ErrorPayload?,
+        incoming: ErrorPayload
+    ) -> Bool {
+        guard let showing, showing == incoming else { return false }
+        return incoming.retryLabel == nil && incoming.secondaryLabel == nil
+    }
+
+    /// (Re)start the auto-dismiss countdown for whatever error panel is live.
+    ///
+    /// Extracted so the coalesce path above can restart the clock without
+    /// touching the panel. Always cancels first: a repeat that left the
+    /// original task running would dismiss the notice `delay` seconds after
+    /// the *first* occurrence, which for a burst means the card can vanish
+    /// while its cause is still being reported.
+    private func armErrorAutoDismiss(after delay: TimeInterval?) {
+        errorAutoDismiss?.cancel()
+        guard let delay else {
+            errorAutoDismiss = nil
+            return
+        }
+        errorAutoDismiss = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, !Task.isCancelled else { return }
+            self.hideErrorHUD()
         }
     }
 
@@ -315,6 +399,7 @@ final class HUDController {
         errorPanel?.hide()
         errorPanel?.close()
         errorPanel = nil
+        errorPayload = nil
         relayout()
     }
 }

@@ -152,6 +152,12 @@ final class HUDPanel: NSPanel {
     }
 
     func show() {
+        // A test host is a full `NoType.app` process, so its `HUDController`
+        // paints real `.statusBar`-level `.canJoinAllSpaces` panels over the
+        // developer's desktop — at the *same* top-right coordinates as the
+        // installed app's. See `HUDHostEnvironment` for why that is the one
+        // superposition `HUDPanelGeometry.column` cannot fix.
+        guard !HUDHostEnvironment.isTestHostProcess else { return }
         orderFrontRegardless()
     }
 
@@ -205,4 +211,55 @@ final class HUDPanel: NSPanel {
         }
         setFrameOrigin(origin)
     }
+}
+
+// MARK: - Which process is painting
+
+/// Whether the process running this code is an XCTest host rather than the
+/// shipping app.
+///
+/// **`HUDPanelGeometry.column` deconflicts panels within one process, and
+/// that is the only scope it can have.** Every `HUDPanel` is `.statusBar`
+/// level, `.canJoinAllSpaces`, and anchored to the same top-right corner of
+/// the same screen, so two *processes* each holding a correct column still
+/// superimpose their slot-0 panels exactly — and two borderless panels
+/// stacked in Z with a 22 pt `DSCloseButton` in the same corner is
+/// indistinguishable, to the user, from a close button that does nothing.
+/// That is the identical failure mode `Slot` was introduced to remove, one
+/// level up, and no amount of arithmetic inside one process reaches it.
+///
+/// A test host makes that reachable routinely rather than hypothetically:
+/// `NoTypeTests` builds `HUDController(permissions:)` directly and drives
+/// `AppState` into `surfaceError`, so a run of `AppStateRetryTests` alone
+/// paints real error panels over the developer's desktop — from a process
+/// whose main thread is executing tests, which may exit mid-click, and of
+/// which several can be alive at once alongside the installed app. On
+/// 2026-08-13 the maintainer's `ui.hud` log carries seventeen such hosts in
+/// four minutes, two pairs of them concurrent.
+///
+/// Suppression is deliberately at `HUDPanel.show()` and nowhere else. The
+/// panel object is still constructed, still sized, still positioned through
+/// the column — so `HUDController.errorHUDVisible` stays honest, the
+/// geometry path stays exercised, and `AppStateRetryTests` /
+/// `HistoryRowActionsTests` keep asserting exactly what they asserted
+/// before. The only thing withheld is `orderFrontRegardless()`: painting on
+/// a screen the test does not own.
+enum HUDHostEnvironment {
+    /// Pure seam. `xctestLinked` covers a host that loaded the XCTest
+    /// framework; the environment key covers the host process XCTest
+    /// configures. Either is sufficient — they fail in opposite directions
+    /// (the key is absent when a bundle is injected into an already-running
+    /// process; the class is absent before the framework loads), and a false
+    /// *negative* here is just today's behaviour, while a false positive
+    /// would silence every HUD in the shipping app. Neither signal exists in
+    /// a notarized build, which is what makes the asymmetry safe.
+    static func isTestHost(environment: [String: String], xctestLinked: Bool) -> Bool {
+        xctestLinked || environment["XCTestConfigurationFilePath"] != nil
+    }
+
+    /// Resolved once — neither signal can change during a process's life.
+    static let isTestHostProcess: Bool = isTestHost(
+        environment: ProcessInfo.processInfo.environment,
+        xctestLinked: NSClassFromString("XCTestCase") != nil
+    )
 }
