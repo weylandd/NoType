@@ -1279,43 +1279,35 @@ final class RecordingSession {
     /// The history row for a session whose `stop()` threw after every
     /// dispatched chunk failed recoverably (R6, KTD3).
     ///
-    /// **The text is empty on purpose, and that emptiness is load-bearing
-    /// — but only once now.** It remains how "lifetime stats never
-    /// counted this session" is represented (R15 / KTD7). It no longer
+    /// **The text is empty as a mirror, and nothing reads its emptiness
+    /// any more.** It used to carry two facts on its own. It no longer
     /// decides what the row *shows*: the markers used to be synthesised
     /// from `failedChunkCount` because the stored string carried none,
     /// and `HistoryText.assemble` now renders one per gap segment
-    /// straight from the sequence this factory already stores. The two
-    /// encodings of a gap have collapsed into one (AE2).
+    /// straight from the sequence this factory already stores — the two
+    /// encodings of a gap have collapsed into one (AE2). And it no longer
+    /// carries "lifetime stats never counted this session": that is
+    /// `HistoryEntry.isEntirelyLost` now (R18, KTD11), read off the
+    /// sequence rather than off a string that boundary normalisation and
+    /// replacement pairs both run over. `text: ""` stays because KTD10
+    /// wants the legacy mirror written on every row.
     ///
-    /// The exact invariant, because U6's accounting rests on it and the
-    /// looser version of this sentence is false: **no row that is both
-    /// `isBroken` and empty-texted can come from the success arm.** Not
-    /// "no empty row" — `stop()`'s `guard !stitched.isEmpty` tests the
-    /// *stitch*, and `finalizeForInsertion` (trailing-punctuation strip)
-    /// and `TextReplacementEngine.apply` both run after it, so a session
-    /// whose transcript normalises away does reach `makeHistoryEntry`
-    /// with `text: ""` and is counted. That row is not broken: it has no
-    /// recoverable failure, so `failedChunkCount == 0`. Conversely every
-    /// session that *is* broken had a chunk fail recoverably, and a
-    /// recoverable failure always stitches the `failureMarker` (`[…]`)
-    /// into the transcript — which survives both passes. So on the
-    /// success arm `isBroken` implies non-empty, and `isBroken` plus
-    /// empty means, unambiguously, that this factory built the row,
-    /// nothing was pasted, and `StatsStore.record` was never called.
-    /// **U6 must gate on `isBroken && text.isEmpty`, not `text.isEmpty`
-    /// alone.** A future change that seeds this row with the `[…]`
-    /// markers instead would silently make every recovered session
+    /// **What this factory owes that predicate is the session-side half
+    /// of its argument, and it is `stop()`'s, not this method's:** a
+    /// session whose every response is a gap *throws*
+    /// (`responses.allSatisfy { $0.text == nil }`), so the success arm —
+    /// the one path that reaches `StatsStore.record` — can never produce
+    /// an all-gap sequence, and this factory is the only producer of one.
+    /// Keep those two in step. A change that let a fully-failed session
+    /// reach the success arm, or that seeded this row with anything other
+    /// than gaps, would silently make every recovered session
     /// double-count.
     ///
-    /// The row also carries the session's response sequence, which for
-    /// this factory is **all gaps** — every dispatched chunk failed, so
-    /// every `ChunkResponse` has `text == nil`. That makes the row's
-    /// brokenness structural (R3) rather than a count, and it is the form
-    /// the never-counted signal above is migrating to: "every segment is
-    /// a gap" says the same thing as `isBroken && text.isEmpty` without
-    /// depending on the emptiness of a string that boundary normalisation
-    /// and replacement pairs both run over.
+    /// The row carries the session's response sequence, which for this
+    /// factory is **all gaps** — every dispatched chunk failed, so every
+    /// `ChunkResponse` has `text == nil`. That is what makes the row's
+    /// brokenness structural (R3) rather than a count, and it is what
+    /// `isEntirelyLost` reads.
     ///
     /// Only meaningful once `stop()` has thrown; calling it on a live
     /// session dates the row from `Date()` instead of release time.

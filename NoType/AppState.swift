@@ -1159,14 +1159,16 @@ final class AppState {
         }
         retryingEntryID = nil
 
-        // KTD7. "Lifetime stats never counted this session" is `isBroken &&
-        // text.isEmpty` on the row as it stood *before* this run — read
-        // `RecordingSession.brokenHistoryEntry()`'s doc-comment for why the
-        // conjunction is load-bearing and bare `text.isEmpty` is not. Once
-        // that row carries any recovered text the branch can never be taken
-        // again, which is what makes the session count once across however
-        // many retries it takes (AE9).
-        if row.isBroken && row.text.isEmpty {
+        // KTD11. "Lifetime stats never counted this session" is a
+        // structural fact about the row as it stood *before* this run:
+        // every segment in its sequence was a gap. Read
+        // `HistoryEntry.isEntirelyLost` for why a gate-filtered `""`
+        // segment still counts as text, and why the emptiness of the
+        // legacy `text` mirror is no longer the signal. Once the row
+        // carries any recovered text the branch can never be taken again,
+        // which is what makes the session count once across however many
+        // retries it takes (AE9).
+        if row.isEntirelyLost {
             // R13 / R14, same as the session's own write point: the words
             // counted are the ones the row shows, current pairs applied.
             statsSummary = await statsStore.record(

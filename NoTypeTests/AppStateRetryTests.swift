@@ -461,7 +461,7 @@ final class AppStateRetryTests: XCTestCase {
         XCTAssertTrue(fx.hud.errorHUDVisible)
     }
 
-    // MARK: - Stats accounting (R15 / KTD7)
+    // MARK: - Stats accounting (R18 / KTD11)
 
     func test_retry_onARowWhoseSessionWasAlreadyCounted_addsTokensOnly() async {
         // AE8. The session pasted with gaps, so lifetime stats already
@@ -528,6 +528,51 @@ final class AppStateRetryTests: XCTestCase {
         XCTAssertEqual(
             fx.row(row.id).map { HistoryText.assemble($0.segments) },
             "hello world goodbye"
+        )
+    }
+
+    func test_retry_onARowWhoseOnlyTextSegmentIsAGateFilteredEmptyString_addsTokensOnly() async {
+        // R27 is the trap in R18, and this is the row that springs it.
+        // Chunk 0 failed recoverably; chunk 1's answer
+        // `HallucinationLengthGate` dropped, which stores `text: ""` — a
+        // call that *answered*, not a lost chunk. The session stitched to
+        // "[…]", took the success arm, pasted, and was counted.
+        //
+        // So the never-counted signal must be "every segment is a gap",
+        // not "no segment carries any characters": under the looser
+        // reading this row looks never-counted and its recovery invents a
+        // second session with the transcript's words. `StatsStore.record`
+        // is not idempotent, so nothing downstream would notice.
+        let fx = Fixture(self)
+        let row = fx.appendRow(segments: [
+            .gap(at: [0]),
+            .carrying("", at: [1])
+        ])
+        XCTAssertEqual(
+            row.segments.map(\.text), [nil, ""],
+            "fixture check — a gap beside a gate-filtered empty answer is the whole case"
+        )
+        XCTAssertFalse(
+            row.text.isEmpty,
+            "fixture check — this row pasted \"\(marker)\", so it reached the success arm and was counted"
+        )
+
+        fx.state.retryChunkSender = fx.sender(
+            ["the tenth"],
+            tokens: TokenUsage(input: 700, output: 30, cached: 0)
+        )
+        await fx.state.retryEntry(id: row.id)
+
+        let snap = await fx.stats.summary()
+        XCTAssertEqual(
+            snap.totalSessions, 0,
+            "an empty-text segment is text (R27) — this session was already counted, so its "
+            + "recovery counts no second one"
+        )
+        XCTAssertEqual(snap.totalWords, 0, "and adds no second copy of its words")
+        XCTAssertEqual(
+            snap.dayBuckets[fx.dayKey(row)]?.tokenInput, 700,
+            "the retry's spend is still recorded"
         )
     }
 

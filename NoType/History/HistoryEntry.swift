@@ -113,27 +113,24 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
     /// **no display, copy or accounting reader consults this field any
     /// more** — they all go through `HistoryText.rendered`, which
     /// assembles the sequence and applies the user's *current* pairs
-    /// (R13). Two readers are left:
+    /// (R13). Exactly one reader is left:
     ///
     /// - `init(from:)` below, for a legacy row that carries no sequence.
     ///   There the text is the only record of where the gaps were, which
     ///   is exactly what R12's migration reads it for. Permanent.
-    /// - `AppState.settleRetry`, which reads `isBroken && text.isEmpty` as
-    ///   its "lifetime stats never counted this session" signal. Temporary
-    ///   — U8 replaces it with the segment-derived form ("every segment is
-    ///   a gap"), which says the same thing without depending on the
-    ///   emptiness of a string that boundary normalisation and replacement
-    ///   pairs both run over.
     ///
-    /// A **retry no longer *merges* through this field** — the stats gate
-    /// in the bullet above is the one retry-side reader that survives, and
-    /// it reads the string's emptiness rather than its contents. The merge
-    /// used to scan this string for markers, which failed outright
-    /// on a row whose `[…]` a replacement pair had rewritten, and — worse —
+    /// **The retry path reads nothing here at all.** It used to twice. The
+    /// merge scanned this string for markers, which failed outright on a
+    /// row whose `[…]` a replacement pair had rewritten, and — worse —
     /// rebuilt the row's sequence from the merged post-replacement string,
-    /// destroying the raw text on disk. `RetryMerge` writes by chunk index
-    /// now and `settleRetry` uses the `segments:` initializer below, so
-    /// this stays a mirror on every path that produces a row.
+    /// destroying the raw text on disk; `RetryMerge` writes by chunk index
+    /// now and `settleRetry` uses the `segments:` initializer below. And
+    /// `settleRetry`'s stats gate read `isBroken && text.isEmpty` as its
+    /// "lifetime stats never counted this session" signal; that is
+    /// `isEntirelyLost` below now (R18, KTD11), which says the same thing
+    /// without depending on the emptiness of a string that boundary
+    /// normalisation and replacement pairs both run over. So this stays a
+    /// pure mirror on every path that produces a row.
     let text: String
 
     let sourceAppName: String
@@ -197,6 +194,58 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
     /// gone, and there is one encoding of the fact.
     var isBroken: Bool { segments.contains(where: \.isGap) }
 
+    /// True when **every** segment is a gap — the structural form of
+    /// "lifetime statistics never counted this session" (R18, KTD11).
+    ///
+    /// `AppState.settleRetry` is the only reader. A retry that recovers
+    /// text either counts the session it recovered (`StatsStore.record`)
+    /// or folds only its spend (`recordTokens`), and this predicate picks
+    /// between them. `record` is not idempotent, so getting it wrong in
+    /// either direction is a silent accounting defect — and this is what
+    /// makes a recovered session count exactly once across however many
+    /// retries it takes (AE9): the first recovery writes text into a gap,
+    /// after which the sequence carries a text segment and this is false
+    /// forever.
+    ///
+    /// **An empty-text segment is text, and that is the whole trap
+    /// (R27).** The looser reading — "no segment carries any *characters*"
+    /// — is wrong on a row that really exists: a session where one chunk
+    /// failed recoverably and another's answer `HallucinationLengthGate`
+    /// dropped stores a gap beside a `text: ""` segment, stitches to
+    /// `[…]`, takes the **success** arm, pastes, and is counted. Reading
+    /// that row as never-counted would double-count it the moment its gap
+    /// recovered. The gate's `""` means *Gemini answered and we filtered
+    /// the answer*, which is a call that succeeded; only `nil` is a lost
+    /// chunk.
+    ///
+    /// **Why this is exactly the never-counted set.** `stop()` throws
+    /// when every response is a gap, so the success arm — the one path
+    /// that reaches `StatsStore.record` — can never produce an all-gap
+    /// sequence. The only producer of one is
+    /// `RecordingSession.brokenHistoryEntry()`, which builds the row for
+    /// the session that threw: nothing was pasted and nothing was
+    /// counted.
+    ///
+    /// **It rests on `segments` never being empty**, because `allSatisfy`
+    /// is vacuously true over an empty array and would report a row with
+    /// no positions at all as never-counted. Both construction paths
+    /// guarantee it — the initializer below normalises an empty sequence
+    /// to a single text segment *for this predicate*, and `init(from:)`
+    /// reconstructs rather than storing one. There is deliberately no
+    /// second emptiness check here: a term no input can reach is dead
+    /// code that reads like a live guard.
+    ///
+    /// **The migration can fabricate an all-gap sequence for a row that
+    /// was counted, and that is unreachable rather than tolerated.**
+    /// `migratedSegments("[…]", failedChunkCount: 1)` yields `[gap]` —
+    /// the legacy shape of the gate-filtered row above. A row read off
+    /// disk outlived the process whose memory held its audio, so
+    /// `canRetry` is already false for it and `settleRetry` never sees
+    /// it. An in-process producer reaching for the `failedChunkCount:`
+    /// initializer re-opens this, which is the same exposure that
+    /// initializer's own doc-comment records.
+    var isEntirelyLost: Bool { segments.allSatisfy(\.isGap) }
+
     /// The producing initializer: a row built from a session's own response
     /// sequence, with `text` as the string that was pasted.
     ///
@@ -208,9 +257,9 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
     ///
     /// An empty `segments` is normalised to a single text segment rather
     /// than stored: a row with no positions at all would report
-    /// `failedChunkCount == 0` and `isBroken == false` correctly, but "every
-    /// segment is a gap" is vacuously *true* over an empty array, which is
-    /// the shape the never-counted-session signal reads. Reachable only if
+    /// `failedChunkCount == 0` and `isBroken == false` correctly, but
+    /// `isEntirelyLost` — "every segment is a gap", the never-counted
+    /// signal — is vacuously *true* over an empty array. Reachable only if
     /// a session ends with no responses at all.
     init(
         id: UUID,

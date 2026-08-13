@@ -299,7 +299,7 @@ final class HistoryStoreTests: XCTestCase {
         let segments = HistoryEntry.migratedSegments(text: "", failedChunkCount: 3)
         XCTAssertEqual(segments, [.gap(at: [0]), .gap(at: [1]), .gap(at: [2])])
         XCTAssertTrue(segments.allSatisfy(\.isGap),
-            "every segment is a gap — the shape the never-counted-session signal reads")
+            "every segment is a gap — the shape `HistoryEntry.isEntirelyLost` reads")
     }
 
     /// The other direction of "the count decides": a marker beyond the
@@ -613,9 +613,12 @@ final class HistoryStoreTests: XCTestCase {
     }
 
     /// The sequence is never empty. `isBroken` and `failedChunkCount` read
-    /// an empty array correctly, but "every segment is a gap" is vacuously
-    /// *true* over one — the shape the never-counted-session signal reads —
-    /// so the degenerate case is normalised away at construction instead.
+    /// an empty array correctly, but `isEntirelyLost` — "every segment is a
+    /// gap", the never-counted-session signal — is vacuously *true* over
+    /// one, so the degenerate case is normalised away at construction
+    /// instead. This is the only place that guarantee is pinned, and
+    /// `isEntirelyLost` carries no emptiness term of its own precisely
+    /// because it holds.
     func test_segments_areNeverEmpty() {
         let noResponses = HistoryEntry(
             id: UUID(),
@@ -628,8 +631,9 @@ final class HistoryStoreTests: XCTestCase {
         )
         XCTAssertEqual(noResponses.segments, [.carrying("", at: [0])])
         XCTAssertFalse(noResponses.isBroken)
-        XCTAssertFalse(noResponses.segments.allSatisfy(\.isGap),
-            "an empty sequence must not read as 'every segment is a gap'")
+        XCTAssertFalse(noResponses.isEntirelyLost,
+            "an empty sequence must not read as never-counted — that would let a retry "
+            + "of such a row count a session `StatsStore.record` may already have counted")
     }
 
     /// The pre-sequence decoder, copied verbatim from the build this shape
