@@ -795,55 +795,96 @@ final class HUDPanelGeometryTests: XCTestCase {
         )
     }
 
-    /// The decline path's recovery, pinned where a unit test cannot reach.
+    /// The three properties of `MicProbe`'s arm/re-arm path that no unit test
+    /// can reach, and that each cost a shipped defect to learn.
     ///
-    /// `rebuild()` is private on a class that owns a live `AVAudioEngine`, so
-    /// none of this is drivable from a test. What can be checked is that the
-    /// wiring is still *written*: the stopped-latch guard, and the retry call
-    /// in the arm that catches a declined install. Both were added because the
-    /// promised recovery — the configuration-change observer — provably cannot
-    /// fire on a path where `rebuild()` has already stopped the engine.
+    /// `rebuild()`, `armCapture` and `installTapAndStart` are private on a
+    /// class that owns a live `AVAudioEngine`, so none of this is drivable.
+    /// What can be checked is that the wiring is still *written*:
     ///
-    /// Same documented limits as every other source scan here: this proves the
+    /// 1. **Nothing arms on the main actor.** `engine.start()` blocks — 31 ms
+    ///    for the built-in microphone, 4523 ms for an iPhone over Continuity —
+    ///    so an arm on the main actor freezes the window for the whole
+    ///    handshake, which users report as a failed connection. Every arm goes
+    ///    through `armCapture`, and `armCapture` hands the work to
+    ///    `engineQueue`.
+    /// 2. **`rebuild()` refuses to run after `stop()`.** It is woken from three
+    ///    background jobs; one enqueued as the user leaves re-opens the
+    ///    microphone on a screen nobody is looking at.
+    /// 3. **A declined install schedules its own bounded retry.** The
+    ///    configuration-change observer cannot recover that path — the engine
+    ///    is already stopped by then and a stopped engine posts no
+    ///    configuration change.
+    ///
+    /// Same documented limits as every other source scan here: it proves the
     /// statements are present, not that they are reached, and a rename fails it
-    /// loudly rather than silently.
-    func test_micProbe_theDeclinePathStillGuardsOnStopAndSchedulesItsOwnRetry() throws {
+    /// loudly rather than silently. Note property 1 is checked as "every call
+    /// site is inside `armCapture`" rather than through a `RaiseSiteScanner`
+    /// rule, because the needle would also match the method's own declaration,
+    /// which sits at type scope and would read as an unguarded call.
+    func test_micProbe_everyArmIsOffTheMainActorGuardedAndRecoverable() throws {
         let source = try Self.appSource(RaiseSiteScanner.micProbePath)
         let code = LaunchPathScanner.strippingCommentsAndStrings(source)
         let bodies = LaunchPathScanner.functionBodies(in: code)
 
-        let rebuild = try XCTUnwrap(
-            bodies.first { $0.name == "rebuild" },
-            "MicProbe no longer declares `rebuild` — the scan lost its subject."
+        func body(_ name: String) throws -> String {
+            try XCTUnwrap(
+                bodies.first { $0.name == name }?.body,
+                "MicProbe no longer declares `\(name)` — the scan lost its subject."
+            )
+        }
+
+        // 1. Every arm is dispatched, and both entry points go through it.
+        let arm = try body("armCapture")
+        XCTAssertTrue(
+            LaunchPathScanner.line(arm, contains: "engineQueue.async"),
+            """
+            `armCapture` no longer hands the work to `engineQueue`. `engine.start()` blocks for \
+            seconds on a Continuity device, so arming on the main actor freezes the window for \
+            the whole handshake.
+            """
         )
         XCTAssertTrue(
-            LaunchPathScanner.line(rebuild.body, contains: "guard !isStopped"),
+            LaunchPathScanner.line(arm, contains: "installTapAndStart ("),
+            "`armCapture` no longer installs the tap — the dispatch wrapper is now a no-op."
+        )
+        for caller in ["start", "rebuild"] {
+            XCTAssertTrue(
+                LaunchPathScanner.line(try body(caller), contains: "armCapture ("),
+                """
+                `\(caller)()` no longer arms through `armCapture`, so it is arming on the main \
+                actor again — the blocking-start freeze is back on that path.
+                """
+            )
+        }
+
+        // 2. The stopped-latch.
+        XCTAssertTrue(
+            LaunchPathScanner.line(try body("rebuild"), contains: "guard !isStopped"),
             """
             `rebuild()` no longer refuses to run after `stop()`. It is reached from three \
-            `Task { @MainActor }` bodies, and one enqueued before the user left the mic-check \
-            step re-opens the microphone on a screen nobody is looking at.
-            """
-        )
-        XCTAssertTrue(
-            LaunchPathScanner.line(rebuild.body, contains: "scheduleDeclineRetry ("),
-            """
-            `rebuild()` no longer schedules a retry when an install is declined. A declined \
-            install throws before `engine.start()`, leaving the engine this method already \
-            stopped — and a stopped engine posts no configuration change, so nothing else \
-            re-arms the meter until the user picks a device again.
+            background jobs, and one enqueued before the user left the mic-check step re-opens \
+            the microphone on a screen nobody is looking at.
             """
         )
 
-        let retry = try XCTUnwrap(
-            bodies.first { $0.name == "scheduleDeclineRetry" },
-            "MicProbe no longer declares `scheduleDeclineRetry` — the recovery is gone."
-        )
+        // 3. The decline recovery, and its bound.
         XCTAssertTrue(
-            LaunchPathScanner.line(retry.body, contains: "declineRetriesUsed <"),
+            LaunchPathScanner.line(arm, contains: "scheduleDeclineRetry ("),
+            """
+            A declined install no longer schedules a retry. It throws before `engine.start()`, \
+            leaving the engine `armCapture` already stopped — and a stopped engine posts no \
+            configuration change, so nothing else re-arms the meter until the user picks a \
+            device again.
+            """
+        )
+        let retry = try body("scheduleDeclineRetry")
+        XCTAssertTrue(
+            LaunchPathScanner.line(retry, contains: "declineRetriesUsed <"),
             "The retry ladder lost its bound — an unbounded re-attempt loop is a retry storm."
         )
         XCTAssertTrue(
-            LaunchPathScanner.line(retry.body, contains: "inputFormatNotInstallable"),
+            LaunchPathScanner.line(retry, contains: "inputFormatNotInstallable"),
             """
             The retry is no longer restricted to a declined install. An engine-start or \
             converter failure does not fix itself by waiting, and retrying one spins.

@@ -95,6 +95,38 @@ final class MicProbe: @unchecked Sendable {
     /// Bounded recovery for a declined install. See `scheduleDeclineRetry`.
     private var declineRetryTask: Task<Void, Never>?
     private var declineRetriesUsed = 0
+    /// Serialises every mutation of `engine` — pin, tap install, start, stop.
+    ///
+    /// **This exists because `engine.start()` blocks, and for one class of
+    /// device it blocks for seconds.** Measured on 2026-08-13, same code path
+    /// for both: the built-in microphone starts in 31 ms, an iPhone reached
+    /// over Continuity (`'ccwd'` transport) takes **4523 ms** — the handshake
+    /// that wakes the phone — and then delivers audio perfectly normally.
+    /// Running that on the main actor freezes the whole window for four and a
+    /// half seconds, which reads to the user as "it failed to connect", and
+    /// it is reachable from the device picker.
+    ///
+    /// A serial queue rather than an actor, matching `AudioRecorder.ioQueue`:
+    /// the work is a strictly ordered sequence of C API calls with no
+    /// suspension points, and it must not interleave with itself. It also
+    /// takes the whole install *out* of Swift-concurrency job context —
+    /// relevant because an ObjC raise unwinding through `libswift_Concurrency`
+    /// is what corrupts the process's main-executor identity, and a dispatch
+    /// block pushes no `ExecutorTrackingInfo` node to orphan. See
+    /// `docs/solutions/runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md`.
+    private let engineQueue = DispatchQueue(
+        label: "app.notype.onboarding.micprobe",
+        qos: .userInitiated
+    )
+    /// Main-actor view of "capture is armed, or is being armed".
+    ///
+    /// Replaces reading `engine.isRunning` from the main actor, which stopped
+    /// being a usable answer the moment arming moved to `engineQueue`: between
+    /// `start()` returning and the queue reaching `engine.start()` there is a
+    /// window — up to several seconds on a Continuity device — in which the
+    /// engine is genuinely not running and a second `.onAppear` would arm a
+    /// second time.
+    private var isArmed = false
 
     /// Begin capture. Idempotent: calling on an already-running probe is
     /// a no-op. Failures are logged and swallowed — the spectrum meter
@@ -102,7 +134,8 @@ final class MicProbe: @unchecked Sendable {
     /// wave doesn't move, mic isn't reaching us).
     @MainActor
     func start() {
-        guard !engine.isRunning else { return }
+        guard !isArmed else { return }
+        isArmed = true
         isStopped = false
         declineRetriesUsed = 0
         lock.lock(); pcm = []; lock.unlock()
@@ -155,19 +188,61 @@ final class MicProbe: @unchecked Sendable {
             }
         }
 
-        do {
-            try installTapAndStart(pinning: AudioDeviceManager.shared.effectiveDevice)
-        } catch {
-            // Deliberately not a teardown: the observers above stay armed
-            // so the next config change or device pick retries.
-            Self.log.error("mic probe start failed: \(error.localizedDescription, privacy: .public)")
-            return
+        // The device is resolved here, on the main actor, and the blocking
+        // part is handed to `engineQueue`. A failure is logged and swallowed
+        // and deliberately does NOT tear down: the observers above stay armed
+        // so the next config change or device pick retries.
+        armCapture(pinning: AudioDeviceManager.shared.effectiveDevice, stoppingFirst: false)
+    }
+
+    /// Hand one arm-capture cycle to `engineQueue`.
+    ///
+    /// Everything that blocks lives inside the dispatched block; the main
+    /// actor keeps only the two things it alone can do — resolve the effective
+    /// device from the `@MainActor` `AudioDeviceManager`, and decide what a
+    /// failure means. `stoppingFirst` distinguishes the rebuild path, which
+    /// must stop the running engine before re-arming, from the first arm,
+    /// where there is nothing to stop.
+    ///
+    /// **The completion hops back to the main actor rather than touching the
+    /// retry state from the queue.** `declineRetriesUsed` and
+    /// `declineRetryTask` are main-actor-only by the same discipline as
+    /// `isStopped`; reading them from `engineQueue` would be the isolation
+    /// violation this file has already paid for once.
+    @MainActor
+    private func armCapture(pinning device: AudioDeviceManager.Device?, stoppingFirst: Bool) {
+        engineQueue.async { [weak self] in
+            guard let self else { return }
+            if stoppingFirst {
+                self.engine.stop()
+            }
+            do {
+                try self.installTapAndStart(pinning: device)
+                Task { @MainActor [weak self] in self?.declineRetriesUsed = 0 }
+            } catch {
+                Self.log.error("mic probe arm failed: \(error.localizedDescription, privacy: .public)")
+                Task { @MainActor [weak self] in self?.scheduleDeclineRetry(after: error) }
+            }
         }
     }
 
+    /// Tear capture down. The observers and tasks are dropped synchronously —
+    /// they are main-actor state and stopping them must be immediate — while
+    /// the engine teardown is queued behind whatever `engineQueue` is already
+    /// doing.
+    ///
+    /// **Queued, not synchronous, and the ordering is what makes that safe.**
+    /// A `Continuity` arm can sit inside `engine.start()` for seconds; calling
+    /// `engine.stop()` on the main actor underneath it would be exactly the
+    /// concurrent engine mutation `engineQueue` exists to prevent. Serialising
+    /// instead means the microphone is released as soon as the in-flight arm
+    /// finishes rather than the instant the view disappears — bounded by that
+    /// arm, and the `isStopped` latch has already stopped anything new from
+    /// being queued behind it.
     @MainActor
     func stop() {
         isStopped = true
+        isArmed = false
         declineRetryTask?.cancel()
         declineRetryTask = nil
         deviceObservationTask?.cancel()
@@ -176,11 +251,14 @@ final class MicProbe: @unchecked Sendable {
             NotificationCenter.default.removeObserver(observer)
             configChangeObserver = nil
         }
-        removeTapIfInstalled()
-        if engine.isRunning {
-            engine.stop()
+        engineQueue.async { [weak self] in
+            guard let self else { return }
+            self.removeTapIfInstalled()
+            if self.engine.isRunning {
+                self.engine.stop()
+            }
+            self.lock.lock(); self.pcm = []; self.lock.unlock()
         }
-        lock.lock(); pcm = []; lock.unlock()
     }
 
     /// Safety net for the mic (R20). The normal teardown is `.onDisappear`
@@ -324,10 +402,28 @@ final class MicProbe: @unchecked Sendable {
     /// — **not** the macOS 26 executor-identity family, which never reaches
     /// libdispatch's queue check.
     ///
-    /// So the effective device is resolved by the caller, both of which are
-    /// already `@MainActor`, and handed in. The `apply` call itself stays
-    /// here, which is what the issue-#86 guard pins and what actually stops a
-    /// rebuild from re-arming on the wrong microphone.
+    /// So the effective device is resolved on the main actor and handed in.
+    /// The `apply` call itself stays here, which is what the issue-#86 guard
+    /// pins and what actually stops a rebuild from re-arming on the wrong
+    /// microphone.
+    ///
+    /// **Runs on `engineQueue`, never on the main actor, and never inside a
+    /// Swift-concurrency job.** `engine.start()` below blocks — 31 ms for the
+    /// built-in microphone, 4523 ms for an iPhone over Continuity (measured
+    /// 2026-08-13) — so calling this from the main actor froze the window for
+    /// the whole handshake, which users read as a failed connection. Two
+    /// consequences worth carrying:
+    ///
+    /// - Every field this method touches (`converter`, `outputFormat`, the
+    ///   tap) is now mutated from exactly one serial queue rather than from
+    ///   the main actor, so the class doc's "only while no tap block exists to
+    ///   read them" window is narrower than before, not wider.
+    /// - `MicProbeFormatGate`'s reason for existing is *unchanged*, but one of
+    ///   its stated stakes is not: an ObjC raise out of this body no longer
+    ///   unwinds through `libswift_Concurrency`, because a dispatch block
+    ///   pushes no `ExecutorTrackingInfo` node. The gate still prevents a
+    ///   crash; it just no longer stands between us and the macOS 26
+    ///   executor-identity family on this path.
     private func installTapAndStart(pinning device: AudioDeviceManager.Device?) throws {
         if let device {
             // **The outcome is logged, not discarded.** A pin that fails
@@ -431,7 +527,16 @@ final class MicProbe: @unchecked Sendable {
 
         do {
             engine.prepare()
+            // **This is the blocking call, and how long it blocks depends on
+            // the device.** 31 ms built-in, 4523 ms for an iPhone over
+            // Continuity — the phone has to wake. It is the entire reason
+            // this method runs on `engineQueue`.
+            let t0 = Date()
             try engine.start()
+            let elapsed = Int(Date().timeIntervalSince(t0) * 1000)
+            if elapsed > 500 {
+                Self.log.info("mic probe engine start took \(elapsed, privacy: .public) ms")
+            }
         } catch {
             removeTapIfInstalled()
             throw MicProbe.Error.engineStartFailed(error)
@@ -503,14 +608,7 @@ final class MicProbe: @unchecked Sendable {
     @MainActor
     private func rebuild() {
         guard !isStopped else { return }
-        engine.stop()
-        do {
-            try installTapAndStart(pinning: AudioDeviceManager.shared.effectiveDevice)
-            declineRetriesUsed = 0
-        } catch {
-            Self.log.error("mic probe rebuild failed: \(error.localizedDescription, privacy: .public)")
-            scheduleDeclineRetry(after: error)
-        }
+        armCapture(pinning: AudioDeviceManager.shared.effectiveDevice, stoppingFirst: true)
     }
 
     /// Re-attempt an install the format gate declined, on a short bounded

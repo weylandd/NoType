@@ -32,6 +32,16 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
   back: you would have watched a flat bar until you picked a device
   again. It now looks again a few times over the next second and a half,
   and picks up as soon as the switch settles.
+- **Picking your iPhone as the microphone no longer freezes the window.**
+  Starting audio on an iPhone over Continuity takes about four and a half
+  seconds — the phone has to wake — against about thirty milliseconds for
+  the built-in microphone. NoType did that work on the same thread that
+  draws the window, so choosing your iPhone locked the whole app up for
+  the entire handshake, which looks exactly like a failed connection.
+  Audio setup now happens off to the side: the window stays responsive,
+  and the meter starts as soon as the phone is ready. It affects every
+  input device — the built-in microphone just never blocked long enough
+  for anyone to see it.
 
 ### Internal
 - Selecting the input device moved into the one function that installs
