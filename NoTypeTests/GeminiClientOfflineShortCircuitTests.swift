@@ -367,6 +367,76 @@ final class GeminiClientOfflineShortCircuitTests: XCTestCase {
         )
     }
 
+    // MARK: - Every request declares its own inactivity budget
+
+    /// The transcription budget is derived **per request**, from the number
+    /// of audio parts, because that is the axis the 2026-08-13 measurement
+    /// found latency tracks. `GeminiRetryPolicyTests` proves the function
+    /// returns the right number; this proves the number reaches a request.
+    ///
+    /// Two failure modes, both silent, and the second is why this guard scans
+    /// counts rather than a single needle:
+    ///
+    /// 1. `sendRequest` stops setting `timeoutInterval` at all. Every budget
+    ///    test stays green and every transcription silently falls back to the
+    ///    session configuration's `auxiliaryRequestBudget` — 30 s for a
+    ///    single chunk (too long, the wait this plan removes) and 30 s for a
+    ///    4-part batch (too short, a killed request and a `[…]` in text
+    ///    already pasted).
+    /// 2. A *new* request path is added without a budget of its own and
+    ///    quietly inherits the same default. Nothing about the existing
+    ///    needles notices, so the count of `URLRequest(url:` constructions is
+    ///    pinned against the count of `timeoutInterval` assignments: adding a
+    ///    request without a budget breaks the equality.
+    ///
+    /// Limits, recorded so the green is not over-trusted: this is a source
+    /// scan over one file matching literal spellings, against
+    /// comment-stripped text. It proves the assignment is *present and
+    /// derived from `audios.count`*, not that it is reached at runtime — and
+    /// a request built in some other file would be invisible to it. Renaming
+    /// `requestInactivityBudget` fails it loudly, which is a review trigger
+    /// rather than a false negative.
+    func test_everyRequest_setsItsOwnInactivityBudget_andTranscriptionDerivesItFromThePartCount() throws {
+        let source = Self.strippingComments(try String(
+            contentsOf: Self.repoRoot()
+                .appendingPathComponent("NoType/Gemini/GeminiClient.swift"),
+            encoding: .utf8
+        ))
+
+        let requestCount = source.components(separatedBy: "URLRequest(url:").count - 1
+        let budgetCount = source.components(separatedBy: "timeoutInterval =").count - 1
+        XCTAssertGreaterThan(requestCount, 0, "No URLRequest is built in GeminiClient.swift — the guard lost its subject.")
+        XCTAssertEqual(
+            budgetCount, requestCount,
+            "\(requestCount) URLRequest(s) are built in GeminiClient.swift but \(budgetCount) set a timeoutInterval. A request without one inherits the session default, which is sized for the audio-less calls — too long for a single chunk and too short for a batch."
+        )
+
+        // The transcription path's budget comes from the part count, not from
+        // a literal and not from the auxiliary constant. This is the needle
+        // that a "just put 30 back" edit trips.
+        let sendRequest = try XCTUnwrap(
+            Self.body(ofFuncNamed: "sendRequest", in: source),
+            "Could not parse sendRequest — the guard lost its anchor."
+        )
+        XCTAssertTrue(
+            sendRequest.contains("req.timeoutInterval = Self.requestInactivityBudget(audioPartCount: audios.count)"),
+            "sendRequest no longer derives its inactivity budget from the number of audio parts. A flat value is exactly what the measurement rejected: the 4-part batch needed 26.85 s where the single-part force-cut needed 7.62 s."
+        )
+
+        // Ordering: the budget must be on the request before the retry loop
+        // issues it. Set inside the loop it would still work; set *after* the
+        // loop it would not be on any attempt at all.
+        let budgetIdx = try XCTUnwrap(sendRequest.range(of: "req.timeoutInterval =")).lowerBound
+        let loopIdx = try XCTUnwrap(
+            sendRequest.range(of: "while true {"),
+            "sendRequest no longer contains the `while true {` retry loop — the position anchor is gone."
+        ).lowerBound
+        XCTAssertLessThan(
+            budgetIdx, loopIdx,
+            "The per-request budget must be assigned before the retry loop issues the request."
+        )
+    }
+
     // MARK: - Fixtures pinning the guard above
 
     /// The mutation that defeated this guard's first draft, as a fixture:

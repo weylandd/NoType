@@ -234,52 +234,191 @@ actor GeminiClient {
         return probe
     }
 
+    // MARK: - Request budgets
+    //
+    // Both `URLSession` timers are sized from **the number of audio parts in
+    // the request**. That axis is a measured finding, not a guess — see
+    // `requestInactivityBudget(audioPartCount:)`.
+
+    /// Fixed term of the latency model, before the safety factor: the part of
+    /// a request's wall-clock that does not scale with the audio it carries
+    /// (TLS resumption, the byte-stable cache prefix, response assembly).
+    /// Fitted at ~1.4 s; carried at 2 s after the factor. See
+    /// `requestInactivityBudget(audioPartCount:)` for the derivation.
+    nonisolated static let requestBudgetFixedOverhead: TimeInterval = 2
+
+    /// Per-audio-part term of the latency model, after the safety factor.
+    /// Fitted at ~6.5 s per part; carried at 10 s.
+    nonisolated static let requestBudgetPerAudioPart: TimeInterval = 10
+
+    /// Shortest silence this client is willing to call a stall.
+    ///
+    /// Guards the *slope*, not the part count: the measured healthy maximum
+    /// for a single part was 7.8 s, so a budget below ten seconds would start
+    /// re-issuing against ordinary API latency rather than a dead transport,
+    /// and the retry would be pure cost. It binds today only for a request
+    /// carrying no audio at all (`audioPartCount <= 0`) — a shape
+    /// `sendRequest` cannot produce, but which a future refactor could, and
+    /// which must not compute a two-second budget from the fixed term alone.
+    nonisolated static let requestBudgetFloor: TimeInterval = 10
+
+    /// Hard cap on the derived budget, whatever the part count.
+    ///
+    /// Bounds a *pathological* batch rather than serving a legitimate one.
+    /// The chunker's own limits make a batch beyond ~8 parts a defect rather
+    /// than a session (chunks pile up behind one in-flight request, and the
+    /// adaptive pause ladder cuts long enough that a handful is the realistic
+    /// maximum), and 90 s still serves 8 parts at the full safety factor.
+    /// Past that the choice is between an unbounded freeze — the hotkey is
+    /// dead for the whole wait — and a bounded failure that keeps its audio
+    /// and offers a retry. The bounded failure is recoverable; the freeze is
+    /// not.
+    nonisolated static let requestBudgetCeiling: TimeInterval = 90
+
     /// How long a request may go **without a byte moving** before
-    /// `URLSession` fails it (`timeoutIntervalForRequest`). The timer
-    /// resets on every transmitted byte, so for a non-streamed response
-    /// the interval it actually bounds is the gap from the last uploaded
-    /// byte to the first response byte — Gemini's think time plus any
-    /// transport stall. It is therefore a direct cap on how long a chunk
-    /// may take, not merely a stall detector.
+    /// `URLSession` fails it, as a function of how many audio parts it
+    /// carries. Applied per request via `URLRequest.timeoutInterval`.
     ///
-    /// **This is the pre-cut value and R20 of
-    /// `docs/plans/2026-08-11-001-fix-dictation-delivery-reliability-plan.md`
-    /// still owns cutting it.** The cut is deliberately not made from
-    /// preference: KTD2 requires the new value to clear a *measured*
-    /// maximum for the two payload shapes the 2026-08-11 field sample
-    /// lacks — a full multi-chunk batch and a 180 s force-cut chunk
-    /// (`PauseDetector.maxChunkSamples`). Until that measurement exists
-    /// the ceiling stays where it has always been, because a value below
-    /// an unmeasured maximum converts "slow but succeeds" into a `[…]`
-    /// no retry can remove from the text already pasted into the user's
-    /// document.
+    /// ## What the measurement said
     ///
-    /// Hoisted out of `init` so it is nameable from a test at all (KTD3);
-    /// `GeminiRetryPolicyTests` pins both the value and the fact that
-    /// `makeSessionConfiguration()` actually applies it.
-    nonisolated static let requestInactivityBudget: TimeInterval = 30
+    /// Four repetitions of each of the two shapes the 2026-08-11 field sample
+    /// lacked, against the live API with the real request shape and real AAC
+    /// encoding (2026-08-13, one machine, one network):
+    ///
+    /// | shape                  | audio | bytes  | max idle | max total |
+    /// |------------------------|-------|--------|----------|-----------|
+    /// | 4-part batch           | 159 s | 653 KB | 26.85 s  | 27.16 s   |
+    /// | 1-part 180 s force-cut | 180 s | 735 KB |  7.62 s  |  7.81 s   |
+    ///
+    /// **Latency tracks the number of audio parts — not the byte size and not
+    /// the audio duration.** The 4-part batch carries *less* audio and *fewer*
+    /// bytes than the single-part force-cut and takes roughly four times as
+    /// long. That finding is the whole reason this is a function rather than
+    /// a constant: per part the two shapes agree (5.1–7.6 s), so one number
+    /// that clears the batch would leave the common single-part request
+    /// waiting nearly four times longer than it can possibly need.
+    ///
+    /// **KTD2's stop condition fired, and the flat cut R20 asked for is
+    /// dead.** 26.85 s sits against the retired 30 s ceiling, so no single
+    /// value both helps the common case and spares a large batch.
+    ///
+    /// ## The arithmetic
+    ///
+    /// Fitting a line through the two measured maxima gives ~1.4 s fixed plus
+    /// ~6.5 s per part. Multiplying both terms by a safety factor of **1.5**
+    /// and rounding up gives `requestBudgetFixedOverhead` = 2 s and
+    /// `requestBudgetPerAudioPart` = 10 s, which clears each measured maximum
+    /// by a near-uniform **~1.55×**:
+    ///
+    /// | parts | budget | measured max | factor |
+    /// |-------|--------|--------------|--------|
+    /// | 1     | 12 s   | 7.81 s       | 1.54×  |
+    /// | 4     | 42 s   | 27.16 s      | 1.55×  |
+    ///
+    /// The factor is deliberately generous rather than tight. The sample is
+    /// four runs per shape on one machine and one network — it is a sample,
+    /// not a distribution — and the cost of being wrong is asymmetric: too
+    /// generous and the user waits, too tight and a legitimate request is
+    /// killed, which becomes a `[…]` in text **already pasted into the user's
+    /// document**, where no retry can reach it.
+    ///
+    /// What the user actually pays in the common case: a single-part request
+    /// that stalls costs `2 × 12 s` plus the 500 ms backoff — 24.5 s against
+    /// the ~60.5 s the retired ceiling cost, so R22's "the hotkey comes back
+    /// in well under half the time" holds for the single-part case. It does
+    /// **not** hold for a large batch, and that is the honest reading of AE11
+    /// now: a 4-part batch that stalls costs 2 × 42 s. The compensation is
+    /// that a batch is rarer than a single chunk and that the alternative for
+    /// it is not a shorter wait but a lost chunk.
+    ///
+    /// ## Why the inactivity timer is the right control (KTD2 step 2)
+    ///
+    /// The response is not streamed, so the entire window from the last
+    /// uploaded byte to the first response byte is idle. Upload measured
+    /// 0.06–0.31 s in **every** row — under 1.5 % of the total — so
+    /// essentially all of the wait *is* the inactivity window. This timer is
+    /// therefore a direct cap on how long a chunk may take, not merely a
+    /// stall detector, and the whole-transfer ceiling can only bind on a
+    /// trickling upload. See `resourceCeiling`.
+    ///
+    /// Hoisted out of `init` so a test can reach it at all (KTD3);
+    /// `GeminiRetryPolicyTests` pins the values, the clamps and the safety
+    /// factor against the measured maxima, and
+    /// `GeminiClientOfflineShortCircuitTests` pins that every request in this
+    /// file sets a budget of its own.
+    nonisolated static func requestInactivityBudget(audioPartCount: Int) -> TimeInterval {
+        let derived = requestBudgetFixedOverhead
+            + requestBudgetPerAudioPart * TimeInterval(max(0, audioPartCount))
+        return min(requestBudgetCeiling, max(requestBudgetFloor, derived))
+    }
 
-    /// Whole-transfer ceiling (`timeoutIntervalForResource`): the hard cap
-    /// on a single request from first byte to last, across any number of
-    /// idle periods.
+    /// Inactivity budget for the requests that carry no audio and therefore
+    /// sit off the axis above: `classifyApp`, which sets it explicitly, and
+    /// — as the session-configuration default — anything that neglects to.
+    /// `validateKey` narrows further to 10 s of its own.
     ///
-    /// **An additional ceiling, never a fallback** (KTD1). The two timers
-    /// are independent and whichever fires first wins, so this one cannot
-    /// rescue a request `requestInactivityBudget` has already killed — it
-    /// only bounds the case where bytes keep trickling and the inactivity
-    /// timer keeps resetting. It stays at 30 s when the inactivity budget
-    /// is cut, which is also what keeps `PauseDetector`'s adaptive-ladder
-    /// prose (it cites the *resource* budget) correct and out of scope.
-    nonisolated static let resourceCeiling: TimeInterval = 30
+    /// Held at the value the whole client used before the derivation landed,
+    /// on purpose: the classifier is a grounded (`google_search`) call whose
+    /// latency was never measured here, and shortening it would be collateral
+    /// damage from a cut aimed at transcription. It is a ceiling on a
+    /// fire-and-forget background call, not on anything the user waits for.
+    nonisolated static let auxiliaryRequestBudget: TimeInterval = 30
 
-    /// The session configuration, built in one testable place so the two
-    /// budgets above are provably the ones that ship. Splitting this out
-    /// of `init` is the other half of KTD3: a constant nothing can read is
-    /// a constant no test can pin, and a test that pins the constant but
-    /// not its wiring stays green when the wiring is what breaks.
+    /// Headroom the whole-transfer ceiling leaves above the inactivity budget
+    /// for the upload itself.
+    ///
+    /// The measurement uploaded 653–735 KB in 0.06–0.31 s. Thirty seconds
+    /// covers roughly a hundredfold slower uplink (~200 kbit/s); below that a
+    /// dictation is not going to work at all. Generous on purpose — this
+    /// margin exists so the resource timer can never be the one that kills a
+    /// request the inactivity timer would have allowed.
+    nonisolated static let uploadAllowance: TimeInterval = 30
+
+    /// Whole-transfer ceiling (`timeoutIntervalForResource`): the hard cap on
+    /// a single request from first byte to last, across any number of idle
+    /// periods.
+    ///
+    /// **An additional ceiling, never a fallback** (KTD1). The two timers are
+    /// independent and whichever fires first wins, so this one cannot rescue
+    /// a request the inactivity budget has already killed — it only bounds
+    /// the case where bytes keep trickling and the inactivity timer keeps
+    /// resetting.
+    ///
+    /// **It moved, and KTD1's "leave it at 30 s" no longer holds.** The
+    /// measured max *total* for a 4-part batch is 27.16 s against a 30 s
+    /// ceiling, so a 5-part batch was already exceeding it — killing a
+    /// legitimate request and producing a silent `[…]`. That was a live
+    /// shipped defect, not a future risk.
+    ///
+    /// **Flat rather than per-request, because the platform has no
+    /// per-request knob.** `URLRequest.timeoutInterval` overrides
+    /// `timeoutIntervalForRequest` in both directions (measured), but there
+    /// is no `URLRequest` counterpart for the resource timer: with
+    /// `timeoutIntervalForResource = 3` and `URLRequest.timeoutInterval = 30`
+    /// against a stalling socket, the task failed at 3.27 s — session-level
+    /// and not overridable. So this is sized for the largest request the
+    /// budget function will ever serve (`requestBudgetCeiling`) plus the
+    /// upload allowance, which is the same axis evaluated at its maximum.
+    /// The cost of that flatness is borne only by a request whose *upload*
+    /// trickles for minutes, and the safe direction there is to let it
+    /// finish.
+    nonisolated static let resourceCeiling: TimeInterval = requestBudgetCeiling + uploadAllowance
+
+    /// The session configuration, built in one testable place so the budgets
+    /// above are provably the ones that ship. Splitting this out of `init` is
+    /// the other half of KTD3: a constant nothing can read is a constant no
+    /// test can pin, and a test that pins the constant but not its wiring
+    /// stays green when the wiring is what breaks.
+    ///
+    /// Note what `timeoutIntervalForRequest` means here now: it is only the
+    /// **default** for a request that sets no `timeoutInterval` of its own.
+    /// Every request this file builds sets one — pinned by
+    /// `GeminiClientOfflineShortCircuitTests` — so the value below is a
+    /// backstop for a future path that forgets, and it is deliberately the
+    /// auxiliary budget rather than a transcription one.
     nonisolated static func makeSessionConfiguration() -> URLSessionConfiguration {
         let cfg = URLSessionConfiguration.default
-        cfg.timeoutIntervalForRequest = requestInactivityBudget
+        cfg.timeoutIntervalForRequest = auxiliaryRequestBudget
         cfg.timeoutIntervalForResource = resourceCeiling
         // Off on purpose: `URLSession` must fail an offline request rather
         // than park on it indefinitely. `sendRequest`'s reachability
@@ -353,6 +492,12 @@ actor GeminiClient {
         // model choice doesn't change classifier cost.
         var req = URLRequest(url: Self.generateContentURL(for: .flashLite))
         req.httpMethod = "POST"
+        // Explicit rather than inherited from the session configuration: the
+        // transcription paths derive their budget from the audio-part count,
+        // and a request that silently took whatever default was left over
+        // would be a budget nobody chose. This one carries no audio, so it
+        // sits off that axis — see `auxiliaryRequestBudget`.
+        req.timeoutInterval = Self.auxiliaryRequestBudget
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(trimmedKey, forHTTPHeaderField: "x-goog-api-key")
         req.httpBody = try JSONEncoder().encode(body)
@@ -868,7 +1013,7 @@ actor GeminiClient {
         guard !trimmedKey.isEmpty else { throw GeminiError.missingKey }
 
         // Pre-flight: fail immediately when the system reports no network
-        // path, instead of parking on `timeoutIntervalForRequest` for 30 s
+        // path, instead of parking on this request's whole inactivity budget
         // (`waitsForConnectivity` is off, so `URLSession` does not fail
         // fast on its own). Conservative by construction — only a
         // definitively `.unsatisfied` path short-circuits; see
@@ -903,12 +1048,25 @@ actor GeminiClient {
 
         var req = URLRequest(url: Self.generateContentURL(for: model))
         req.httpMethod = "POST"
+        // The budget is derived here because here is where the axis it
+        // depends on — how many audio parts this request carries — is known.
+        // Per request rather than on the session configuration: a batch and a
+        // single chunk share one `URLSession`, and the measurement says they
+        // need very different budgets. Verified that this actually takes
+        // effect rather than assumed: `URLRequest.timeoutInterval` overrides
+        // `URLSessionConfiguration.timeoutIntervalForRequest` in **both**
+        // directions (against a stalling socket, config 3 s / request 9 s
+        // failed at 9.01 s, and config 9 s / request 3 s failed at 3.01 s), so
+        // a batch genuinely gets more room than the session default and not
+        // silently less.
+        req.timeoutInterval = Self.requestInactivityBudget(audioPartCount: audios.count)
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(trimmedKey, forHTTPHeaderField: "x-goog-api-key")
         req.httpBody = try JSONEncoder().encode(body)
 
         let totalAudio = audios.reduce(0) { $0 + $1.data.count }
-        Self.log.info("POST \(logID) (final=\(mayBeEmpty), audios=\(audios.count), bytes=\(totalAudio), priors=\(priorTranscripts.count))")
+        let budgetSeconds = Int(req.timeoutInterval)
+        Self.log.info("POST \(logID) (final=\(mayBeEmpty), audios=\(audios.count), bytes=\(totalAudio), priors=\(priorTranscripts.count), budget=\(budgetSeconds)s)")
 
         // Retry-loop driver. `attempt` is 1-based for log readability.
         // The number of *retries* is dictated by the error class on the
