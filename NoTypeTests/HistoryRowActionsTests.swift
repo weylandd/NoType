@@ -288,8 +288,8 @@ final class HistoryRowActionsTests: XCTestCase {
         // render. Asserted here on the shared values plus the action table
         // they feed.
         let fx = Fixture(self)
-        let busyRow  = fx.appendBrokenRow(text: "", failedChunkCount: 1, chunkCount: 1)
-        let otherRow = fx.appendBrokenRow(text: "a \(marker) b", failedChunkCount: 1, chunkCount: 1)
+        let busyRow  = fx.appendBrokenRow(answers: [nil], text: "")
+        let otherRow = fx.appendBrokenRow(answers: ["a", nil, "b"])
 
         let gate = Gate()
         fx.state.retryChunkSender = { _, _, _, _ in
@@ -471,7 +471,7 @@ final class HistoryRowActionsTests: XCTestCase {
         // which is precisely why the failure has to be surfaced
         // somewhere else, or the tap reads as having done nothing at all.
         let fx = Fixture(self)
-        let entry = fx.appendBrokenRow(text: "", failedChunkCount: 2, chunkCount: 2)
+        let entry = fx.appendBrokenRow(answers: [nil, nil], text: "")
 
         let before = HistoryRowView.actions(
             entry: entry,
@@ -634,39 +634,65 @@ final class HistoryRowActionsTests: XCTestCase {
             )
         }
 
-        /// Appends a row described the pre-sequence way — a flat string
-        /// plus a count — because that is still exactly what
-        /// `AppState.settleRetry` produces when a retry lands. Its
-        /// sequence is derived by R12's rule, which is what keeps the
-        /// merged text and the rendered row in step until U7 writes by
-        /// index.
+        /// Appends a row the way a session produces one: the `segments:`
+        /// initializer, one answer per chunk in chunk order, `nil` for a
+        /// gap — and a payload holding exactly the gaps' own indices.
+        ///
+        /// **It used to build through the `failedChunkCount:`
+        /// reconstruction initializer**, on the since-falsified grounds
+        /// that this was "exactly what `AppState.settleRetry` produces
+        /// when a retry lands". It is not: `settleRetry` writes through
+        /// the producing initializer now, and the positions
+        /// reconstruction derives are ordinals of a marker parse rather
+        /// than the chunk index any audio was recorded under. Under that
+        /// shape a row here could carry its gap at ordinal 1 while its
+        /// only retained chunk carried index 0 — a row no session
+        /// produces and no retry could land on. Harmless only because no
+        /// test in this file retried it; exactly the trap
+        /// `HistoryEntry.migratedSegments`' doc-comment warns a future
+        /// in-process producer re-opens.
+        ///
+        /// - Parameter text: the legacy mirror. Defaults to what the
+        ///   paste would have been, which is what
+        ///   `RecordingSession.makeHistoryEntry` stores. Pass `""` for the
+        ///   all-failed row — that is what `brokenHistoryEntry()` writes.
         @discardableResult
         func appendBrokenRow(
-            text: String,
-            failedChunkCount: Int,
-            chunkCount: Int
+            answers: [String?],
+            text: String? = nil
         ) -> HistoryEntry {
+            let segments = answers.enumerated().map {
+                HistoryEntry.Segment(chunkIndices: [$0.offset], text: $0.element)
+            }
             let entry = HistoryEntry(
                 id: UUID(),
-                text: text,
+                text: text ?? HistoryText.rendered(
+                    segments,
+                    replacements: state.dictionaryReplacements
+                ),
                 sourceAppName: "Slack",
                 sourceBundleID: Self.bundleID,
                 timestamp: Date(),
                 durationSeconds: 12,
-                failedChunkCount: failedChunkCount
+                segments: segments
             )
-            state.recordHistoryEntry(entry, retaining: payload(chunkCount: chunkCount))
+            state.recordHistoryEntry(
+                entry,
+                retaining: payload(
+                    chunkIndices: segments.filter(\.isGap).flatMap(\.chunkIndices)
+                )
+            )
             return entry
         }
 
         func row(_ id: UUID) -> HistoryEntry? { state.history.first { $0.id == id } }
 
-        private func payload(chunkCount: Int) -> RetainedRecording {
+        private func payload(chunkIndices: [Int]) -> RetainedRecording {
             RetainedRecording(
-                chunks: (0..<chunkCount).map {
+                chunks: chunkIndices.map {
                     RetainedRecording.Chunk(
                         idx: $0,
-                        isFinal: $0 == chunkCount - 1,
+                        isFinal: $0 == chunkIndices.last,
                         audio: Data([UInt8(0xA0 + $0)]),
                         // 4 s of audio — comfortably above
                         // `HallucinationLengthGate`'s floor, so a short

@@ -302,7 +302,13 @@ struct HistoryRowView: View {
     nonisolated static func hasCopyableText(_ entry: HistoryEntry) -> Bool {
         entry.segments.contains { segment in
             guard let text = segment.text else { return false }
-            return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            // `RetryMerge.isEmptyText`, not a second `.isEmpty` spelling
+            // of it. That function's doc-comment names this call site as
+            // one of its readers, and the two disagreeing on
+            // whitespace-only text is a state this project has already
+            // been in once — the row would offer Copy for a transcript
+            // the merge treats as carrying nothing.
+            return !RetryMerge.isEmptyText(text)
         }
     }
 

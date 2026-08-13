@@ -403,4 +403,85 @@ final class RetryMergeTests: XCTestCase {
             "Hello there how are you goodbye."
         )
     }
+
+    // MARK: - The join this merge rests on
+
+    func test_theJoin_gapPositionsAndRetainedChunkIndices_bothComeFromOneResponseSet() throws {
+        // `RetryMerge`'s type-level claim is that
+        // `HistoryEntry.Segment.chunkIndices` and
+        // `RetainedRecording.Chunk.idx` "are the same number by
+        // construction — the session records both from one
+        // `ChunkResponse`". Every other test in this file, and every one
+        // in `AppStateRetryTests`, *constructs* that agreement in its
+        // fixture: it hands `merge` a row and a set of outcomes it wrote
+        // to match. So none of them can see the join break.
+        //
+        // This one derives both sides from a single `[ChunkResponse]`,
+        // through the two production functions a session actually uses,
+        // and only then drives the pair through the merge.
+        // The **first response covers two chunks** — a batched Gemini call,
+        // which production produces on every successful batch. That is what
+        // makes a response's ordinal differ from its chunks' indices from
+        // here on, and it is the whole reason this fixture is shaped this
+        // way: with one response per chunk the two are numerically equal
+        // and an ordinal-for-index substitution is invisible.
+        let responses: [RecordingSession.ChunkResponse] = [
+            .init(chunkIndices: [0, 1], text: "Ship it by the tenth"),
+            .init(chunkIndices: [2], text: nil),
+            // R27's third state, included on purpose: the hallucination
+            // gate's `""` is a text segment, so it must contribute no gap
+            // and hold back no audio.
+            .init(chunkIndices: [3], text: ""),
+            .init(chunkIndices: [4], text: nil),
+            .init(chunkIndices: [5], text: "after.")
+        ]
+        let encoded = (0...5).map { idx in
+            RetainedRecording.Chunk(
+                idx: idx,
+                isFinal: idx == 5,
+                audio: Data([UInt8(0xA0 + idx)]),
+                samples: 16_000
+            )
+        }
+
+        let segments = RecordingSession.historySegments(from: responses)
+        let payload = RecordingSession.retainedPayload(
+            inBatch: encoded,
+            failedChunkIndices: Set(
+                responses.filter { $0.text == nil }.flatMap(\.chunkIndices)
+            ),
+            context: ContextSnapshot.minimal(
+                activeApp: AppInfo(name: "Slack", bundleID: "com.tinyspeck.slackmacgap")
+            ),
+            model: .flashLite
+        )
+        let held = try XCTUnwrap(payload, "the session lost chunks, so it retains a payload").chunks
+
+        XCTAssertEqual(
+            Set(held.map(\.idx)),
+            Set(segments.filter(\.isGap).flatMap(\.chunkIndices)),
+            "the audio held is keyed by exactly the positions the row stores as gaps"
+        )
+        XCTAssertEqual(
+            Set(held.map(\.idx)),
+            [2, 4],
+            "and those are the chunk indices, not the ordinals (1 and 3) of the responses that failed"
+        )
+
+        // And therefore every held chunk has somewhere to land: no
+        // recovery is reported unplaced, so no audio is stranded and no
+        // gap survives a run in which every chunk answered.
+        let merged = RetryMerge.merge(
+            into: segments,
+            outcomes: held.map { Outcome(chunkIndex: $0.idx, text: "R\($0.idx)") }
+        )
+
+        XCTAssertEqual(merged.placedCount, held.count)
+        XCTAssertFalse(merged.segments.contains(where: \.isGap))
+        XCTAssertEqual(
+            HistoryText.assemble(merged.segments),
+            "Ship it by the tenth R2 R4 after.",
+            "the batched response's two chunks stay one segment; each recovery lands at its own index"
+        )
+    }
 }

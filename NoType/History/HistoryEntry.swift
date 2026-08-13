@@ -125,8 +125,10 @@ struct HistoryEntry: Codable, Identifiable, Sendable {
     ///   emptiness of a string that boundary normalisation and replacement
     ///   pairs both run over.
     ///
-    /// A **retry no longer reads this field at all.** It used to merge its
-    /// results by scanning this string for markers, which failed outright
+    /// A **retry no longer *merges* through this field** — the stats gate
+    /// in the bullet above is the one retry-side reader that survives, and
+    /// it reads the string's emptiness rather than its contents. The merge
+    /// used to scan this string for markers, which failed outright
     /// on a row whose `[…]` a replacement pair had rewritten, and — worse —
     /// rebuilt the row's sequence from the merged post-replacement string,
     /// destroying the raw text on disk. `RetryMerge` writes by chunk index

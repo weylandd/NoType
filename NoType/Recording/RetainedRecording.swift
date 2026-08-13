@@ -52,9 +52,20 @@ struct RetainedRecording: Sendable {
     /// the encoded byte size — `HallucinationLengthGate` divides it by
     /// `AudioRecorder.outputSampleRate` to get audio duration.
     struct Chunk: Sendable {
-        /// Chunk index within the session. Also the position of this
-        /// chunk's `[…]` marker in the stitched transcript, which is
-        /// what lets a recovered text land back in the right slot.
+        /// Chunk index within the session — **the same number the row's
+        /// `HistoryEntry.Segment.chunkIndices` carries for this chunk**,
+        /// because the session records both from one `ChunkResponse`.
+        /// That shared number is the whole of how a recovery lands:
+        /// `RetryMerge.merge(into:outcomes:)` joins on it and writes into
+        /// the gap segment covering this index.
+        ///
+        /// It used to be described as the position of this chunk's `[…]`
+        /// marker in the stitched transcript, and the merge used to find
+        /// the slot by counting markers in that string. A replacement
+        /// pair on the ellipsis rewrites those characters, so the count
+        /// could reach zero on a row that was still broken and still held
+        /// this audio. The index is now the storage, and the marker is
+        /// only how a gap is drawn.
         let idx: Int
         /// Whether this was the session's final chunk (user release).
         let isFinal: Bool

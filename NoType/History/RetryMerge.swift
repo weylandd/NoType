@@ -78,11 +78,13 @@ enum RetryMerge {
     /// nothing" — trimmed, because a row rendering a lone space is empty to
     /// the user in every sense that matters.
     ///
-    /// The **single** definition of that question. `isRecovery` above reads
-    /// it, `priors(from:)` below reads it, and
-    /// `HistoryRowView.hasCopyableText` asks the same thing of a row's
-    /// segments. Those readings were briefly three separate `.isEmpty`
-    /// spellings that disagreed on whitespace-only text.
+    /// The **single** definition of that question. `isRecovery` above
+    /// reads it, `priors(from:)` below reads it, and
+    /// `HistoryRowView.hasCopyableText` calls it too rather than spelling
+    /// the trim again — which is the point, because those readings were
+    /// briefly three separate `.isEmpty` spellings that disagreed on
+    /// whitespace-only text. Keep that a call, not a resemblance: the
+    /// view's copy of it is what drifted last time.
     static func isEmptyText(_ text: String) -> Bool {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -114,7 +116,7 @@ enum RetryMerge {
     ///
     /// `placed` exists because the caller releases audio on the second fact
     /// and not the first. See the type-level note above.
-    struct Merged {
+    struct Merged: Sendable {
         /// The row's sequence after the merge — raw text throughout (R9),
         /// so `HistoryText.rendered` applies the user's current pairs to it
         /// exactly as it does to a segment the session wrote.
