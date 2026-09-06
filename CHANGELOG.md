@@ -12,7 +12,7 @@ Until v1.0.0, breaking changes may land on minor (`0.x`) bumps.
 
 ---
 
-## [0.1.14] — 2026-08-13
+## [0.1.14] — 2026-09-06
 
 ### Fixed
 - **Picking a different microphone during setup now actually switches
