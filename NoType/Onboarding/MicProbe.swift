@@ -13,9 +13,12 @@ import OSLog
 /// is a stand-alone probe so the mic-check screen doesn't need (and
 /// can't accidentally trigger) the full transcription pipeline.
 ///
-/// Re-applies the user's pinned input device on `start()` and restarts
-/// the engine when `AudioDeviceManager.shared.selectedUID` changes mid-
-/// session, so the picker on the same screen feels live.
+/// Re-applies the user's pinned input device on **every** tap install
+/// (`installTapAndStart()`), and restarts the engine when
+/// `AudioDeviceManager.shared.selectedUID` changes mid-session, so the
+/// picker on the same screen feels live. The pin used to sit on the
+/// `start()` path alone, which is why the picker restarted the engine on
+/// the old microphone — issue #86.
 ///
 /// `@unchecked Sendable` (no `@MainActor`) by design — `AVAudioEngine`
 /// invokes the `installTap` callback on its own realtime thread; if the
@@ -76,6 +79,54 @@ final class MicProbe: @unchecked Sendable {
     private var tapInstalled = false
     private var deviceObservationTask: Task<Void, Never>?
     private var configChangeObserver: NSObjectProtocol?
+    /// Set by `stop()`, cleared by `start()`. **Main-actor only** — like
+    /// `deviceObservationTask` and `configChangeObserver`, it is touched from
+    /// `@MainActor` methods and never from the realtime tap thread.
+    ///
+    /// `rebuild()` is reached from three `Task { @MainActor }` bodies, and a
+    /// task already enqueued when the user leaves the mic-check step still
+    /// runs after `stop()` — re-opening the microphone on a screen nobody is
+    /// looking at, and (because `start()` early-returns on a running engine)
+    /// leaving a probe whose observers were torn down and cannot be re-armed.
+    /// The observation loop already had `Task.isCancelled` for this; the
+    /// notification path had nothing, and the decline retry below would have
+    /// widened the window. One latch closes all three.
+    private var isStopped = false
+    /// Bounded recovery for a declined install. See `scheduleDeclineRetry`.
+    private var declineRetryTask: Task<Void, Never>?
+    private var declineRetriesUsed = 0
+    /// Serialises every mutation of `engine` — pin, tap install, start, stop.
+    ///
+    /// **This exists because `engine.start()` blocks, and for one class of
+    /// device it blocks for seconds.** Measured on 2026-08-13, same code path
+    /// for both: the built-in microphone starts in 31 ms, an iPhone reached
+    /// over Continuity (`'ccwd'` transport) takes **4523 ms** — the handshake
+    /// that wakes the phone — and then delivers audio perfectly normally.
+    /// Running that on the main actor freezes the whole window for four and a
+    /// half seconds, which reads to the user as "it failed to connect", and
+    /// it is reachable from the device picker.
+    ///
+    /// A serial queue rather than an actor, matching `AudioRecorder.ioQueue`:
+    /// the work is a strictly ordered sequence of C API calls with no
+    /// suspension points, and it must not interleave with itself. It also
+    /// takes the whole install *out* of Swift-concurrency job context —
+    /// relevant because an ObjC raise unwinding through `libswift_Concurrency`
+    /// is what corrupts the process's main-executor identity, and a dispatch
+    /// block pushes no `ExecutorTrackingInfo` node to orphan. See
+    /// `docs/solutions/runtime-errors/macos-26-executor-identity-check-family-2026-07-25.md`.
+    private let engineQueue = DispatchQueue(
+        label: "app.notype.onboarding.micprobe",
+        qos: .userInitiated
+    )
+    /// Main-actor view of "capture is armed, or is being armed".
+    ///
+    /// Replaces reading `engine.isRunning` from the main actor, which stopped
+    /// being a usable answer the moment arming moved to `engineQueue`: between
+    /// `start()` returning and the queue reaching `engine.start()` there is a
+    /// window — up to several seconds on a Continuity device — in which the
+    /// engine is genuinely not running and a second `.onAppear` would arm a
+    /// second time.
+    private var isArmed = false
 
     /// Begin capture. Idempotent: calling on an already-running probe is
     /// a no-op. Failures are logged and swallowed — the spectrum meter
@@ -83,26 +134,28 @@ final class MicProbe: @unchecked Sendable {
     /// wave doesn't move, mic isn't reaching us).
     @MainActor
     func start() {
-        guard !engine.isRunning else { return }
+        guard !isArmed else { return }
+        isArmed = true
+        isStopped = false
+        declineRetriesUsed = 0
         lock.lock(); pcm = []; lock.unlock()
 
-        let device = AudioDeviceManager.shared.effectiveDevice
-        if let device {
-            _ = AudioDeviceManager.apply(device, to: engine)
-        }
-
         // **Both observers are installed BEFORE the tap goes in, and the
-        // ordering is load-bearing.** `AudioDeviceManager.apply` above is
-        // asynchronous, so the very first `installTapAndStart()` is the
-        // most likely moment for `MicProbeFormatGate` to reject — and
-        // `.AVAudioEngineConfigurationChange` is precisely the
-        // notification that fires when that switch finally lands. Wiring
-        // the observers only on the success path meant a rejected first
-        // install threw away its own recovery signal and left the user a
-        // dead spectrum meter for the rest of the screen, with even the
-        // device picker unable to revive it. Both are idempotent-guarded
-        // because a failed `start()` leaves the engine stopped, so a
-        // retry re-enters here.
+        // ordering is load-bearing.** The device pin inside
+        // `installTapAndStart()` is asynchronous, so the very first
+        // install is the most likely moment for `MicProbeFormatGate` to
+        // reject — and `.AVAudioEngineConfigurationChange` is precisely
+        // the notification that fires when that switch finally lands.
+        // Wiring the observers only on the success path meant a rejected
+        // first install threw away its own recovery signal and left the
+        // user a dead spectrum meter for the rest of the screen, with
+        // even the device picker unable to revive it. Both are
+        // idempotent-guarded because a failed `start()` leaves the engine
+        // stopped, so a retry re-enters here.
+        //
+        // Note the observers are now armed *ahead of* the first pin
+        // rather than after it, which strictly widens their coverage: the
+        // configuration change the pin itself provokes is observed too.
         if configChangeObserver == nil {
             configChangeObserver = NotificationCenter.default.addObserver(
                 forName: .AVAudioEngineConfigurationChange,
@@ -135,29 +188,77 @@ final class MicProbe: @unchecked Sendable {
             }
         }
 
-        do {
-            try installTapAndStart()
-        } catch {
-            // Deliberately not a teardown: the observers above stay armed
-            // so the next config change or device pick retries.
-            Self.log.error("mic probe start failed: \(error.localizedDescription, privacy: .public)")
-            return
+        // The device is resolved here, on the main actor, and the blocking
+        // part is handed to `engineQueue`. A failure is logged and swallowed
+        // and deliberately does NOT tear down: the observers above stay armed
+        // so the next config change or device pick retries.
+        armCapture(pinning: AudioDeviceManager.shared.effectiveDevice, stoppingFirst: false)
+    }
+
+    /// Hand one arm-capture cycle to `engineQueue`.
+    ///
+    /// Everything that blocks lives inside the dispatched block; the main
+    /// actor keeps only the two things it alone can do — resolve the effective
+    /// device from the `@MainActor` `AudioDeviceManager`, and decide what a
+    /// failure means. `stoppingFirst` distinguishes the rebuild path, which
+    /// must stop the running engine before re-arming, from the first arm,
+    /// where there is nothing to stop.
+    ///
+    /// **The completion hops back to the main actor rather than touching the
+    /// retry state from the queue.** `declineRetriesUsed` and
+    /// `declineRetryTask` are main-actor-only by the same discipline as
+    /// `isStopped`; reading them from `engineQueue` would be the isolation
+    /// violation this file has already paid for once.
+    @MainActor
+    private func armCapture(pinning device: AudioDeviceManager.Device?, stoppingFirst: Bool) {
+        engineQueue.async { [weak self] in
+            guard let self else { return }
+            if stoppingFirst {
+                self.engine.stop()
+            }
+            do {
+                try self.installTapAndStart(pinning: device)
+                Task { @MainActor [weak self] in self?.declineRetriesUsed = 0 }
+            } catch {
+                Self.log.error("mic probe arm failed: \(error.localizedDescription, privacy: .public)")
+                Task { @MainActor [weak self] in self?.scheduleDeclineRetry(after: error) }
+            }
         }
     }
 
+    /// Tear capture down. The observers and tasks are dropped synchronously —
+    /// they are main-actor state and stopping them must be immediate — while
+    /// the engine teardown is queued behind whatever `engineQueue` is already
+    /// doing.
+    ///
+    /// **Queued, not synchronous, and the ordering is what makes that safe.**
+    /// A `Continuity` arm can sit inside `engine.start()` for seconds; calling
+    /// `engine.stop()` on the main actor underneath it would be exactly the
+    /// concurrent engine mutation `engineQueue` exists to prevent. Serialising
+    /// instead means the microphone is released as soon as the in-flight arm
+    /// finishes rather than the instant the view disappears — bounded by that
+    /// arm, and the `isStopped` latch has already stopped anything new from
+    /// being queued behind it.
     @MainActor
     func stop() {
+        isStopped = true
+        isArmed = false
+        declineRetryTask?.cancel()
+        declineRetryTask = nil
         deviceObservationTask?.cancel()
         deviceObservationTask = nil
         if let observer = configChangeObserver {
             NotificationCenter.default.removeObserver(observer)
             configChangeObserver = nil
         }
-        removeTapIfInstalled()
-        if engine.isRunning {
-            engine.stop()
+        engineQueue.async { [weak self] in
+            guard let self else { return }
+            self.removeTapIfInstalled()
+            if self.engine.isRunning {
+                self.engine.stop()
+            }
+            self.lock.lock(); self.pcm = []; self.lock.unlock()
         }
-        lock.lock(); pcm = []; lock.unlock()
     }
 
     /// Safety net for the mic (R20). The normal teardown is `.onDisappear`
@@ -204,6 +305,7 @@ final class MicProbe: @unchecked Sendable {
     /// `withTaskCancellationHandler` would need.
     deinit {
         deviceObservationTask?.cancel()
+        declineRetryTask?.cancel()
         if let observer = configChangeObserver {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -224,7 +326,18 @@ final class MicProbe: @unchecked Sendable {
 
     // MARK: - Internals
 
-    /// Build the converter, install the tap, start the engine.
+    /// Pin the selected input device, build the converter, install the
+    /// tap, start the engine.
+    ///
+    /// **The pin lives here, and that placement is the fix for issue
+    /// #86.** It used to sit in `start()` only, so `rebuild()` — the path
+    /// the device picker and the configuration-change observer both take
+    /// — tore the tap down and re-installed it against whatever device
+    /// the engine already had. The meter kept moving, so the switch
+    /// looked like it worked while the user watched the *previous*
+    /// microphone. Two functions each doing half of "set up capture" is
+    /// what let them drift; one function that cannot install a tap
+    /// without pinning first is what stops it recurring.
     ///
     /// **Statement order is load-bearing.** `AudioDeviceManager.apply`'s
     /// `AudioUnitSetProperty(CurrentDevice)` is asynchronous, so the node's
@@ -232,11 +345,109 @@ final class MicProbe: @unchecked Sendable {
     /// node no longer reports raises an Objective-C exception, and this
     /// method is reachable from two `Task { @MainActor }` bodies where such
     /// a raise corrupts the thread's executor identity (see
-    /// `MicProbeFormatGate`). So: everything device-independent is built
-    /// first, the node format is read **once**, both the converter and the
-    /// tap are derived from that one read, and the read is re-validated
-    /// against the live node immediately before the tap goes in.
-    private func installTapAndStart() throws {
+    /// `MicProbeFormatGate`). So: the pin goes first, everything
+    /// device-independent is built next — which doubles as settle time
+    /// the switch gets for free — the node format is read **once**, both
+    /// the converter and the tap are derived from that one read, and the
+    /// read is re-validated against the live node immediately before the
+    /// tap goes in.
+    ///
+    /// **The accepted trade, stated precisely — it is a change in *kind*,
+    /// not only in frequency.** `start()` runs from `.onAppear`, a
+    /// synchronous main-actor callback; `rebuild()` runs from two
+    /// `Task { @MainActor }` bodies. So while the pin lived in `start()`
+    /// alone, the switch it provokes never overlapped a *concurrency-job*
+    /// install — which is §1 of the executor-identity mechanism. It does
+    /// now. What bounds it is `apply`'s idempotence: a set happens only
+    /// when the device genuinely differs, so the overlap is **one racing
+    /// install per real user device change**, and not on the
+    /// configuration-change rebuild that follows (device already current,
+    /// nothing re-set). One racing install per switch is the irreducible
+    /// cost of switching the microphone at all.
+    ///
+    /// The residual is the few instructions between the gate's `live` read
+    /// and `installTap`; a switch landing anywhere earlier makes the gate
+    /// *decline* instead — a moment of flat meter, not a dead screen.
+    ///
+    /// **What makes that second half true is `scheduleDeclineRetry`, and it
+    /// is worth knowing why the obvious answer was wrong.** An earlier
+    /// revision of this comment credited the recovery to the
+    /// `.AVAudioEngineConfigurationChange` observer. That was false on the
+    /// path that matters: `rebuild()` stops the engine *before* calling in, a
+    /// declined install throws before `engine.start()`, and a stopped engine
+    /// posts no further configuration change — so the promised signal was
+    /// precisely the one that could not arrive, and a single unlucky picker
+    /// switch left a dead meter for the rest of the screen. The observer still
+    /// covers `start()`'s own first install, where the engine is not stopped
+    /// by us; the ladder covers the rebuild path.
+    ///
+    /// Verify by hand against a Bluetooth headset, where the switch is
+    /// slowest. If a reporter's `OBJC THROW` ever names
+    /// `com.apple.coreaudio.avfaudio` on a build ≥ 0.1.14, the fix is to make
+    /// the install **wait** for the switch — not to move the pin back, which
+    /// restores the silent-wrong-device bug.
+    ///
+    /// **This method is `nonisolated`, and that is not an oversight — it is
+    /// the reason the class is `@unchecked Sendable` rather than
+    /// `@MainActor`.** An earlier revision marked it `@MainActor` so it could
+    /// read the main-actor-isolated `AudioDeviceManager.shared` directly. That
+    /// shipped a launch crash: the `installTap` closure is a literal *created
+    /// inside this body*, so under SE-0420 it inherited the method's
+    /// isolation, and `AVAudioEngine` calls that block on its realtime audio
+    /// thread — `dispatch_assert_queue` fails the moment audio starts flowing.
+    /// The crash is `BUG IN CLIENT OF LIBDISPATCH: Block was expected to
+    /// execute on queue [com.apple.main-thread]`, and it is the same defect
+    /// already written up in
+    /// `docs/solutions/runtime-errors/audio-ioproc-mainactor-inheritance-crash-2026-05-19.md`
+    /// — **not** the macOS 26 executor-identity family, which never reaches
+    /// libdispatch's queue check.
+    ///
+    /// So the effective device is resolved on the main actor and handed in.
+    /// The `apply` call itself stays here, which is what the issue-#86 guard
+    /// pins and what actually stops a rebuild from re-arming on the wrong
+    /// microphone.
+    ///
+    /// **Runs on `engineQueue`, never on the main actor, and never inside a
+    /// Swift-concurrency job.** `engine.start()` below blocks — 31 ms for the
+    /// built-in microphone, 4523 ms for an iPhone over Continuity (measured
+    /// 2026-08-13) — so calling this from the main actor froze the window for
+    /// the whole handshake, which users read as a failed connection. Two
+    /// consequences worth carrying:
+    ///
+    /// - Every field this method touches (`converter`, `outputFormat`, the
+    ///   tap) is now mutated from exactly one serial queue rather than from
+    ///   the main actor, so the class doc's "only while no tap block exists to
+    ///   read them" window is narrower than before, not wider.
+    /// - `MicProbeFormatGate`'s reason for existing is *unchanged*, but one of
+    ///   its stated stakes is not: an ObjC raise out of this body no longer
+    ///   unwinds through `libswift_Concurrency`, because a dispatch block
+    ///   pushes no `ExecutorTrackingInfo` node. The gate still prevents a
+    ///   crash; it just no longer stands between us and the macOS 26
+    ///   executor-identity family on this path.
+    private func installTapAndStart(pinning device: AudioDeviceManager.Device?) throws {
+        if let device {
+            // **The outcome is logged, not discarded.** A pin that fails
+            // leaves the meter running on the previous microphone — which
+            // is visually identical to issue #86 itself, so without a
+            // record there is no way to tell a fix that works from one
+            // that is being refused. `apply` logs its own
+            // `AudioUnitSetProperty` failure; what it cannot log is the
+            // caller's view, which is the one that matters here: which
+            // device we asked for, and whether we got it.
+            //
+            // Device names are `.private` — they routinely carry the
+            // user's name via Continuity ("Alex's AirPods"), the same rule
+            // `AudioRecorder.resolveEffectiveDevice` follows.
+            let pinned = AudioDeviceManager.apply(device, to: engine)
+            if pinned {
+                Self.log.info("mic probe pinned input device \"\(device.name, privacy: .private)\"")
+            } else {
+                Self.log.error("mic probe could NOT pin input device \"\(device.name, privacy: .private)\" — meter will run on whatever the engine already had")
+            }
+        } else {
+            Self.log.info("mic probe has no effective input device to pin; using the engine default")
+        }
+
         let input = engine.inputNode
 
         // Device-independent — built before the node-format read so it
@@ -301,14 +512,31 @@ final class MicProbe: @unchecked Sendable {
         self.outputFormat = outFmt
         self.converter = conv
 
-        input.installTap(onBus: 0, bufferSize: 1024, format: inFmt) { [weak self] buffer, _ in
+        // `@Sendable` strips any isolation this literal would otherwise
+        // inherit from the enclosing scope (SE-0420). Belt to the braces of
+        // this method being `nonisolated`: the block runs on `AVAudioEngine`'s
+        // realtime thread, so an inherited `@MainActor` turns the first buffer
+        // into a `dispatch_assert_queue` crash. Keeping the annotation means
+        // re-adding an actor annotation to this method fails to compile
+        // against `handleTap` instead of shipping a launch crash. Same shape
+        // as `dsOnHover` and `AudioRecorder`'s IOProc block.
+        input.installTap(onBus: 0, bufferSize: 1024, format: inFmt) { @Sendable [weak self] buffer, _ in
             self?.handleTap(buffer)
         }
         lock.lock(); tapInstalled = true; lock.unlock()
 
         do {
             engine.prepare()
+            // **This is the blocking call, and how long it blocks depends on
+            // the device.** 31 ms built-in, 4523 ms for an iPhone over
+            // Continuity — the phone has to wake. It is the entire reason
+            // this method runs on `engineQueue`.
+            let t0 = Date()
             try engine.start()
+            let elapsed = Int(Date().timeIntervalSince(t0) * 1000)
+            if elapsed > 500 {
+                Self.log.info("mic probe engine start took \(elapsed, privacy: .public) ms")
+            }
         } catch {
             removeTapIfInstalled()
             throw MicProbe.Error.engineStartFailed(error)
@@ -358,15 +586,70 @@ final class MicProbe: @unchecked Sendable {
         engine.inputNode.removeTap(onBus: 0)
     }
 
+    /// Stop and re-arm capture. Reached from the device-observation loop
+    /// (the picker), from the `.AVAudioEngineConfigurationChange` observer,
+    /// and from the decline retry below.
+    ///
+    /// It deliberately does **not** pin the device itself: that belongs
+    /// to `installTapAndStart()`, where no caller can forget it. This
+    /// method having its own half of the setup is the shape that
+    /// produced issue #86.
+    ///
+    /// **It stops the engine before it re-installs, and that is what makes a
+    /// decline terminal without the retry below.** A declined install throws
+    /// before `engine.start()`, so this method's own `engine.stop()` is the
+    /// last thing that ran — and a stopped engine posts no further
+    /// `.AVAudioEngineConfigurationChange` (see `installTapAndStart`), so the
+    /// notification that would have re-armed it is exactly the one that
+    /// cannot arrive. Nothing else is watching: the observation loop only
+    /// wakes on the *next* `selectedUID` change, which means a user who
+    /// switched microphone once would sit in front of a dead meter until they
+    /// switched again.
     @MainActor
     private func rebuild() {
-        engine.stop()
-        do {
-            try installTapAndStart()
-        } catch {
-            Self.log.error("mic probe rebuild failed: \(error.localizedDescription, privacy: .public)")
+        guard !isStopped else { return }
+        armCapture(pinning: AudioDeviceManager.shared.effectiveDevice, stoppingFirst: true)
+    }
+
+    /// Re-attempt an install the format gate declined, on a short bounded
+    /// ladder. **The recovery for this path, because the notification is not.**
+    ///
+    /// A decline means the node's format changed between the gate's two reads
+    /// — i.e. the device switch this install provoked is still landing. That is
+    /// a wait, not a failure, so the answer is to look again shortly rather
+    /// than to surface anything to the user.
+    ///
+    /// **The ladder is bounded and the delays are chosen, not arbitrary.**
+    /// Three attempts at 150 / 400 / 900 ms: the first covers a built-in or USB
+    /// switch, the last covers a Bluetooth headset, which is the slowest switch
+    /// this screen sees and the one the hand-verification protocol names. It
+    /// gives up after that rather than retrying forever — a switch still not
+    /// landed after ~1.5 s is a different problem, and the user can always pick
+    /// again, which re-enters through the observation loop with a fresh budget.
+    /// The counter resets on any successful install and on `start()`.
+    ///
+    /// Only `.inputFormatNotInstallable` retries. An engine-start failure or a
+    /// converter failure will not fix itself by waiting, and spinning on one
+    /// would be the retry storm this bound exists to avoid.
+    @MainActor
+    private func scheduleDeclineRetry(after error: Swift.Error) {
+        guard case MicProbe.Error.inputFormatNotInstallable = error else { return }
+        guard !isStopped, declineRetriesUsed < Self.declineRetryDelaysMs.count else { return }
+        let delay = Self.declineRetryDelaysMs[declineRetriesUsed]
+        declineRetriesUsed += 1
+
+        declineRetryTask?.cancel()
+        declineRetryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(delay))
+            guard let self, !Task.isCancelled, !self.isStopped else { return }
+            self.declineRetryTask = nil
+            self.rebuild()
         }
     }
+
+    /// Backoff for `scheduleDeclineRetry`, in milliseconds. Length is the
+    /// attempt budget.
+    private static let declineRetryDelaysMs = [150, 400, 900]
 
     private func handleTap(_ inBuffer: AVAudioPCMBuffer) {
         guard let converter, let outputFormat else { return }

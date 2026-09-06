@@ -386,9 +386,24 @@ final class AudioDeviceManager {
     /// (`AudioRecorder`) opens the device via
     /// `AudioDeviceCreateIOProcIDWithBlock` and doesn't touch this
     /// method.
+    ///
+    /// **Idempotent: a device already current is not re-set.** The one
+    /// caller now pins on *every* tap install rather than only on the
+    /// first one (see `MicProbe.installTapAndStart`), and one of the
+    /// paths that reaches it is the `.AVAudioEngineConfigurationChange`
+    /// observer — which is precisely the notification an I/O
+    /// reconfiguration posts. Re-asserting an unchanged device would
+    /// make that a cycle whose termination depends on whether the HAL
+    /// happens to treat a same-value `AudioUnitSetProperty` as a no-op.
+    /// That is not a bet worth taking on the onboarding screen, so the
+    /// read-back below decides it here instead. It also keeps the pin
+    /// honest across a device that vanishes: the AU falls back to the
+    /// system default, `currentDevice(of:)` then disagrees with the
+    /// pinned id, and the next install re-applies.
     @discardableResult
     nonisolated static func apply(_ device: Device, to engine: AVAudioEngine) -> Bool {
         guard let unit = engine.inputNode.audioUnit else { return false }
+        if currentDevice(of: engine) == device.id { return true }
         var id = device.id
         let status = AudioUnitSetProperty(
             unit,
@@ -403,6 +418,31 @@ final class AudioDeviceManager {
             return false
         }
         return true
+    }
+
+    /// The device `engine.inputNode` is currently reading from, or
+    /// `nil` when the audio unit won't answer (no unit yet, or the HAL
+    /// refuses). Only `apply(_:to:)` consults it — it exists to make
+    /// that call idempotent, not as a general accessor.
+    ///
+    /// `nil` is deliberately *not* treated as "same": an unanswerable
+    /// read must fall through to the set, because the alternative is
+    /// silently skipping the pin and shipping exactly the bug this
+    /// change fixes.
+    nonisolated static func currentDevice(of engine: AVAudioEngine) -> AudioDeviceID? {
+        guard let unit = engine.inputNode.audioUnit else { return nil }
+        var id = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioUnitGetProperty(
+            unit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &id,
+            &size
+        )
+        guard status == noErr, id != 0 else { return nil }
+        return id
     }
 
     // MARK: - HAL stream format

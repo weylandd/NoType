@@ -21,9 +21,11 @@ Early beta. The core push-to-talk → transcribe → paste loop works end-to-end
 - **Setting up can be impossible.** The onboarding wizard is driven by ordinary buttons, so if the crash hits you, you may not be able to finish setup at all.
 - **If you're already set up, dictation still works.** Push-to-talk doesn't go through the code path that crashes — hold the hotkey, talk, release, and the transcript still pastes. Only clicking inside NoType's own windows is affected.
 
-**This is our bug, not macOS's.** An earlier version of this note blamed the macOS build and suggested updating macOS. That was wrong: NoType raises an internal error that macOS quietly absorbs, which leaves the app in a broken state until it falls over a moment later at some unrelated click. We've now reproduced that mechanism and know what to look for. Updating macOS is not expected to fix it, and we don't have a workaround to offer yet — we'd rather say that than send you chasing one. A fix is in progress; we won't put a date on it.
+**This is our bug, not macOS's.** An earlier version of this note blamed the macOS build and suggested updating macOS. That was wrong: NoType raises an internal error that macOS quietly absorbs, which leaves the app in a broken state until it falls over a moment later at some unrelated click. We've now reproduced that mechanism and know what to look for. Updating macOS is not expected to fix it, and we don't have a workaround to offer yet — we'd rather say that than send you chasing one.
 
-**If it's hitting you, one thing genuinely helps.** Run this in Terminal, reproduce the crash, and attach the new crash report to [issue #82](https://github.com/weylandd/NoType/issues/82) along with your macOS build:
+**Where this stands, precisely.** We closed the internal errors we could find, and added a watcher that names one if it still fires. **Those fixes are known not to have closed it:** the last report we have is from 30 July, and it came from a build that already carried both of them. Nothing has arrived since — but that is *absence of reports*, not proof it is gone, and NoType has no telemetry, so those are the same thing from where we sit until someone tells us. The tracking issue ([#82](https://github.com/weylandd/NoType/issues/82)) is closed on that basis — nothing left to act on without new evidence — and will be reopened the moment a report arrives. If this is happening to you on a current build, please say so; you are the only signal there is.
+
+**If it's hitting you, one thing genuinely helps.** Run this in Terminal, reproduce the crash, and attach the new crash report to a new issue (or a comment on [#82](https://github.com/weylandd/NoType/issues/82) — it is closed, not locked) along with your macOS build and the version from NoType's About screen:
 
 ```bash
 defaults write app.notype NSApplicationCrashOnExceptions -bool YES
@@ -41,7 +43,7 @@ The relaunch matters: the "watcher is running" line is written once, at startup,
 
 You should see one `EXC BREADCRUMB armed` line — that just confirms the watcher is running. Any `OBJC THROW` line after it is the thing we're hunting; it names the error and where it came from. **Both outcomes are useful to us**, including "armed line only, nothing else" — that result is what tells us we're looking in the wrong place, and it's just as hard to get without you. If you get *nothing at all*, not even the armed line, that's worth telling us too — either NoType was started longer ago than the window (relaunch and re-run) or the watcher failed to start, and the second one we'd very much like to know about.
 
-Please read the output before you post it. It's filtered for anything that looks like a key or a password, but it is written by macOS, not by us, so we can't promise it never contains something you'd rather not publish — and [issue #82](https://github.com/weylandd/NoType/issues/82) is a public, search-indexed page. If a line looks personal, email it to **kopachevmail@gmail.com** instead and just say on the issue that you've sent one.
+Please read the output before you post it. It's filtered for anything that looks like a key or a password, but it is written by macOS, not by us, so we can't promise it never contains something you'd rather not publish — and GitHub issues are public, search-indexed pages. If a line looks personal, email it to **kopachevmail@gmail.com** instead and just say on the issue that you've sent one.
 
 ---
 

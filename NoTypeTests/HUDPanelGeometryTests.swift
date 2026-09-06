@@ -642,8 +642,8 @@ final class HUDPanelGeometryTests: XCTestCase {
         XCTAssertEqual(
             unguarded.map(\.description), [],
             """
-            \(RaiseSiteScanner.micProbePath): an AVAudioEngine tap mutation is written outside \
-            its chokepoint.
+            \(RaiseSiteScanner.micProbePath): an AVAudioEngine tap mutation, or the input-device \
+            pin that must precede one, is written outside its chokepoint.
 
             `installTap` belongs in `installTapAndStart()` (behind MicProbeFormatGate) and \
             `removeTap` in `removeTapIfInstalled()` (behind the lock-guarded `tapInstalled` \
@@ -651,6 +651,12 @@ final class HUDPanelGeometryTests: XCTestCase {
             reachable from `Task { @MainActor }` bodies. The historical shape of this bug is a \
             bare `removeTap` in the `engine.start()` catch arm, safe only by local reasoning \
             about the two lines above it.
+
+            `AudioDeviceManager.apply` belongs in `installTapAndStart()` for a different \
+            reason — not a raise, a silent wrong answer. It used to sit in `start()`, so \
+            `rebuild()` (the picker, and the configuration-change retry) re-armed capture \
+            against whatever device the engine already had: the meter kept moving and the \
+            user watched the microphone they had just switched away from. See issue #86.
             """
         )
     }
@@ -760,7 +766,202 @@ final class HUDPanelGeometryTests: XCTestCase {
         )
     }
 
+    /// The third half of the pin's guard, and the one two independent review
+    /// passes said the other two could not express: `AudioDeviceManager.apply`
+    /// must come **before** `installTap` inside `installTapAndStart`.
+    ///
+    /// Placement alone is not the property here. A pin issued after the tap is
+    /// installed pins nothing the tap will use, so a reorder that never leaves
+    /// the chokepoint restores issue #86 verbatim — and it passes both the
+    /// absence scan (still in the right function) and the presence complement
+    /// (still occurs, chokepoint still validates). Proved red by moving the pin
+    /// below `installTap` in `MicProbe.swift`.
+    func test_raiseSiteGuard_micProbe_theDevicePinStillPrecedesTheTapInstall() throws {
+        let source = try Self.appSource(RaiseSiteScanner.micProbePath)
+        XCTAssertEqual(
+            RaiseSiteScanner.orderFailures(
+                inSource: source, rules: RaiseSiteScanner.micProbeRules
+            ).map(\.description),
+            [],
+            """
+            \(RaiseSiteScanner.micProbePath): the input-device pin no longer precedes the tap \
+            install inside `installTapAndStart`.
+
+            `AudioDeviceManager.apply` must run before `input.installTap(...)`. Pinning after the \
+            tap is installed pins a device the tap will never read, which is issue #86 with the \
+            call still sitting in the right function — the exact case the placement and presence \
+            halves of this guard cannot see.
+            """
+        )
+    }
+
+    /// The three properties of `MicProbe`'s arm/re-arm path that no unit test
+    /// can reach, and that each cost a shipped defect to learn.
+    ///
+    /// `rebuild()`, `armCapture` and `installTapAndStart` are private on a
+    /// class that owns a live `AVAudioEngine`, so none of this is drivable.
+    /// What can be checked is that the wiring is still *written*:
+    ///
+    /// 1. **Nothing arms on the main actor.** `engine.start()` blocks — 31 ms
+    ///    for the built-in microphone, 4523 ms for an iPhone over Continuity —
+    ///    so an arm on the main actor freezes the window for the whole
+    ///    handshake, which users report as a failed connection. Every arm goes
+    ///    through `armCapture`, and `armCapture` hands the work to
+    ///    `engineQueue`.
+    /// 2. **`rebuild()` refuses to run after `stop()`.** It is woken from three
+    ///    background jobs; one enqueued as the user leaves re-opens the
+    ///    microphone on a screen nobody is looking at.
+    /// 3. **A declined install schedules its own bounded retry.** The
+    ///    configuration-change observer cannot recover that path — the engine
+    ///    is already stopped by then and a stopped engine posts no
+    ///    configuration change.
+    ///
+    /// Same documented limits as every other source scan here: it proves the
+    /// statements are present, not that they are reached, and a rename fails it
+    /// loudly rather than silently. Note property 1 is checked as "every call
+    /// site is inside `armCapture`" rather than through a `RaiseSiteScanner`
+    /// rule, because the needle would also match the method's own declaration,
+    /// which sits at type scope and would read as an unguarded call.
+    func test_micProbe_everyArmIsOffTheMainActorGuardedAndRecoverable() throws {
+        let source = try Self.appSource(RaiseSiteScanner.micProbePath)
+        let code = LaunchPathScanner.strippingCommentsAndStrings(source)
+        let bodies = LaunchPathScanner.functionBodies(in: code)
+
+        func body(_ name: String) throws -> String {
+            try XCTUnwrap(
+                bodies.first { $0.name == name }?.body,
+                "MicProbe no longer declares `\(name)` — the scan lost its subject."
+            )
+        }
+
+        // 1. Every arm is dispatched, and both entry points go through it.
+        let arm = try body("armCapture")
+        XCTAssertTrue(
+            LaunchPathScanner.line(arm, contains: "engineQueue.async"),
+            """
+            `armCapture` no longer hands the work to `engineQueue`. `engine.start()` blocks for \
+            seconds on a Continuity device, so arming on the main actor freezes the window for \
+            the whole handshake.
+            """
+        )
+        XCTAssertTrue(
+            LaunchPathScanner.line(arm, contains: "installTapAndStart ("),
+            "`armCapture` no longer installs the tap — the dispatch wrapper is now a no-op."
+        )
+        for caller in ["start", "rebuild"] {
+            XCTAssertTrue(
+                LaunchPathScanner.line(try body(caller), contains: "armCapture ("),
+                """
+                `\(caller)()` no longer arms through `armCapture`, so it is arming on the main \
+                actor again — the blocking-start freeze is back on that path.
+                """
+            )
+        }
+
+        // 2. The stopped-latch.
+        XCTAssertTrue(
+            LaunchPathScanner.line(try body("rebuild"), contains: "guard !isStopped"),
+            """
+            `rebuild()` no longer refuses to run after `stop()`. It is reached from three \
+            background jobs, and one enqueued before the user left the mic-check step re-opens \
+            the microphone on a screen nobody is looking at.
+            """
+        )
+
+        // 3. The decline recovery, and its bound.
+        XCTAssertTrue(
+            LaunchPathScanner.line(arm, contains: "scheduleDeclineRetry ("),
+            """
+            A declined install no longer schedules a retry. It throws before `engine.start()`, \
+            leaving the engine `armCapture` already stopped — and a stopped engine posts no \
+            configuration change, so nothing else re-arms the meter until the user picks a \
+            device again.
+            """
+        )
+        let retry = try body("scheduleDeclineRetry")
+        XCTAssertTrue(
+            LaunchPathScanner.line(retry, contains: "declineRetriesUsed <"),
+            "The retry ladder lost its bound — an unbounded re-attempt loop is a retry storm."
+        )
+        XCTAssertTrue(
+            LaunchPathScanner.line(retry, contains: "inputFormatNotInstallable"),
+            """
+            The retry is no longer restricted to a declined install. An engine-start or \
+            converter failure does not fix itself by waiting, and retrying one spins.
+            """
+        )
+    }
+
     // MARK: - Raise-site guard: fixtures pinning the scanner itself
+
+    /// The order check must stay silent on the rules that carry no
+    /// `mustPrecede` — otherwise every geometry and tap rule would start
+    /// reporting an ordering opinion it was never given.
+    func test_scanner_orderCheckIsSilentForRulesWithoutAnOrderTerm() {
+        XCTAssertEqual(
+            RaiseSiteScanner.orderFailures(inSource: Self.guardedFixture, rules: Self.fixtureRules),
+            []
+        )
+    }
+
+    func test_scanner_orderFlagsAMutatorThatSlippedBelowItsSuccessor() {
+        let source = """
+        final class Fixture {
+            private func installTapAndStart() {
+                let input = engine.inputNode
+                input.installTap(onBus: 0) { _ in }
+                AudioDeviceManager.apply(device, to: engine)
+            }
+            func caller() { installTapAndStart() }
+        }
+        """
+        let rules = [
+            RaiseSiteScanner.Rule(
+                mutator: "AudioDeviceManager.apply (",
+                chokepoint: "installTapAndStart",
+                mustValidate: [],
+                mustPrecede: "installTap ("
+            )
+        ]
+        // The placement halves are both satisfied by this fixture — that is the
+        // point of it. Only the order half sees the defect.
+        XCTAssertEqual(RaiseSiteScanner.unguardedCalls(inSource: source, rules: rules), [])
+        XCTAssertEqual(RaiseSiteScanner.presenceFailures(inSource: source, rules: rules), [])
+
+        let out = RaiseSiteScanner.orderFailures(inSource: source, rules: rules)
+        XCTAssertEqual(out.count, 1, "Expected the reordered pin to be flagged. Got: \(out)")
+        XCTAssertEqual(out.first?.kind, .mutatorOutOfOrder)
+        XCTAssertEqual(out.first?.scope, "installTapAndStart")
+    }
+
+    /// A deleted pin is `presenceFailures`' finding, not this one's. Reporting
+    /// it here as well would make a removed call read as a reordered one and
+    /// send the next reader looking for a statement that is not there.
+    func test_scanner_orderIsSilentWhenTheMutatorIsAbsentEntirely() {
+        let source = """
+        final class Fixture {
+            private func installTapAndStart() {
+                let input = engine.inputNode
+                input.installTap(onBus: 0) { _ in }
+            }
+            func caller() { installTapAndStart() }
+        }
+        """
+        let rules = [
+            RaiseSiteScanner.Rule(
+                mutator: "AudioDeviceManager.apply (",
+                chokepoint: "installTapAndStart",
+                mustValidate: [],
+                mustPrecede: "installTap ("
+            )
+        ]
+        XCTAssertEqual(RaiseSiteScanner.orderFailures(inSource: source, rules: rules), [])
+        XCTAssertEqual(
+            RaiseSiteScanner.presenceFailures(inSource: source, rules: rules).map(\.kind),
+            [.mutatorVanished],
+            "The deletion must still be caught — by the presence half."
+        )
+    }
 
     func test_scanner_acceptsAMutationInsideAValidatingChokepoint() {
         XCTAssertEqual(RaiseSiteScanner.unguardedCalls(inSource: Self.guardedFixture, rules: Self.fixtureRules), [])
@@ -1227,11 +1428,22 @@ final class HUDPanelGeometryTests: XCTestCase {
 /// because "a test pins this" — strictly worse than no scan. So the scan covers
 /// only the sites where a *named chokepoint* makes the set genuinely closed:
 ///
-/// | File | Mutator | Chokepoint |
-/// |---|---|---|
-/// | `NoType/UI/HUDPanel.swift` | `setContentSize` / `setFrameOrigin` / `setFrame` / `setFrameTopLeftPoint` / `setFrameSize` | `applyValidated` |
-/// | `NoType/Onboarding/MicProbe.swift` | `installTap` | `installTapAndStart` |
-/// | `NoType/Onboarding/MicProbe.swift` | `removeTap` | `removeTapIfInstalled` |
+/// | File | Mutator | Chokepoint | Also pinned |
+/// |---|---|---|---|
+/// | `NoType/UI/HUDPanel.swift` | `setContentSize` / `setFrameOrigin` / `setFrame` / `setFrameTopLeftPoint` / `setFrameSize` | `applyValidated` | — |
+/// | `NoType/Onboarding/MicProbe.swift` | `installTap` | `installTapAndStart` | — |
+/// | `NoType/Onboarding/MicProbe.swift` | `removeTap` | `removeTapIfInstalled` | — |
+/// | `NoType/Onboarding/MicProbe.swift` | `AudioDeviceManager.apply` | `installTapAndStart` | **order** — must precede `installTap` |
+///
+/// The last row is the odd one and worth reading as such: it guards a
+/// *correctness* property rather than a raise. Nothing about pinning the input
+/// device can throw an Objective-C exception — what it can do is silently pin
+/// the wrong thing, which is issue #86. It lives here because the shape is
+/// identical (one named chokepoint owns a call that must not appear anywhere
+/// else) and splitting it into a second scanner would have meant two
+/// half-maintained copies of these primitives. It is also the only rule whose
+/// `mustPrecede` term fires, because it is the only one where *order* is the
+/// semantics rather than placement.
 ///
 /// `FixedSizeWindowConfigurator.lock` is **not** here on purpose: its
 /// precondition ("AppKit is not currently reconfiguring this window") has no
@@ -1295,12 +1507,39 @@ enum RaiseSiteScanner {
         /// `false` for a mutator that is legitimately absent today and is
         /// listed only so that *adding* one outside the chokepoint fails.
         let mustOccur: Bool
+        /// A needle this rule's mutator must appear **before**, inside the
+        /// chokepoint body. `nil` for every rule whose correctness is about
+        /// *placement* alone.
+        ///
+        /// **Why this exists, and why it is not the general case.** For the
+        /// geometry and tap rules, presence inside the wrapper *is* the
+        /// property: a validated `setFrameOrigin` is safe wherever in
+        /// `applyValidated` it sits. The device pin is the first rule where
+        /// **order is the semantics** — pinning the input device after the tap
+        /// is installed pins nothing the tap will use, which is issue #86
+        /// restored with every other assertion green. Reviewers found that hole
+        /// independently three times; it is the shape
+        /// `source-scan-guard-fidelity-2026-07-25.md` calls "a sweep whose
+        /// range cannot express the mutation".
+        ///
+        /// Note what it still does not cover: it compares the *first* hit of
+        /// each needle, so a second, later `apply` call inside the same body
+        /// passes. That is the same first-match limit already documented on the
+        /// ordering assertion in `NoType/UI/CLAUDE.md`.
+        let mustPrecede: String?
 
-        init(mutator: String, chokepoint: String, mustValidate: [String], mustOccur: Bool = true) {
+        init(
+            mutator: String,
+            chokepoint: String,
+            mustValidate: [String],
+            mustOccur: Bool = true,
+            mustPrecede: String? = nil
+        ) {
             self.mutator = mutator
             self.chokepoint = chokepoint
             self.mustValidate = mustValidate
             self.mustOccur = mustOccur
+            self.mustPrecede = mustPrecede
         }
     }
 
@@ -1316,6 +1555,9 @@ enum RaiseSiteScanner {
             case chokepointNeverCalled
             /// The chokepoint is declared and called, but has lost its check.
             case chokepointNotValidating
+            /// The mutator sits inside its chokepoint but after the needle it
+            /// must precede — placement satisfied, order lost.
+            case mutatorOutOfOrder
         }
 
         let kind: Kind
@@ -1378,8 +1620,34 @@ enum RaiseSiteScanner {
             chokepoint: "installTapAndStart",
             mustValidate: [
                 "MicProbeFormatGate.positivityRejection (",
-                "MicProbeFormatGate.rejection ("
+                "MicProbeFormatGate.rejection (",
+                // Issue #86. Not a raise check — a *correctness* check, and
+                // it is here rather than in a rule of its own because what
+                // has to hold is per-body: the body that installs the tap is
+                // the body that must have pinned the device. `start()` and
+                // `rebuild()` each owning half of "set up capture" is what
+                // let the pin fall off the picker's path, so the picker
+                // restarted the engine on the previous microphone while the
+                // meter kept moving.
+                "AudioDeviceManager.apply ("
             ]
+        ),
+        // The other two thirds of the pin's guard. The rule above proves a pin
+        // is *in* the chokepoint; this one proves there isn't a second one
+        // outside it (re-adding the `start()`-local pin fails here — the drift
+        // itself, not merely a duplicate), and `mustPrecede` proves it still
+        // comes first.
+        //
+        // The ordering term is not decoration: three reviewers independently
+        // found that without it, moving this call below `installTap` restores
+        // issue #86 with every other assertion green — placement satisfied,
+        // semantics gone. A pin issued after the tap pins nothing the tap will
+        // use.
+        Rule(
+            mutator: "AudioDeviceManager.apply (",
+            chokepoint: "installTapAndStart",
+            mustValidate: [],
+            mustPrecede: "installTap ("
         ),
         Rule(
             mutator: "removeTap (",
@@ -1485,6 +1753,45 @@ enum RaiseSiteScanner {
                         detail: "a `\(rule.chokepoint)` body performs `\(label)` without `\(needle.trimmingCharacters(in: .whitespaces))` — that wrapper is a passthrough"
                     ))
                 }
+            }
+        }
+        return findings
+    }
+
+    // MARK: The order half
+
+    /// Every rule carrying `mustPrecede` whose mutator does **not** come first
+    /// inside its chokepoint body.
+    ///
+    /// The third half of the guard, and the one the other two cannot express:
+    /// `unguardedCalls` asks *which function* a call sits in and
+    /// `presenceFailures` asks *whether a needle occurs* in that body. Both are
+    /// satisfied by a body whose statements have been reordered, which for the
+    /// device pin is the whole defect.
+    ///
+    /// Silent when the chokepoint is missing or either needle is absent — those
+    /// are already `presenceFailures`' findings, and reporting them twice would
+    /// make a deleted pin look like an ordering problem.
+    static func orderFailures(inSource source: String, rules: [Rule]) -> [Finding] {
+        let code = LaunchPathScanner.strippingCommentsAndStrings(source)
+        let functions = LaunchPathScanner.functionBodies(in: code)
+        var findings: [Finding] = []
+
+        for rule in rules {
+            guard let successor = rule.mustPrecede else { continue }
+            let label = rule.mutator.trimmingCharacters(in: .whitespaces)
+
+            for body in functions where body.name == rule.chokepoint {
+                guard let first = hits(of: rule.mutator, in: body.body).first,
+                      let after = hits(of: successor, in: body.body).first
+                else { continue }
+                guard first.index > after.index else { continue }
+                findings.append(Finding(
+                    kind: .mutatorOutOfOrder,
+                    mutator: label,
+                    scope: rule.chokepoint,
+                    detail: "`\(label)` must precede `\(successor.trimmingCharacters(in: .whitespaces))` inside `\(rule.chokepoint)`, and does not"
+                ))
             }
         }
         return findings
